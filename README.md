@@ -138,7 +138,7 @@ source ~/.bashrc
 - [ ] **Fan Monitoring** — Read GB10 chassis fan speeds without `sudo` (currently blocked by `nvsm`/IPMI privilege requirements)
 - [ ] **REST API / Prometheus Exporter** — Expose a lightweight JSON HTTP endpoint for Grafana and Prometheus integration
 - [ ] **CSV Logging Mode** — `--csv` flag to pipe raw metrics to stdout or file for external processing
-- [✅] **PyPI Package** — `pip install spark-smi` one-liner install
+- [X] **PyPI Package** — `pip install spark-smi` one-liner install
 - [ ] **Multi-node Support** — Monitor clustered DGX Spark nodes from a single dashboard
 
 ---
