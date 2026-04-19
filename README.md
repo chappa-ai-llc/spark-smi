@@ -7,6 +7,8 @@
 ![Platform](https://img.shields.io/badge/platform-Linux%20aarch64-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Stars](https://img.shields.io/github/stars/chappa-ai-llc/spark-smi?style=social)
+![PyPI](https://img.shields.io/pypi/v/spark-smi)
+![Downloads](https://img.shields.io/pypi/dm/spark-smi)
 
 ---
 
@@ -60,6 +62,14 @@ The NVIDIA DGX Spark (GB10) is a unique system — a Grace Blackwell chip with u
 - `nvidia-smi` in PATH
 
 ---
+
+## Quick Install
+
+```bash
+pip install spark-smi
+spark-smi        # snapshot
+spark-smi -l     # live mode
+```
 
 ## Installation
 
@@ -128,7 +138,7 @@ source ~/.bashrc
 - [ ] **Fan Monitoring** — Read GB10 chassis fan speeds without `sudo` (currently blocked by `nvsm`/IPMI privilege requirements)
 - [ ] **REST API / Prometheus Exporter** — Expose a lightweight JSON HTTP endpoint for Grafana and Prometheus integration
 - [ ] **CSV Logging Mode** — `--csv` flag to pipe raw metrics to stdout or file for external processing
-- [ ] **PyPI Package** — `pip install spark-smi` one-liner install
+- [✅] **PyPI Package** — `pip install spark-smi` one-liner install
 - [ ] **Multi-node Support** — Monitor clustered DGX Spark nodes from a single dashboard
 
 ---
