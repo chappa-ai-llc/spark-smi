@@ -37,13 +37,13 @@ Bar rendering (`make_bar`) has three auto-detected tiers, chosen once at import 
 
 GPU data (`get_gpu_data`) tries NVML (`pynvml`) first, then falls back per-field to `nvidia-smi --query-gpu` CSV, then degrades to "N/A" — never crash on missing sensors. The `HAS_NVML` flag is set at import. Driver/CUDA info is cached after first fetch (`_CACHED_DRIVER_INFO`) to avoid shelling out every tick.
 
-**GB10 special-casing**: if the GPU name contains "GB10" (or memory reads as N/A/0), GPU memory is replaced with system RAM (`psutil.virtual_memory()`) because of unified memory, "(Unified)" is appended to the name, and fan is forced to "None".
+**Unified-memory special-casing**: if `_is_unified_soc()` matches the GPU name (`GB\d+` — GB10 today, future Grace-Blackwell SoCs) or memory reads as N/A/0, GPU memory is replaced with system RAM (`psutil.virtual_memory()`), "(Unified)" is appended to the name, and fan is forced to "None".
 
-### Hardcoded hardware assumptions
+### Hardware detection (all topology is discovered at import, once)
 
-The layout assumes the DGX Spark topology; be careful when generalizing:
-- Exactly 20 CPU cores: 0–9 = Cortex-X925 (Performance), 10–19 = Cortex-A725 (Efficiency), sliced as `cpu[0:10]` / `cpu[10:20]` in `render_dashboard`.
-- NIC interface names are hardcoded in `NetMonitor.mapping` (indices 0–3 = MT2910, 4 = Realtek); link speed is read live from sysfs.
+- **CPU clusters** (`detect_cpu_clusters` → module-level `CPU_CLUSTERS`): cores are grouped by type — ARM MIDR (implementer, part) from sysfs, translated to marketing names via `ARM_PART_NAMES`; Intel hybrid via `/sys/devices/cpu_core|cpu_atom` masks; anything else is one "CPU Cores" cluster. Do NOT add `cpu_capacity` or max-frequency to the grouping signature: both vary per-core *within* a cluster (capacity calibration, favored-core boost) and fragment it — they're only used to rank clusters for P/E-style fallback labels. Cores of one type can be non-contiguous (the real DGX Spark is interleaved: A725 on 0–4 & 10–14, X925 on 5–9 & 15–19 — the per-core grid shows absolute core IDs for this reason).
+- **Per-core grid**: column count adapts to thread count (4/6/8) and terminal width; the cluster separator sections only appear when 2+ core types exist.
+- **NICs** (`NetMonitor._detect_interfaces`): physical interfaces enumerated from `/sys/class/net` (entries with a `device` symlink), psutil fallback elsewhere; labels come from the kernel driver name via `NIC_DRIVER_NAMES` (keep values ≤7 chars so labels fit the 12-char cell) plus negotiated speed; carrier state drives "Link Down". The `n` key in live mode filters to connected NICs (`SHOW_ACTIVE_NICS_ONLY`); rows wrap when NICs exceed one row's width.
 - `MAX_WIDTH = 110` caps the dashboard width; content is centered in wider terminals.
 
 ### Other conventions
