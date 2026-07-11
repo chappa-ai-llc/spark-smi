@@ -25,7 +25,35 @@ MAX_WIDTH = 110
 
 # Toggles
 USE_FAHRENHEIT = False
-USE_DECIMAL_UNITS = False 
+USE_DECIMAL_UNITS = False
+
+# --- Terminal Capability Detection ---
+# Three bar-rendering tiers:
+#   "eighths" - sub-cell resolution via U+2588..U+258F (8 steps per cell)
+#   "blocks"  - whole-cell blocks only; the Linux framebuffer console font
+#               (CP437 heritage) has "█" and "░" but NOT the eighth-blocks
+#   "ascii"   - legacy [|||   ] style for non-UTF-8 locales or --ascii
+def _detect_bar_style():
+    if "--ascii" in sys.argv or os.environ.get("SPARK_SMI_ASCII"):
+        return "ascii"
+    enc = (getattr(sys.stdout, "encoding", "") or "").lower()
+    if "utf" not in enc:
+        return "ascii"
+    if os.environ.get("TERM", "") == "linux":
+        return "blocks"
+    return "eighths"
+
+BAR_STYLE = _detect_bar_style()
+
+def _detect_256color():
+    term = os.environ.get("TERM", "")
+    return "256color" in term or os.environ.get("COLORTERM") in ("truecolor", "24bit")
+
+HAS_256COLOR = _detect_256color()
+
+# Logical color slots (1=good, 2=accent, 3=text, 4=bad, 5=warn) mapped to
+# xterm-256 indices when available, else the basic 8-color equivalents.
+PALETTE_256 = {1: 42, 2: 45, 3: 252, 4: 196, 5: 214}
 
 class NetMonitor:
     def __init__(self):
@@ -88,7 +116,11 @@ class VirtualCurses:
     def __init__(self):
         self.update_dims()
         self.grid = [[(" ", None) for _ in range(self.cols)] for _ in range(self.rows)]
-        self.colors = {1: "\033[32m", 2: "\033[36m", 3: "\033[37m", 4: "\033[31m", 5: "\033[33m", 0: "\033[0m"}
+        if HAS_256COLOR:
+            self.colors = {k: f"\033[38;5;{v}m" for k, v in PALETTE_256.items()}
+            self.colors[0] = "\033[0m"
+        else:
+            self.colors = {1: "\033[32m", 2: "\033[36m", 3: "\033[37m", 4: "\033[31m", 5: "\033[33m", 0: "\033[0m"}
     def update_dims(self):
         try: self.cols, self.rows = shutil.get_terminal_size()
         except: self.cols, self.rows = 120, 50
@@ -130,14 +162,27 @@ def fmt_mem(bytes_val):
         return f"{int(bytes_val/(div**2))}{s_m}"
     except: return "N/A"
 
+# Partial-cell fill characters, 1/8th to 7/8ths (U+258F down to U+2589)
+_EIGHTHS = ["▏", "▎", "▍", "▌", "▋", "▊", "▉"]
+
 def make_bar(percent, width, color_good, color_mid, color_bad):
     if width < 3: return "[]", None
-    pct = max(0, min(int(percent), 100))
-    inner_w = width - 2
-    filled = int((pct / 100.0) * inner_w)
-    bar_str = "[" + "|" * filled + " " * (inner_w - filled) + "]"
+    pct = max(0.0, min(float(percent), 100.0))
     c = color_good if pct < 50 else (color_mid if pct < 80 else color_bad)
-    return bar_str, c
+    if BAR_STYLE == "ascii":
+        inner_w = width - 2
+        filled = int((pct / 100.0) * inner_w)
+        return "[" + "|" * filled + " " * (inner_w - filled) + "]", c
+    if BAR_STYLE == "blocks":
+        filled = int(round((pct / 100.0) * width))
+        return "█" * filled + "░" * (width - filled), c
+    # "eighths": 8 resolution steps per character cell
+    total_eighths = int(round((pct / 100.0) * width * 8))
+    full, rem = divmod(total_eighths, 8)
+    bar_str = "█" * full
+    if rem and full < width:
+        bar_str += _EIGHTHS[rem - 1]
+    return bar_str + "░" * (width - len(bar_str)), c
 
 def get_cpu_temp():
     try:
@@ -404,7 +449,11 @@ def main_loop(stdscr):
     import curses
     curses.start_color(); curses.use_default_colors(); curses.curs_set(0); stdscr.nodelay(True)
     colors = {i: curses.color_pair(i) for i in range(1, 6)}
-    for i, cl in enumerate([curses.COLOR_GREEN, curses.COLOR_CYAN, curses.COLOR_WHITE, curses.COLOR_RED, curses.COLOR_YELLOW], 1):
+    if curses.COLORS >= 256:
+        palette = [PALETTE_256[i] for i in range(1, 6)]
+    else:
+        palette = [curses.COLOR_GREEN, curses.COLOR_CYAN, curses.COLOR_WHITE, curses.COLOR_RED, curses.COLOR_YELLOW]
+    for i, cl in enumerate(palette, 1):
         curses.init_pair(i, cl, -1)
     
     while True:
@@ -426,6 +475,11 @@ def main_loop(stdscr):
 if __name__ == "__main__":
     if "-l" in sys.argv or "--loop" in sys.argv:
         import curses
+        # curses needs the locale set to emit multi-byte UTF-8 block chars
+        try:
+            import locale
+            locale.setlocale(locale.LC_ALL, "")
+        except Exception: pass
         try: curses.wrapper(main_loop)
         except KeyboardInterrupt: pass
     else:
