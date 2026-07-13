@@ -165,10 +165,16 @@ NIC_DRIVER_NAMES = {
 
 class NetMonitor:
     def __init__(self):
-        try: self.prev_stats = psutil.net_io_counters(pernic=True)
-        except: self.prev_stats = {}
-        self.prev_time = time.time()
         self.interfaces = self._detect_interfaces()
+        self.rdma_counters = self._map_rdma_counters()
+        self.groups = self._group_physical()
+        try: netdev_stats = psutil.net_io_counters(pernic=True)
+        except: netdev_stats = {}
+        self.prev_bytes = {}
+        for name in self.interfaces:
+            b = self._read_byte_counters(name, netdev_stats)
+            if b is not None: self.prev_bytes[name] = b
+        self.prev_time = time.time()
 
     def _detect_interfaces(self):
         """Physical NICs only: on Linux, anything in /sys/class/net with a
@@ -184,6 +190,98 @@ class NetMonitor:
                     if not n.lower().startswith(("lo", "veth", "docker", "br-", "virbr", "tun", "tap"))]
         except:
             return []
+
+    def _map_rdma_counters(self):
+        """RDMA/RoCE traffic (NCCL, GPUDirect) bypasses the kernel network
+        stack, so netdev byte counters never see it. The HCA's per-port
+        counters under /sys/class/infiniband do count it. Map each netdev
+        to those counter files via the shared PCI device's net/ dir."""
+        mapping = {}
+        ib_root = "/sys/class/infiniband"
+        try: ib_devs = os.listdir(ib_root)
+        except OSError: return mapping
+        for ib in ib_devs:
+            try:
+                netdevs = os.listdir(os.path.join(ib_root, ib, "device", "net"))
+                ports = sorted(os.listdir(os.path.join(ib_root, ib, "ports")))
+            except OSError:
+                continue
+            for iface in netdevs:
+                port = ports[0] if len(ports) == 1 else self._ib_port_for(iface, ports)
+                cdir = os.path.join(ib_root, ib, "ports", port, "counters")
+                paths = (os.path.join(cdir, "port_rcv_data"),
+                         os.path.join(cdir, "port_xmit_data"))
+                if all(os.path.exists(p) for p in paths):
+                    mapping[iface] = paths
+        return mapping
+
+    def _ib_port_for(self, iface, ports):
+        # Dual-port HCAs behind one PCI function: netdev dev_port N is IB port N+1
+        try:
+            with open(f"/sys/class/net/{iface}/dev_port") as f:
+                cand = str(int(f.read().strip()) + 1)
+            return cand if cand in ports else ports[0]
+        except (OSError, ValueError):
+            return ports[0]
+
+    def _read_byte_counters(self, iface, netdev_stats):
+        """Total (rx, tx) bytes for one netdev. Prefers the RDMA port
+        counters — which are in 4-byte-word units per the InfiniBand spec —
+        falling back to kernel netdev counters (blind to RDMA)."""
+        paths = self.rdma_counters.get(iface)
+        if paths:
+            try:
+                with open(paths[0]) as f: rx = int(f.read()) * 4
+                with open(paths[1]) as f: tx = int(f.read()) * 4
+                return (rx, tx)
+            except (OSError, ValueError):
+                pass
+        s = netdev_stats.get(iface)
+        return (s.bytes_recv, s.bytes_sent) if s else None
+
+    def _phys_port_key(self, iface):
+        """(switch_id, port_name) identity of the physical port behind a
+        netdev. On multi-host/socket-direct cards (DGX Spark's CX-7: two
+        PCIe x4 links, each exposing one PF per QSFP port) several PFs
+        share one physical port and sysfs exposes that here. Reading these
+        raises EOPNOTSUPP on ordinary NICs -> None."""
+        try:
+            with open(f"/sys/class/net/{iface}/phys_switch_id") as f:
+                sw = f.read().strip()
+            with open(f"/sys/class/net/{iface}/phys_port_name") as f:
+                pn = f.read().strip()
+            if sw and pn: return (sw, pn)
+        except OSError:
+            pass
+        return None
+
+    def _pci_slot(self, iface):
+        """Fallback group key: PCI address minus the function digit, so both
+        ports of a dual-port card (....:01:00.0/.1) share one key. Non-PCI
+        devices (USB dongles etc.) group by themselves."""
+        try:
+            addr = os.path.basename(os.path.realpath(f"/sys/class/net/{iface}/device"))
+            m = re.fullmatch(r"([0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2})\.[0-7]", addr)
+            if m: return m.group(1)
+        except OSError:
+            pass
+        return iface
+
+    def _group_physical(self):
+        """[{"members": [...], "port": "p0"|None}, ...] — one entry per
+        physical NIC port (PFs sharing a phys_switch_id+phys_port_name) or,
+        failing that, per PCI slot. "port" is set only for shared physical
+        ports, where capacity is the port speed rather than the sum."""
+        groups, by_key = [], {}
+        for name in self.interfaces:
+            phys = self._phys_port_key(name)
+            key = ("port",) + phys if phys else ("slot", self._pci_slot(name))
+            if key in by_key:
+                by_key[key]["members"].append(name)
+            else:
+                by_key[key] = {"members": [name], "port": phys[1] if phys else None}
+                groups.append(by_key[key])
+        return groups
 
     def _driver_label(self, iface):
         try:
@@ -211,37 +309,57 @@ class NetMonitor:
             try: return max(psutil.net_if_stats()[iface_name].speed, 0)
             except: return 0
 
+    @staticmethod
+    def _fmt_speed(mbit):
+        return f"{mbit // 1000}G" if mbit >= 1000 else f"{mbit}M"
+
+    def _speed_label(self, speeds):
+        """'200G' for one port, '2x200G' when a physical NIC exposes several
+        same-speed ports/functions, total ('400G') when speeds are mixed."""
+        speeds = [s for s in speeds if s > 0] or speeds
+        if len(speeds) == 1: return self._fmt_speed(speeds[0])
+        if len(set(speeds)) == 1: return f"{len(speeds)}x{self._fmt_speed(speeds[0])}"
+        return self._fmt_speed(sum(speeds))
+
     def poll(self):
         curr_time = time.time()
         dt = max(curr_time - self.prev_time, 0.1)
-        try: curr_stats = psutil.net_io_counters(pernic=True)
-        except: return []
+        try: netdev_stats = psutil.net_io_counters(pernic=True)
+        except: netdev_stats = {}
+
+        bps = {}
+        for name in self.interfaces:
+            b = self._read_byte_counters(name, netdev_stats)
+            if b is None: continue
+            p = self.prev_bytes.get(name, b)
+            delta = (b[0] - p[0]) + (b[1] - p[1])
+            bps[name] = max(delta, 0) * 8 / dt  # negative delta = counter reset
+            self.prev_bytes[name] = b
 
         nics = []
-        for name in self.interfaces:
-            if name not in curr_stats:
+        for g in self.groups:
+            live = [m for m in g["members"] if m in bps]
+            if not live:
                 nics.append({"label": "Offline", "usage": 0, "up": False})
                 continue
-            s, p = curr_stats[name], self.prev_stats.get(name, curr_stats[name])
-            bps = (((s.bytes_recv + s.bytes_sent) - (p.bytes_recv + p.bytes_sent)) * 8) / dt
-
-            up = self._carrier_up(name)
-            speed_mbit = self.get_interface_speed(name)
-            limit_bps = speed_mbit * 1_000_000
-
-            if speed_mbit >= 1000:
-                speed_display = f"{speed_mbit // 1000}G"
+            up = any(self._carrier_up(m) for m in live)
+            # a down port reads speed 0, so it drops out of the capacity sum
+            speeds = [self.get_interface_speed(m) for m in live]
+            # PFs sharing one physical port each report the full port speed:
+            # capacity is the port itself, not the sum across PFs
+            shared_port = g["port"] is not None and len(live) > 1
+            total_mbit = max(speeds) if shared_port else sum(speeds)
+            if not up or total_mbit == 0:
+                nics.append({"label": "Link Down", "usage": 0, "up": False})
+                continue
+            group_bps = sum(bps[m] for m in live)
+            if shared_port:
+                label = f"{self._driver_label(live[0])} {g['port']} {self._fmt_speed(total_mbit)}"
             else:
-                speed_display = f"{speed_mbit}M"
+                label = f"{self._driver_label(live[0])} {self._speed_label(speeds)}"
+            nics.append({"label": label, "usage": (group_bps / (total_mbit * 1_000_000)) * 100, "up": up})
 
-            if not up or speed_mbit == 0:
-                label, up = "Link Down", False
-            else:
-                label = f"{self._driver_label(name)} {speed_display}"
-
-            nics.append({"label": label, "usage": (bps / limit_bps) * 100 if limit_bps > 0 else 0, "up": up})
-
-        self.prev_stats, self.prev_time = curr_stats, curr_time
+        self.prev_time = curr_time
         return nics
 
 monitor = NetMonitor()
