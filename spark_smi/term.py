@@ -188,6 +188,13 @@ def bar_brackets():
     (drawn in slot 6, dim/frame, by the caller)."""
     return ("[", "]") if BAR_STYLE == "ascii" else ("▕", "▏")
 
+def knob_arrows():
+    """Left/right step-arrow glyphs for the Phase 4 interactive power/clock
+    knob widget -- "[< 450 W >]" in ascii tier, "[◂ 450 W ▸]" otherwise
+    (matches mock_page2.rendered.txt; the surrounding [ ] are literal, not
+    bar_brackets(), since this widget is a stepper control, not a bar)."""
+    return ("<", ">") if BAR_STYLE == "ascii" else ("◂", "▸")
+
 def make_bar(percent, width):
     """3-tier bar fill, `width` chars long in every tier so layout math is
     style-independent. Returns (bar_string, slot) -- slot is threshold-colored

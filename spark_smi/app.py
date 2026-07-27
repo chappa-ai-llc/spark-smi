@@ -9,6 +9,7 @@ import time
 from collections import deque
 
 from . import collectors
+from . import knobs
 from . import pages
 from . import panels
 from . import term
@@ -171,9 +172,16 @@ class State:
         }
 
 
-def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_hint=None, page_num=1):
+def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_hint=None, page_num=1,
+                      knob_ui=None):
     """Single UI entry point for both backends. Builds the requested page
-    (1 overview, 2 advanced) and draws it."""
+    (1 overview, 2 advanced) and draws it.
+
+    `knob_ui` (Phase 4) is a knobs.KnobUI instance in live mode's page 2 only
+    -- main() never constructs one for the snapshot path, so passing None
+    there (the default) is what guarantees "snapshot mode never writes and
+    shows no knob UI": the registry below is simply never built, and
+    pages.build_page2 falls back to its Phase-3 read-only rendering."""
     try:
         h, w = stdscr.getmaxyx()
     except Exception:
@@ -194,9 +202,20 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
     if active_nics_only:
         sample["nics"] = [n for n in sample.get("nics", []) if n.get("up")]
 
+    knob_ctx = None
+    if knob_ui is not None and page_num == 2:
+        try:
+            registry = knobs.build_registry(sample)
+        except Exception:
+            registry = []
+        knob_ui.last_registry = registry
+        knob_ui.n_gpus = len(sample.get("gpus") or [])
+        knob_ui.tick()
+        knob_ctx = knob_ui.render_ctx()
+
     try:
         if page_num == 2:
-            built = pages.build_page2(sample, tier, draw_w, x0, height=height_hint or h)
+            built = pages.build_page2(sample, tier, draw_w, x0, height=height_hint or h, knob_ui=knob_ctx)
         else:
             built = pages.build_page1(sample, tier, draw_w, x0, height=height_hint or h)
     except Exception:
@@ -234,11 +253,16 @@ def main_loop(stdscr, state, rate):
         colors[slot] = attr
 
     active_nics_only = False
+    # Phase 4: page 2's interactive power/clock knobs. Constructed here (not
+    # in State, which the snapshot path also uses) so the write-capable UI
+    # only exists at all in live mode -- see render_dashboard's docstring.
+    knob_ui = knobs.KnobUI()
     while True:
         try:
             stdscr.erase()
             h, _ = stdscr.getmaxyx()
-            render_dashboard(stdscr, colors, state, active_nics_only, height_hint=h, page_num=state.page)
+            render_dashboard(stdscr, colors, state, active_nics_only, height_hint=h, page_num=state.page,
+                              knob_ui=knob_ui)
             stdscr.refresh()
         except Exception:
             pass
@@ -270,6 +294,53 @@ def main_loop(stdscr, state, rate):
                 break
             if ch == curses.KEY_RESIZE:
                 stdscr.clear()
+                break
+            # Phase 4 knob controls, page 2 only. Every handler dispatches
+            # into knobs.KnobUI's pure state-transition methods against the
+            # registry render_dashboard cached on knob_ui THIS tick --
+            # nothing here writes hardware directly, and 'y' only reaches
+            # apply_knob() through KnobUI.confirm_yes() after an explicit
+            # confirm prompt. The "confirming" check comes FIRST and
+            # consumes every key while a confirm is armed ('y' applies,
+            # anything else -- including Esc, or wandering into another
+            # knob's key -- cancels), per spec: "y executes, anything else
+            # cancels" must hold for every key, not just the ones below.
+            if state.page == 2 and knob_ui.confirming:
+                if ch != -1:
+                    if ch in (ord('y'), ord('Y')):
+                        knob_ui.confirm_yes(knob_ui.last_registry)
+                    else:
+                        knob_ui.cancel()
+                    break
+            elif state.page == 2 and ch == 9:  # Tab
+                knob_ui.select_next_gpu(knob_ui.n_gpus)
+                break
+            elif state.page == 2 and ch in (ord('P'), ord('p')):
+                knob_ui.focus_power_cycle(knob_ui.last_registry)
+                break
+            elif state.page == 2 and ch in (ord('C'), ord('c')):
+                knob_ui.focus_clock(knob_ui.last_registry, "sm")
+                break
+            elif state.page == 2 and ch in (ord('M'), ord('m')):
+                knob_ui.focus_clock(knob_ui.last_registry, "mem")
+                break
+            elif state.page == 2 and ch in (ord('R'), ord('r')):
+                knob_ui.arm_reset(knob_ui.last_registry)
+                break
+            elif state.page == 2 and ch in (ord('X'), ord('x')):
+                knob_ui.arm_persist(knob_ui.last_registry)
+                break
+            elif state.page == 2 and ch == curses.KEY_LEFT:
+                knob_ui.step(knob_ui.last_registry, -1)
+                break
+            elif state.page == 2 and ch == curses.KEY_RIGHT:
+                knob_ui.step(knob_ui.last_registry, 1)
+                break
+            elif state.page == 2 and ch in (curses.KEY_ENTER, 10, 13):
+                knob_ui.enter(knob_ui.last_registry)
+                break
+            elif state.page == 2 and ch == 27:  # Esc
+                knob_ui.cancel()
                 break
             time.sleep(0.05)
 

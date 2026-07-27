@@ -602,6 +602,12 @@ def _collect_gpus():
                     except Exception:
                         pass
                     try:
+                        # Phase 4's mem-clock-lock knob needs a ceiling to
+                        # clamp against, same as clk_sm_max does for -lgc.
+                        gpu["clk_mem_max"] = pynvml.nvmlDeviceGetMaxClockInfo(handle, pynvml.NVML_CLOCK_MEM)
+                    except Exception:
+                        pass
+                    try:
                         gpu["clk_video"] = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_VIDEO)
                     except Exception:
                         pass
@@ -1591,12 +1597,16 @@ class ThermalCollector:
         return spbm_entries + zones + hwmon_entries
 
     def sample_power(self):
-        """[{"label", "watts", "cap_w", "cap_max_w"}, ...] from the "spbm"
-        hwmon's powerN_label/powerN_input/powerN_cap[_max] channels
-        (microwatts), for the page-2 POWER RAILS display. cap_w/cap_max_w
-        are None when the kernel driver doesn't expose a cap for that rail
-        (most plain measurement rails don't -- only the pl1/pl2/syspl1/
-        syspl2 limit controllers do). Empty list when no spbm hwmon exists."""
+        """[{"label", "watts", "cap_w", "cap_max_w", "cap_path"}, ...] from
+        the "spbm" hwmon's powerN_label/powerN_input/powerN_cap[_max]
+        channels (microwatts), for the page-2 POWER RAILS display. cap_w/
+        cap_max_w/cap_path are None when the kernel driver doesn't expose a
+        cap for that rail (most plain measurement rails don't -- only the
+        pl1/pl2/syspl1/syspl2 limit controllers do). cap_path is the
+        powerN_cap sysfs file itself, kept so Phase 4's knobs.py can write a
+        new limit back to the same file it read the current one from,
+        without re-deriving the hwmon device path. Empty list when no spbm
+        hwmon exists."""
         out = []
         try:
             names = os.listdir("/sys/class/hwmon")
@@ -1616,12 +1626,18 @@ class ThermalCollector:
                 if val is None:
                     continue
                 label = _read_text(f"{hpath}/power{idx}_label") or f"rail{idx}"
-                cap = _read_int(f"{hpath}/power{idx}_cap")
-                cap_max = _read_int(f"{hpath}/power{idx}_cap_max")
+                cap_path = f"{hpath}/power{idx}_cap"
+                cap = _read_int(cap_path)
+                # spbm exposes the settable ceiling as powerN_max (hwmon also
+                # defines powerN_cap_max; accept either -- verified on the
+                # DGX Spark only _max exists: pl1 cap 140 W, max 250 W)
+                cap_max = (_read_int(f"{hpath}/power{idx}_cap_max")
+                           or _read_int(f"{hpath}/power{idx}_max"))
                 out.append({
                     "label": label, "watts": val / 1_000_000.0,
                     "cap_w": cap / 1_000_000.0 if cap is not None else None,
                     "cap_max_w": cap_max / 1_000_000.0 if cap_max is not None else None,
+                    "cap_path": cap_path if cap is not None else None,
                 })
         return out
 

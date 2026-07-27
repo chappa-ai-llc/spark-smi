@@ -221,17 +221,48 @@ def _build_header(x0, width, tier, page=1):
     return p
 
 
-def _build_footer(x0, width, y, driver, cuda, rate, has_nvml):
+def _build_footer(x0, width, y, driver, cuda, rate, has_nvml, extra_keys=None, knob_ui=None):
+    """`extra_keys`/`knob_ui` (Phase 4, page 2 only -- build_page1 never
+    passes them) add the tab/P/C/M/R/X knob hints to the key-bar ladder and,
+    while a knob is armed or a toast is live, replace the whole footer line
+    with the confirm prompt / apply result instead."""
+    if knob_ui and (knob_ui.get("confirming") or knob_ui.get("toast")):
+        if knob_ui.get("confirming"):
+            text, slot = (knob_ui.get("confirm_text") or "apply? y/N"), 5
+        else:
+            text, slot = knob_ui["toast"]
+        p = panels.Panel(y, x0, width, kind="plain")
+        p.rows.append(([(f" {text}", slot)], []))
+        return p
+
     # Ladder of key-bar variants, most to least detailed. Tried together
     # with the driver/CUDA info first; if none fit alongside it, the info
     # is dropped (not the keys) and the shortest keys variant that fits on
     # its own is used -- so the info block degrades consistently by width
     # rather than disappearing at one width and reappearing at another.
-    variants = [
-        " q quit · 1 2 page · t °C/°F · u GiB/GB · n active NICs · s sort · ? help",
-        " q quit · 1 2 page · t °C/°F · u GiB/GB · n NICs",
-        " q quit · 1 2 page · t temp · u units",
-    ]
+    if extra_keys:
+        # Page 2: 'n active NICs'/'s sort' are page-1-only bindings, not
+        # worth the space here -- the knob hints (tab/P/C/M/R/X) take their
+        # place as the thing this footer prioritizes, matching
+        # mock_page2.rendered.txt. t/u still work on page 2 (temp/unit
+        # toggles are global) so they're kept, but dropped before the knob
+        # hints themselves are abbreviated/dropped -- "knobs absent from
+        # the registry grey out or drop from the bar" is about registry
+        # gating (extra_keys already reflects that), not width pressure.
+        base = " q quit · 1 2 page"
+        short_keys = extra_keys.replace("pwr limit", "pwr").replace("clock locks", "clk")
+        variants = [
+            base + " · t °C/°F · u GiB/GB" + extra_keys,
+            base + extra_keys,
+            base + short_keys,
+            base,
+        ]
+    else:
+        variants = [
+            " q quit · 1 2 page · t °C/°F · u GiB/GB · n active NICs · s sort · ? help",
+            " q quit · 1 2 page · t °C/°F · u GiB/GB · n NICs",
+            " q quit · 1 2 page · t temp · u units",
+        ]
     src = "NVML" if has_nvml else "CLI"
     info = f"{src} · driver {driver} · CUDA {cuda} · {rate:g}s"
 
@@ -816,11 +847,21 @@ def _right_reserve(right):
     return sum(len(t) for t, _ in right) + 2 if right else 0
 
 
-def _row_clocks(inner, gpu, caps, reserve=0):
+def _row_clocks(inner, gpu, caps, reserve=0, focus_id=None, pending=None, sm_knob=None, mem_knob=None):
+    """`sm_knob`/`mem_knob` (Phase 4) are that GPU's clk_sm/clk_mem registry
+    entries, or None when the clock-lock knobs aren't available (unified
+    SoC, no nvidia-smi) -- when one IS focused (focus_id matches its id),
+    its normal "sm 2745 MHz (max 3105)" text is replaced by the
+    "[◂ 2745 MHz ▸]" stepper widget showing the pending value."""
     f = _Flow(inner - 1 - reserve)
     f.add(f"{'CLOCKS':<11}", 3)
     clk = gpu.get("clk_sm")
-    if caps.get("clocks") and clk not in (None, "N/A"):
+    sm_focused = sm_knob is not None and focus_id == sm_knob.get("id")
+    if sm_focused:
+        shown = pending if pending is not None else clk
+        la, ra = term.knob_arrows()
+        f.add(f"sm [{la} {shown:.0f} MHz {ra}]", 9)
+    elif caps.get("clocks") and clk not in (None, "N/A"):
         txt = f"sm {clk} MHz"
         mx = gpu.get("clk_sm_max")
         if mx not in (None, "N/A"):
@@ -829,7 +870,12 @@ def _row_clocks(inner, gpu, caps, reserve=0):
     else:
         f.add("sm N/A", 6)
     mem = gpu.get("clk_mem")
-    if mem is not None:
+    mem_focused = mem_knob is not None and focus_id == mem_knob.get("id")
+    if mem_focused:
+        shown = pending if pending is not None else mem
+        la, ra = term.knob_arrows()
+        f.try_add_multi([("  ·  ", 6), (f"mem [{la} {shown:.0f} MHz {ra}]", 9)])
+    elif mem is not None:
         f.try_add_multi([("  ·  ", 6), (f"mem {mem} MHz", 2)])
     vid = gpu.get("clk_video")
     if vid is not None:
@@ -866,10 +912,13 @@ def _row_pcie(inner, gpu):
     return f
 
 
-def _row_power(inner, gpu):
+def _row_power(inner, gpu, knob=None, focus_id=None, pending=None):
     """(flow, right_segments) when caps.power_limit is True, else (None,
     None) -- caller only calls this once that cap's already been checked,
-    but the limit value itself can still independently be missing."""
+    but the limit value itself can still independently be missing.
+    `knob` (Phase 4) is this GPU's gpu_power registry entry, or None when
+    unavailable; when its id matches focus_id the static "limit 450 W" text
+    is replaced by the "[◂ 450 W ▸]" stepper widget showing `pending`."""
     limit_mw = gpu.get("power_limit_mw")
     if limit_mw is None:
         return None, None
@@ -880,7 +929,13 @@ def _row_power(inner, gpu):
     except Exception:
         draw_w = None
     pct = max(0.0, min((draw_w / limit_w) * 100, 100.0)) if draw_w is not None and limit_w else 0.0
-    right = [(f"limit {limit_w:.0f} W", 6)]
+    is_focused = knob is not None and focus_id == knob.get("id")
+    if is_focused:
+        shown = pending if pending is not None else limit_w
+        la, ra = term.knob_arrows()
+        right = [(f"limit [{la} {shown:.0f} W {ra}]", 9)]
+    else:
+        right = [(f"limit {limit_w:.0f} W", 6)]
     lo, hi = gpu.get("power_min_mw"), gpu.get("power_max_mw")
     if lo is not None and hi is not None:
         right.append((f"  range {lo / 1000:.0f}–{hi / 1000:.0f} W", 6))
@@ -987,24 +1042,44 @@ def _row_procs(inner, gpu):
     return f
 
 
-def _build_gpu_detail_panel(y, x0, width, gpu, caps, mem_state, show_driver_cuda, driver, cuda):
+def _build_gpu_detail_panel(y, x0, width, gpu, caps, mem_state, show_driver_cuda, driver, cuda,
+                             gpu_idx=None, knob_ui=None):
+    """`gpu_idx`/`knob_ui` (Phase 4, both None outside live mode / read-only
+    page 2) select this GPU's slice of the interactive knob registry and
+    whether it's the tab-selected GPU -- see knobs.py's KnobUI and
+    build_page2's per-GPU loop."""
     name = gpu.get("name", "Unknown")
     inner = width - 2
+    is_selected = knob_ui is not None and gpu_idx == knob_ui.get("selected_gpu")
+    title_prefix = [("> ", 8)] if is_selected else []
+    prefix_len = sum(len(t) for t, _ in title_prefix)
     title = f"GPU {gpu.get('id', '?')} {name}"
-    if len(title) > inner - 2:
-        title = title[:inner - 3] + "…"
+    if len(title) > inner - 2 - prefix_len:
+        title = title[:inner - 3 - prefix_len] + "…"
     temp, pwr = term.fmt_temp(gpu.get("temp")), gpu.get("pwr_str", "N/A")
     right_bits = [temp, pwr]
     if caps.get("fan"):
         fan = gpu.get("fan", "N/A")
         if fan not in ("N/A", "None"):
             right_bits.append(f"fan {fan}")
-    p = panels.Panel(y, x0, width, title=[(title, 9)], title_right=[(" · ".join(right_bits), 2)], kind="top")
+    p = panels.Panel(y, x0, width, title=title_prefix + [(title, 9)],
+                      title_right=[(" · ".join(right_bits), 2)], kind="top")
 
     unified = not caps.get("mem_local", True)
 
+    registry = (knob_ui or {}).get("registry") or []
+    focus_id = (knob_ui or {}).get("focus_id")
+    pending = (knob_ui or {}).get("pending")
+    gid = gpu.get("id")
+    def _knob(kind):
+        return next((k for k in registry if k.get("gpu_id") == gid and k.get("kind") == kind), None)
+    power_knob = _knob("gpu_power")
+    sm_knob = _knob("clk_sm")
+    mem_clk_knob = _knob("clk_mem")
+
     clk_right = [] if caps.get("power_limit") else [("power-limit API: N/A — knob hidden", 6)]
-    f_clk = _row_clocks(inner, gpu, caps, reserve=_right_reserve(clk_right))
+    f_clk = _row_clocks(inner, gpu, caps, reserve=_right_reserve(clk_right),
+                         focus_id=focus_id, pending=pending, sm_knob=sm_knob, mem_knob=mem_clk_knob)
     p.add_row(_finish_row(f_clk), right=clk_right)
 
     if unified:
@@ -1021,7 +1096,7 @@ def _build_gpu_detail_panel(y, x0, width, gpu, caps, mem_state, show_driver_cuda
             if f_pcie is not None:
                 p.add_row(_finish_row(f_pcie))
         if caps.get("power_limit"):
-            f_pwr, pwr_right = _row_power(inner, gpu)
+            f_pwr, pwr_right = _row_power(inner, gpu, knob=power_knob, focus_id=focus_id, pending=pending)
             if f_pwr is not None:
                 p.add_row(_finish_row(f_pwr), right=pwr_right)
         f_th, th_right = _row_thermal(inner, gpu)
@@ -1170,7 +1245,7 @@ _CONTROLLER_ORDER = ["pl1", "pl2", "syspl1", "syspl2"]
 _RAIL_ESSENTIALS = ["dc_input", "sys_total"]
 _CONTROLLER_ESSENTIALS = ["pl1", "syspl1"]
 
-def _build_power_rails_panel(y, x0, width, rails, kind="top", essentials_only=False):
+def _build_power_rails_panel(y, x0, width, rails, kind="top", essentials_only=False, knob_ui=None):
     inner = width - 2
     p = panels.Panel(y, x0, width, title=[("POWER RAILS", 9), (" spbm power monitor", 3)], kind=kind)
     if not rails:
@@ -1202,10 +1277,16 @@ def _build_power_rails_panel(y, x0, width, rails, kind="top", essentials_only=Fa
             row.extend(segs)
         p.add_row(row)
 
+    focus_id = (knob_ui or {}).get("focus_id")
+    pending = (knob_ui or {}).get("pending")
     for r in controllers:
         cap = r.get("cap_w")
         if cap is None:
             continue
+        # Phase 4: draw stays the measured powerN_input reading (r["watts"])
+        # -- what's interactive is the CAP, so a focused rail steps/shows
+        # the pending cap value in place of the static "of 250 W" tail.
+        is_focused = focus_id == f"rail:{r['label']}"
         pct = max(0.0, min((r["watts"] / cap) * 100 if cap else 0.0, 100.0))
         f = _Flow(inner - 1)
         f.add(f"{r['label']:<10}", 3)
@@ -1215,7 +1296,12 @@ def _build_power_rails_panel(y, x0, width, rails, kind="top", essentials_only=Fa
         f.add(lb, 6)
         f.add(bar, slot)
         f.add(rb, 6)
-        f.add(f" of {cap:.0f} W", 3)
+        if is_focused:
+            shown = pending if pending is not None else cap
+            la, ra = term.knob_arrows()
+            f.add(f" of [{la} {shown:.0f} W {ra}]", 9)
+        else:
+            f.add(f" of {cap:.0f} W", 3)
         p.add_row(_finish_row(f))
     return p
 
@@ -1275,12 +1361,19 @@ def _build_nvme_smart_panel(y, x0, width, smart, kind="top"):
     return p
 
 
-def build_page2(state, tier, width, x0=0, height=None):
-    """Builds page 2 (read-only, Phase 3): header (ADVANCED tab active), one
-    full-width detail panel per GPU, the NIC advanced panel (ungrouped
-    per-PF rows), and THERMALS / POWER RAILS / NVME SMART. Every panel build
-    is wrapped defensively same as build_page1 -- missing/degraded collector
-    data must never stop the rest of the page from rendering."""
+def build_page2(state, tier, width, x0=0, height=None, knob_ui=None):
+    """Builds page 2: header (ADVANCED tab active), one full-width detail
+    panel per GPU, the NIC advanced panel (ungrouped per-PF rows), and
+    THERMALS / POWER RAILS / NVME SMART. Every panel build is wrapped
+    defensively same as build_page1 -- missing/degraded collector data must
+    never stop the rest of the page from rendering.
+
+    `knob_ui` (Phase 4) is None in snapshot mode and read-only page 2 --
+    when present (live mode only, from KnobUI.render_ctx()) it's a plain
+    dict {registry, selected_gpu, focus_id, pending, confirming,
+    confirm_text, toast} threaded into the GPU/POWER-RAILS panels for the
+    focused-knob widget and into the footer for the tab/P/C/M/R/X hints and
+    the confirm/toast overlay."""
     out = []
 
     gpus = state.get("gpus") or []
@@ -1330,7 +1423,8 @@ def build_page2(state, tier, width, x0=0, height=None):
         try:
             caps = gpu_caps[idx] if idx < len(gpu_caps) else {}
             panel = _build_gpu_detail_panel(y, x0, width, gpu, caps, mem,
-                                             idx == len(gpus) - 1, driver, cuda)
+                                             idx == len(gpus) - 1, driver, cuda,
+                                             gpu_idx=idx, knob_ui=knob_ui)
             out.append(panel)
             y += panel.total_height + 1
         except Exception:
@@ -1357,7 +1451,7 @@ def build_page2(state, tier, width, x0=0, height=None):
             y += max(th_panel.total_height, sm_panel.total_height) + 1
             if show_rails:
                 rails_panel = _build_power_rails_panel(y, x0, width, power_rails,
-                                                         essentials_only=essentials_only)
+                                                         essentials_only=essentials_only, knob_ui=knob_ui)
                 out.append(rails_panel)
                 y += rails_panel.total_height + 1
         else:
@@ -1367,7 +1461,7 @@ def build_page2(state, tier, width, x0=0, height=None):
             y += th_panel.total_height + 1
             if show_rails:
                 rails_panel = _build_power_rails_panel(y, x0, width, power_rails,
-                                                         essentials_only=essentials_only)
+                                                         essentials_only=essentials_only, knob_ui=knob_ui)
                 out.append(rails_panel)
                 y += rails_panel.total_height + 1
             sm_panel = _build_nvme_smart_panel(y, x0, width, smart)
@@ -1378,5 +1472,27 @@ def build_page2(state, tier, width, x0=0, height=None):
 
     has_nvml = (state.get("caps") or {}).get("has_nvml", False)
     rate = state.get("rate", 1.0)
-    out.append(_build_footer(x0, width, y, driver, cuda, rate, has_nvml))
+
+    extra_keys = None
+    if knob_ui is not None:
+        registry = knob_ui.get("registry") or []
+        has_power_knob = any(k["kind"] in ("gpu_power", "rail_power") for k in registry)
+        has_clock_knob = any(k["kind"] in ("clk_sm", "clk_mem") for k in registry)
+        has_reset = any(k["kind"] == "reset_clocks" for k in registry)
+        has_persist = any(k["kind"] == "persist" for k in registry)
+        bits = []
+        if len(gpus) > 1 or has_power_knob or has_clock_knob:
+            bits.append("tab gpu")
+        if has_power_knob:
+            bits.append("P pwr limit")
+        if has_clock_knob:
+            bits.append("C/M clock locks")
+        if has_reset:
+            bits.append("R reset")
+        if has_persist:
+            bits.append("X persist")
+        extra_keys = (" · " + " · ".join(bits)) if bits else None
+
+    out.append(_build_footer(x0, width, y, driver, cuda, rate, has_nvml,
+                              extra_keys=extra_keys, knob_ui=knob_ui))
     return out
