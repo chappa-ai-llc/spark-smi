@@ -388,7 +388,13 @@ def main():
     state.page = opts["page"]
 
     if opts["loop"]:
-        import curses
+        try:
+            import curses
+        except ModuleNotFoundError:
+            print("live mode needs curses, which this Python doesn't have.\n"
+                  "On Windows:  pip install windows-curses\n"
+                  "Snapshot mode works everywhere:  spark-smi [--page 2]")
+            sys.exit(1)
         try:
             import locale
             locale.setlocale(locale.LC_ALL, "")
