@@ -1,8 +1,8 @@
 # SPARK-SMI
 
-> A specialized terminal-based system monitor (TUI) built for **NVIDIA Grace Blackwell (GB10)** and hybrid ARM architectures — because `nvidia-smi` alone doesn't tell the full story.
+> A terminal-based system monitor (TUI) built for **NVIDIA Grace Blackwell (GB10)** and hybrid ARM architectures — because `nvidia-smi` alone doesn't tell the full story.
 
-![Version](https://img.shields.io/badge/version-3.6.0-blue)
+![Version](https://img.shields.io/badge/version-2.0.0a1-blue)
 ![Python](https://img.shields.io/badge/python-3.6%2B-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Linux%20aarch64-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -16,33 +16,196 @@
 
 ![spark-smi live demo](screenshots/spark-smi-demo.gif)
 
+The screenshots and GIF above were captured on the 1.x/3.x single-page dashboard;
+2.0 keeps the same terminal-native philosophy but reorganizes the UI into the
+two pages described below. Fresh captures are pending a DGX Spark session.
+
 ---
 
 ## Why SPARK-SMI?
 
-The NVIDIA DGX Spark (GB10) is a unique system — a Grace Blackwell chip with unified CPU+GPU memory, hybrid Cortex-X925/A725 core clusters, and high-speed MT2910 200G networking. Standard tools like `nvidia-smi`, `htop`, and `nvtop` were not built with this topology in mind. SPARK-SMI was.
+The NVIDIA DGX Spark (GB10) is a unique system — a Grace Blackwell chip with
+unified CPU+GPU memory, hybrid Cortex-X925/A725 core clusters, and high-speed
+MT2910 200G networking. Standard tools like `nvidia-smi`, `htop`, and `nvtop`
+were not built with this topology in mind. SPARK-SMI was — but it's not
+hardcoded to it. Every piece of layout is driven by what the box in front of
+it actually reports, so the same binary also renders something sane on a
+plain x86 desktop with one consumer GPU.
 
 | What it handles correctly | Standard tools |
 |:---|:---:|
-| Hybrid P-core / E-core CPU clusters | ❌ |
-| GB10 Unified Memory (CPU+GPU shared) | ❌ |
-| MT2910 200G NIC bandwidth monitoring | ❌ |
+| Hybrid P-core / E-core CPU clusters (ARM or Intel) | ❌ |
+| GB10 unified memory (CPU+GPU shared) | ❌ |
+| RDMA/RoCE-aware NIC bandwidth (bypasses the kernel netdev counters) | ❌ |
 | Mixed GPU architectures in one system | ❌ |
 | NVML with graceful CLI fallback | ✅ |
-| Zero system dependencies | ✅ |
+| Zero system dependencies beyond `psutil` + `pynvml` | ✅ |
 
 ---
 
-## Features
+## Two pages
 
-- **Snapshot Mode** — Runs once and prints to stdout with full ANSI colors, just like `nvidia-smi`. Pipe it, log it, script it.
-- **Live Mode (`-l`)** — Flicker-free TUI that refreshes every second with responsive terminal resize handling.
-- **Hybrid CPU Topology** — Correctly splits and labels Cortex-X925 (Performance) and Cortex-A725 (Efficiency) core clusters with individual per-core load bars.
-- **Unified Memory Aware** — Detects GB10 unified memory architecture and maps system RAM to GPU memory display accurately.
-- **Dual GPU Support** — Handles mixed architectures (e.g. sm_121 GB10 + sm_86 RTX 3090 via OcuLink) simultaneously.
-- **NIC Monitoring** — Real-time bandwidth utilization across all interfaces: MT2910 200G ports (1–4) and Realtek 10G (port 5), read directly from sysfs.
-- **Driver & CUDA Info** — Footer displays live Driver version and CUDA version via NVML or nvidia-smi fallback.
-- **Robust Fallbacks** — NVML → nvidia-smi CLI → graceful degradation. Adapts to missing sensors, fan controllers, and unsupported queries without crashing.
+**Page 1 — Overview** (`1`): CPU clusters with per-core load, MEMORY with a
+segmented used/cache/free bar, one card per GPU (utilization, memory, clocks,
+power), NETWORK (physical ports, RX/TX bars), STORAGE (block devices,
+temperature, R/W rates, usage). This is the "glance at it and know the
+system's state" page.
+
+**Page 2 — Advanced** (`2`): per-GPU detail (clocks, PCIe generation/width/
+throughput, power vs. limit, thermal trip points, throttle reasons,
+persistence/compute-mode/ECC state, running processes), per-PF NIC detail
+(RDMA counters, CNP/ECN marks, discards, ASIC temperature), every thermal
+zone and named hwmon device, and NVMe SMART health. This is also where the
+interactive power/clock knobs live (see below).
+
+---
+
+## Capability-driven, not hardcoded
+
+Every collector probes what the hardware actually supports **once**, at
+startup, into a small `.caps` dict, and the page builders consult it before
+drawing anything. A missing sensor doesn't print `N/A` in a field that looks
+broken — the field is simply absent.
+
+The clearest example is the fan. On the GB10 (and any SoC matching the
+unified-memory heuristic below), there is no independent fan controller NVML
+or `nvidia-smi` can query — `caps["fan"]` comes back `False`, and the GPU
+card's `FAN` field is dropped from that row entirely rather than showing a
+permanent, misleading `0%` or `N/A`. Drop the same code onto a machine with a
+real fan-equipped GPU and the field reappears on its own — nothing about the
+rendering path changed, only what the probe returned.
+
+The same pattern holds everywhere: `power_draw`/`power_limit` are probed
+independently (GB10 reports draw but not limits), `mem_local` flips to
+`False` on any GPU name matching `GB\d{2,3}` (unified memory — system RAM is
+shown instead, with "(Unified)" appended to the name), `pcie`/`clocks` gate
+the page-2 detail rows, and `spbm`/RDMA/SMART availability each gate their
+own panels or rows the same way. Page 2's power/clock **knobs** go a step
+further and gate on *writability*, not just readability — see "Power tuning
+notes" below.
+
+---
+
+## Universal hardware detection
+
+Nothing about topology is assumed; it's discovered at import/startup:
+
+- **CPU clusters** — cores are grouped by actual silicon type: ARM MIDR
+  (implementer + part, translated to marketing names like Cortex-X925) on
+  ARM, `/sys/devices/cpu_core`/`cpu_atom` masks for Intel P/E hybrids, or one
+  flat "CPU Cores" group otherwise. Interleaved core layouts (the real DGX
+  Spark alternates A725/X925 across the core ID space) are handled — the
+  per-core grid shows absolute core IDs, not a relabeled contiguous range.
+- **GPUs** — NVML first, CLI (`nvidia-smi --query-gpu`) fallback per field,
+  "N/A" only as a last resort. Multiple GPUs of different architectures (a
+  GB10 iGPU alongside a discrete card) render side by side without either
+  needing special-case code.
+- **NICs** — physical interfaces come from `/sys/class/net`, hardware names
+  come from PCI vendor/device IDs (`/sys/class/net/<i>/device/vendor|device`)
+  against a small built-in table (Mellanox, Realtek, Intel, Broadcom,
+  MediaTek, Aquantia, NVIDIA) with a `/usr/share/hwdata/pci.ids` lookup and
+  then the kernel driver name as further fallbacks — so an unrecognized NIC
+  still gets a sensible label instead of nothing. Multi-port cards (e.g. a
+  dual-port ConnectX-7) are grouped by PCI slot into one row.
+- **Storage** — every physical block device under `/sys/block` (loop/ram/dm
+  devices skipped), model/size from sysfs, temperature from whichever hwmon
+  matches it (NVMe controllers), usage from the largest mounted partition's
+  `statvfs`.
+- **Thermal zones** — every `/sys/class/thermal` zone plus every named
+  `/sys/class/hwmon` device's temperature channels. Zones sharing a generic
+  type (several unlabeled `acpitz` zones, as on GB10) are relabeled
+  Zone-A/Zone-B/… in zone order so they stay distinguishable.
+
+---
+
+## Density tiers
+
+The layout re-evaluates every frame against the terminal's current width —
+resize the window and it adapts live, no restart needed:
+
+| Tier | Width | Behavior |
+|:---|:---|:---|
+| `compact` | < 84 cols | Condensed layout: two NIC/disk entries per cell-row, GPU fields folded onto fewer lines. |
+| `standard` | 84–110 cols | Full field set, but GPU cards and THERMALS/SMART stack full-width instead of side-by-side. |
+| `wide` | > 110 cols | The full multi-column layout; content is capped at 160 columns and centered on wider terminals. |
+
+If a tier's content still doesn't fit the available height, things degrade
+further in this order: sparklines drop first, then the memory legend row,
+then NIC rows collapse into a single summary line.
+
+Bar rendering itself has a separate three-tier auto-detection (sub-cell
+`eighths` resolution on UTF-8 terminals, whole-cell `blocks` on framebuffer
+consoles whose font lacks eighth-block glyphs, or plain-ASCII `[|||  ]`
+forced by `--ascii`, a non-UTF-8 stdout, or `SPARK_SMI_ASCII`) — independent
+of the density tier, since it's about glyph support, not screen space.
+
+---
+
+## The RDMA/HCA-counter story
+
+On a machine with RDMA-capable NICs (Mellanox ConnectX and similar), GPU
+traffic over RoCE/NCCL/GPUDirect bypasses the kernel's normal network stack
+entirely — it never touches the netdev's `rx_bytes`/`tx_bytes` counters that
+`psutil`, `ifconfig`, or `ip -s link` read. A monitor that only reads netdev
+counters will show near-zero traffic on a link that's actually saturated.
+
+SPARK-SMI reads the **HCA's own hardware counters** instead, wherever an
+RDMA device is present: `/sys/class/infiniband/<hca>/ports/<n>/hw_counters/`
+exposes `port_rcv_data`/`port_xmit_data` in **4-byte-word units** (per the
+InfiniBand spec — multiplied by 4 to get bytes), and these count RoCE traffic
+that the kernel netdev stats miss. Every other NIC falls back to the normal
+psutil netdev counters. RX and TX are kept as separate rates throughout
+(never summed into one "throughput" number), and a counter reset from a
+driver reload is clamped to zero instead of showing a giant negative-delta
+spike.
+
+Page 2's NIC panel goes further: per-PF congestion/ECN counters (CNP sent/
+handled, ECN marks, buffer discards) straight from the same `hw_counters`
+directory, plus ASIC temperature from the NIC's own hwmon device.
+
+---
+
+## Keys
+
+| Key | Page | Action |
+|:---:|:---:|:---|
+| `q` | both | Quit |
+| `1` / `2` | both | Switch page (overview / advanced) |
+| `t` | both | Toggle temperature units (°C / °F) |
+| `u` | both | Toggle memory units (GiB / GB, decimal) |
+| `?` | both | Toggle the help overlay (any key dismisses it) |
+| `n` | 1 | Show active NICs only |
+| `s` | 1 | Sort NIC rows by current rate (max of RX/TX), descending — toggle back to detection order |
+| `Tab` | 2 | Select GPU (when more than one) |
+| `P` | 2 | Focus/cycle the power-limit knob (GPU limit → PL1 → PL2 → SYSPL1 → SYSPL2, as available) |
+| `C` / `M` | 2 | Focus the SM / memory clock-lock knob |
+| `R` | 2 | Arm a clock reset (confirm required) |
+| `X` | 2 | Toggle GPU persistence mode (confirm required) |
+| `←` / `→` | 2 | Step the focused knob's pending value |
+| `Enter` | 2 | Apply the focused knob (raises a `y`/`N` confirm) |
+| `Esc` | 2 | Cancel the pending step or confirm |
+
+Knobs only ever appear when they're actually writable for the hardware in
+front of you (see "Power tuning notes"), and applying one always goes through
+an explicit confirm prompt before anything is written.
+
+---
+
+## CLI flags
+
+```
+spark-smi [options]
+
+  -l, --loop       live mode: curses TUI, refreshed continuously
+  -n <secs>        refresh rate in seconds (default: 1)
+  -p, --page <n>   which page to render in snapshot mode: 1 overview (default)
+                   or 2 advanced (GPU detail, NIC/thermal/SMART panels)
+  --ascii          force plain-ASCII bars/frames (no UTF-8 box drawing)
+  -h, --help       show this help and exit
+```
+
+Snapshot mode (no `-l`) renders once and prints ANSI to stdout — pipe it, log
+it, script it, same as `nvidia-smi`.
 
 ---
 
@@ -58,8 +221,8 @@ The NVIDIA DGX Spark (GB10) is a unique system — a Grace Blackwell chip with u
 
 - Linux (aarch64 recommended — built and tested on DGX Spark)
 - Python 3.6+
-- NVIDIA Drivers installed
-- `nvidia-smi` in PATH
+- NVIDIA drivers installed, `nvidia-smi` in `PATH` (used as a fallback and by
+  the page-2 clock/persistence knobs)
 
 ---
 
@@ -101,21 +264,51 @@ source ~/.bashrc
 
 ---
 
-## Usage
+## Optional: `spbm` driver on DGX Spark
 
-| Command | Action |
-|:---|:---|
-| `spark-smi` | Snapshot — print once and exit |
-| `spark-smi -l` | Live mode — interactive TUI |
-| `spark-smi -n 0.5 -l` | Live mode at 0.5s refresh rate |
+The DGX Spark's board-management/power-rail sensor isn't exposed by any
+in-tree kernel driver — [`spark_hwmon`](https://github.com/antheas/spark_hwmon)
+adds it as an out-of-tree `spbm` hwmon module via DKMS:
 
-**Interactive Controls**
+```bash
+git clone https://github.com/antheas/spark_hwmon.git
+cd spark_hwmon
+sudo dkms install .
+```
 
-| Key | Action |
-|:---:|:---|
-| `q` | Quit |
-| `t` | Toggle temperature units (°C / °F) |
-| `u` | Toggle memory units (GiB / GB) |
+Once the module is loaded, SPARK-SMI picks it up automatically — nothing to
+configure. THERMALS gets `spbm`'s labeled zone names (e.g. `cpu_e_clu0`,
+`tj_max`) listed first, and page 2's POWER RAILS panel gains the `PL1`/`PL2`/
+`SYSPL1`/`SYSPL2` power-rail readouts and, if the sysfs cap files are
+writable, their tuning knobs (see below).
+
+**Secure Boot:** an out-of-tree DKMS module is unsigned by default. With
+Secure Boot enabled, the kernel will refuse to load it unless you either sign
+it yourself and enroll the signing key (MOK) or disable Secure Boot in the
+BIOS. This is a property of Secure Boot, not something SPARK-SMI or
+`spark_hwmon` can work around.
+
+---
+
+## Power tuning notes
+
+- **Wi-Fi/BT radio (BIOS):** the DGX Spark's onboard Wi-Fi/Bluetooth radio
+  can be disabled in the BIOS/firmware setup. Doing so hands its power
+  budget back to the SoC/GPU. From SPARK-SMI's side this is invisible
+  bookkeeping — the radio's NIC row simply disappears from the NETWORK panel
+  (it's discovered from `/sys/class/net` like everything else, so an absent
+  interface just isn't there to list). Re-enable it in the BIOS and the row
+  reappears on the next detection pass, no restart of SPARK-SMI required
+  since interface enumeration re-runs each tick's sample.
+- **PL1/PL2 knobs (page 2):** with the `spbm` driver installed and its
+  `powerN_cap` sysfs files writable (root, `sudo`, or a udev rule granting
+  write access), page 2 exposes the `PL1`/`PL2`/`SYSPL1`/`SYSPL2` rail
+  power-limit knobs alongside the per-GPU power limit under the `P` key.
+  Every write goes through NVML/`nvidia-smi`/sysfs only after an explicit
+  `y`/`N` confirm — SPARK-SMI never writes anything on its own, and a knob
+  that isn't writable on your system (wrong permissions, driver not loaded)
+  is shown but grayed out with the reason rather than silently doing
+  nothing.
 
 ---
 
@@ -135,10 +328,11 @@ source ~/.bashrc
 
 ## Roadmap
 
-- [ ] **Fan Monitoring** — Read GB10 chassis fan speeds without `sudo` (currently blocked by `nvsm`/IPMI privilege requirements)
 - [ ] **REST API / Prometheus Exporter** — Expose a lightweight JSON HTTP endpoint for Grafana and Prometheus integration
 - [ ] **CSV Logging Mode** — `--csv` flag to pipe raw metrics to stdout or file for external processing
 - [X] **PyPI Package** — `pip install spark-smi` one-liner install
+- [X] **Capability-driven universal detection** — CPU/GPU/NIC/storage/thermal topology discovered at runtime, not hardcoded to one machine
+- [X] **Page 2 advanced panels + power/clock knobs** — per-GPU detail, per-PF RDMA counters, thermal/SMART, interactive power/clock control
 - [ ] **Multi-node Support** — Monitor clustered DGX Spark nodes from a single dashboard
 
 ---

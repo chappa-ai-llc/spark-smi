@@ -13,6 +13,11 @@ import psutil
 from . import panels
 from . import term
 
+try:
+    from . import VERSION
+except ImportError:
+    VERSION = "2.0.0a1"
+
 # --- tier helpers -----------------------------------------------------
 def tier_for_width(w):
     if w < 84:
@@ -264,7 +269,7 @@ def _build_footer(x0, width, y, driver, cuda, rate, has_nvml, extra_keys=None, k
             " q quit · 1 2 page · t temp · u units",
         ]
     src = "NVML" if has_nvml else "CLI"
-    info = f"{src} · driver {driver} · CUDA {cuda} · {rate:g}s"
+    info = f"v{VERSION} · {src} · driver {driver} · CUDA {cuda} · {rate:g}s"
 
     keys, show_info = variants[-1], False
     for v in variants:
@@ -281,6 +286,51 @@ def _build_footer(x0, width, y, driver, cuda, rate, has_nvml, extra_keys=None, k
     right = [(info, 2)] if show_info else []
     p.rows.append(([(keys, 9)], right))
     return p
+
+
+def build_help_overlay(term_w, term_h):
+    """'?' key (live mode, both pages): a single centered bordered panel
+    listing every key binding + the running version, appended AFTER the
+    already-built page so panels.render() paints it on top -- dismissed by
+    any keypress (app.py's main_loop), not drawn by this function itself.
+    Rows are padded to the panel's inner width so they blank out whatever
+    page content sits underneath (bordered rows aren't auto-padded by
+    panels.render -- only the frame/border chars are)."""
+    la, ra = term.knob_arrows()
+    lines = [
+        ("Global", 9),
+        ("  q            quit", 3),
+        ("  1 / 2        switch page: overview / advanced", 3),
+        ("  t            toggle °C / °F", 3),
+        ("  u            toggle GiB / GB (decimal units)", 3),
+        ("  ?            toggle this help", 3),
+        ("", 3),
+        ("Page 1 -- overview", 9),
+        ("  n            show active NICs only", 3),
+        ("  s            sort NIC rows by rate (toggle)", 3),
+        ("", 3),
+        ("Page 2 -- advanced (GPU knobs, root-gated)", 9),
+        ("  Tab          select GPU", 3),
+        ("  P            power limit knob", 3),
+        ("  C / M        SM / memory clock lock knob", 3),
+        ("  R            reset clocks", 3),
+        ("  X            toggle persistence mode", 3),
+        (f"  {la} / {ra}          adjust focused knob", 3),
+        ("  Enter        apply focused knob (confirm)", 3),
+        ("  Esc          cancel / dismiss confirm", 3),
+        ("", 3),
+        ("press any key to close", 6),
+    ]
+    width = min(58, max(40, term_w - 4))
+    inner = width - 2
+    height = min(len(lines) + 2, max(6, term_h - 2))
+    x0 = max(0, (term_w - width) // 2)
+    y0 = max(0, (term_h - height) // 2)
+
+    p = panels.Panel(y0, x0, width, title=[("HELP", 9), (f" spark-smi {VERSION}", 3)], kind="top")
+    for text, slot in lines[:max(0, height - 2)]:
+        p.add_row([(1, text[:inner].ljust(inner), slot)])
+    return [p]
 
 
 # =========================================================================
@@ -765,11 +815,14 @@ def _build_storage_panel(y, x0, width, disks, tier):
 # Page 1 assembly
 # =========================================================================
 
-def build_page1(state, tier, width, x0=0, height=None):
+def build_page1(state, tier, width, x0=0, height=None, sort_nics=False):
     """Builds page 1: header, CPU+MEMORY compound frame, GPU card(s),
     NETWORK+STORAGE compound frame, footer. `height` (available screen rows),
     when given, drives a simple degrade order: sparklines -> memory legend
-    row -> NIC rows collapse to one summary line."""
+    row -> NIC rows collapse to one summary line. `sort_nics` ('s' key)
+    reorders the NETWORK rows by max(rx, tx) rate descending, recomputed
+    fresh every frame; False (default) keeps the collector's detection
+    order (grouped by physical port, stable frame-to-frame)."""
     out = []
     show_sparkline = True
     show_legend = True
@@ -781,6 +834,10 @@ def build_page1(state, tier, width, x0=0, height=None):
     nics = state.get("nics") or []
     disks = state.get("disks") or []
     gpu_caps = (state.get("caps") or {}).get("gpu") or []
+
+    if sort_nics and nics:
+        nics = sorted(nics, key=lambda n: max(n.get("rx_bps", 0) or 0, n.get("tx_bps", 0) or 0),
+                      reverse=True)
 
     if height:
         n_clusters = len(cpu.get("clusters") or [])

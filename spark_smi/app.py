@@ -17,7 +17,7 @@ from . import term
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "2.0.0.dev0"
+    VERSION = "2.0.0a1"
 DEFAULT_REFRESH_RATE = 1.0
 HIST_LEN = 60
 
@@ -34,8 +34,9 @@ Usage: spark-smi [options]
 
 Snapshot mode (default, no -l) renders once and prints ANSI to stdout.
 
-Live-mode keys: q quit  ·  t toggle C/F  ·  u toggle GiB/GB
-                n active-NICs-only  ·  1/2 page
+Live-mode keys: q quit  ·  t toggle C/F  ·  u toggle GiB/GB  ·  1/2 page
+                n active-NICs-only  ·  s sort NICs by rate  ·  ? help overlay
+                page 2: tab select GPU  ·  P/C/M/R/X knobs
 """
 
 
@@ -173,7 +174,7 @@ class State:
 
 
 def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_hint=None, page_num=1,
-                      knob_ui=None):
+                      knob_ui=None, sort_nics=False, show_help=False):
     """Single UI entry point for both backends. Builds the requested page
     (1 overview, 2 advanced) and draws it.
 
@@ -181,7 +182,12 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
     -- main() never constructs one for the snapshot path, so passing None
     there (the default) is what guarantees "snapshot mode never writes and
     shows no knob UI": the registry below is simply never built, and
-    pages.build_page2 falls back to its Phase-3 read-only rendering."""
+    pages.build_page2 falls back to its Phase-3 read-only rendering.
+
+    `sort_nics` ('s' key, page 1 only) reorders NETWORK rows by max(rx, tx)
+    rate descending each frame; `show_help` ('?' key, live mode, both pages)
+    draws a help overlay panel appended last so it paints over everything
+    else already built this frame."""
     try:
         h, w = stdscr.getmaxyx()
     except Exception:
@@ -217,9 +223,15 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
         if page_num == 2:
             built = pages.build_page2(sample, tier, draw_w, x0, height=height_hint or h, knob_ui=knob_ctx)
         else:
-            built = pages.build_page1(sample, tier, draw_w, x0, height=height_hint or h)
+            built = pages.build_page1(sample, tier, draw_w, x0, height=height_hint or h, sort_nics=sort_nics)
     except Exception:
         built = []
+
+    if show_help:
+        try:
+            built = built + pages.build_help_overlay(w, h)
+        except Exception:
+            pass
 
     try:
         panels.render(stdscr, built, colors_map)
@@ -253,6 +265,8 @@ def main_loop(stdscr, state, rate):
         colors[slot] = attr
 
     active_nics_only = False
+    sort_nics = False
+    show_help = False
     # Phase 4: page 2's interactive power/clock knobs. Constructed here (not
     # in State, which the snapshot path also uses) so the write-capable UI
     # only exists at all in live mode -- see render_dashboard's docstring.
@@ -262,7 +276,7 @@ def main_loop(stdscr, state, rate):
             stdscr.erase()
             h, _ = stdscr.getmaxyx()
             render_dashboard(stdscr, colors, state, active_nics_only, height_hint=h, page_num=state.page,
-                              knob_ui=knob_ui)
+                              knob_ui=knob_ui, sort_nics=sort_nics, show_help=show_help)
             stdscr.refresh()
         except Exception:
             pass
@@ -270,8 +284,26 @@ def main_loop(stdscr, state, rate):
         start_wait = time.time()
         while time.time() - start_wait < rate:
             ch = stdscr.getch()
+            # Help overlay swallows every key while shown -- "dismissed by
+            # any key" takes priority over what that key would otherwise do
+            # (e.g. 'q' while help is up closes help, it doesn't quit).
+            if show_help:
+                if ch != -1:
+                    show_help = False
+                    stdscr.clear()
+                    break
+                time.sleep(0.05)
+                continue
             if ch == ord('q'):
                 return
+            if ch == ord('?'):
+                show_help = True
+                stdscr.clear()
+                break
+            if ch == ord('s'):
+                sort_nics = not sort_nics
+                stdscr.clear()
+                break
             if ch == ord('t'):
                 term.USE_FAHRENHEIT = not term.USE_FAHRENHEIT
                 break
