@@ -9,6 +9,7 @@ import sys
 import time
 from collections import deque
 
+from . import cluster
 from . import collectors
 from . import knobs
 from . import pages
@@ -33,6 +34,15 @@ Usage: spark-smi [options]
   --theme <name>   color theme (default: spark; or $SPARK_SMI_THEME)
   --theme list     print the available theme names, one per line, and exit
   --ascii          force plain-ASCII bars/frames (no UTF-8 box drawing)
+  --json           print one sample as JSON (+ node/model/version/ts) and exit
+  --serve [PORT]   read-only HTTP sample server (default port {cluster.DEFAULT_PORT});
+                   GET /sample, GET /healthz. $SPARK_SMI_TOKEN, if set, is
+                   required as the X-Spark-Token header on /sample
+  --serve-verbose  log one line per request to stderr (--serve only)
+  --cluster HOSTS  cluster mode: page 3 shows every node in HOSTS (comma-
+                   separated "host"/"host:port"/"ssh:host" entries, or
+                   "@file" -- one entry per line, # comments). Bare
+                   --cluster (no value) tries ~/.config/spark-smi/cluster
   -h, --help       show this help and exit
 
 Themes: {", ".join(term.THEMES)}, cycled live with the 'c' key.
@@ -40,17 +50,25 @@ $SPARK_SMI_THEME sets the default when --theme isn't passed; an unknown name
 prints the valid list and exits 1.
 
 Snapshot mode (default, no -l) renders once and prints ANSI to stdout.
+`--cluster ... --page 3` does one blocking poll round (2s cap) then renders
+the cluster page once.
 
 Live-mode keys: q quit  ·  t toggle C/F  ·  u toggle GiB/GB  ·  1/2 page
                 n active-NICs-only  ·  s sort NICs by rate  ·  c cycle theme
                 ? help overlay
                 page 2: tab select GPU  ·  P/C/M/R/X knobs
+                page 3 (--cluster only): up/down select · enter drill into
+                node · esc back · a alerts only (fleet) · o sort col (fleet)
 """
+
+
+_UNSET = object()  # distinguishes "--cluster not given" from "--cluster given with no value"
 
 
 def _parse_args(argv):
     opts = {"loop": False, "rate": DEFAULT_REFRESH_RATE, "help": False, "page": 1,
-            "theme": None, "theme_list": False}
+            "theme": None, "theme_list": False, "json": False, "serve": None,
+            "serve_verbose": False, "cluster": _UNSET}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -67,7 +85,7 @@ def _parse_args(argv):
             i += 1
             if i < len(argv):
                 try:
-                    opts["page"] = 2 if int(argv[i]) == 2 else 1
+                    opts["page"] = 3 if int(argv[i]) == 3 else (2 if int(argv[i]) == 2 else 1)
                 except ValueError:
                     pass
         elif a == "--theme":
@@ -79,6 +97,20 @@ def _parse_args(argv):
                     opts["theme"] = argv[i]
         elif a == "--themes":
             opts["theme_list"] = True
+        elif a == "--json":
+            opts["json"] = True
+        elif a == "--serve":
+            opts["serve"] = cluster.DEFAULT_PORT
+            if i + 1 < len(argv) and argv[i + 1].isdigit():
+                i += 1
+                opts["serve"] = int(argv[i])
+        elif a == "--serve-verbose":
+            opts["serve_verbose"] = True
+        elif a == "--cluster":
+            opts["cluster"] = ""  # sentinel: try ~/.config/spark-smi/cluster
+            if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+                i += 1
+                opts["cluster"] = argv[i]
         elif a in ("-h", "--help"):
             opts["help"] = True
         # --ascii is read directly from sys.argv by term._detect_bar_style()
@@ -191,10 +223,16 @@ class State:
         }
 
 
+_EMPTY_SAMPLE = {"cpu": {}, "mem": {}, "gpus": [], "nics": [], "disks": [], "thermal": [],
+                  "power_rails": [], "smart": None, "nic_pf": [], "driver": "Unknown",
+                  "cuda": "Unknown", "rate": DEFAULT_REFRESH_RATE, "caps": {}}
+
+
 def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_hint=None, page_num=1,
-                      knob_ui=None, sort_nics=False, show_help=False, theme_toast=None):
+                      knob_ui=None, sort_nics=False, show_help=False, theme_toast=None, cluster_ctx=None):
     """Single UI entry point for both backends. Builds the requested page
-    (1 overview, 2 advanced) and draws it.
+    (1 overview, 2 advanced, 3 cluster -- Phase 6, --cluster only) and draws
+    it.
 
     `knob_ui` (Phase 4) is a knobs.KnobUI instance in live mode's page 2 only
     -- main() never constructs one for the snapshot path, so passing None
@@ -208,7 +246,18 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
     else already built this frame. `theme_toast` ('c' key, live mode, both
     pages) is a (text, slot) pair shown via the footer's existing toast
     rendering (see pages._build_footer) for a few ticks after a theme
-    switch, or None the rest of the time."""
+    switch, or None the rest of the time.
+
+    `cluster_ctx` (Phase 6, --cluster only) is {"name", "aggregator", "ui"}
+    -- a cluster.ClusterAggregator and cluster.ClusterUI. When page_num == 3
+    it drives pages.build_page3 straight from the aggregator's freshest
+    poll results (never blocking: get_views() only reads what the
+    background thread already collected). When cluster_ui.drilldown is set
+    (Enter on page 3), pages 1/2 render from that SELECTED NODE'S remote
+    sample instead of state.sample() -- knob_ui is forced off for that case
+    (registry writes stay strictly local, per spec), and pages.py's `remote`
+    param adds the "· remote" header tag / page-2 "knobs are local-only"
+    footer note."""
     try:
         h, w = stdscr.getmaxyx()
     except Exception:
@@ -219,18 +268,45 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
     draw_w = pages.content_width(tier, w)
     x0 = max(0, (w - draw_w) // 2)
 
-    try:
-        sample = state.sample()
-    except Exception:
-        sample = {"cpu": {}, "mem": {}, "gpus": [], "nics": [], "disks": [], "thermal": [],
-                  "power_rails": [], "smart": None, "nic_pf": [], "driver": "Unknown",
-                  "cuda": "Unknown", "rate": state.rate, "caps": {}}
+    has_cluster = cluster_ctx is not None
+    cluster_ui = cluster_ctx.get("ui") if has_cluster else None
+
+    if page_num == 3 and has_cluster:
+        try:
+            views = cluster_ctx["aggregator"].get_views()
+        except Exception:
+            views = []
+        ctx = {"name": cluster_ctx.get("name", "cluster"), "views": views,
+               "rate": state.rate, "ui": cluster_ui}
+        try:
+            built = pages.build_page3(ctx, tier, draw_w, x0, height=height_hint or h)
+        except Exception:
+            built = []
+        try:
+            panels.render(stdscr, built, colors_map)
+        except Exception:
+            pass
+        return
+
+    remote_name = None
+    if has_cluster and cluster_ui is not None and cluster_ui.drilldown:
+        remote_name = cluster_ui.drilldown_node
+        try:
+            remote_sample = cluster_ctx["aggregator"].get_member_sample(remote_name)
+        except Exception:
+            remote_sample = None
+        sample = remote_sample if remote_sample is not None else dict(_EMPTY_SAMPLE, rate=state.rate)
+    else:
+        try:
+            sample = state.sample()
+        except Exception:
+            sample = dict(_EMPTY_SAMPLE, rate=state.rate)
 
     if active_nics_only:
         sample["nics"] = [n for n in sample.get("nics", []) if n.get("up")]
 
     knob_ctx = None
-    if knob_ui is not None and page_num == 2:
+    if knob_ui is not None and page_num == 2 and remote_name is None:
         try:
             registry = knobs.build_registry(sample)
         except Exception:
@@ -243,10 +319,10 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
     try:
         if page_num == 2:
             built = pages.build_page2(sample, tier, draw_w, x0, height=height_hint or h, knob_ui=knob_ctx,
-                                       theme_toast=theme_toast)
+                                       theme_toast=theme_toast, remote=remote_name, cluster_tabs=has_cluster)
         else:
             built = pages.build_page1(sample, tier, draw_w, x0, height=height_hint or h, sort_nics=sort_nics,
-                                       theme_toast=theme_toast)
+                                       theme_toast=theme_toast, remote=remote_name, cluster_tabs=has_cluster)
     except Exception:
         built = []
 
@@ -289,7 +365,7 @@ def _init_curses_colors(curses):
     return colors
 
 
-def main_loop(stdscr, state, rate):
+def main_loop(stdscr, state, rate, cluster_ctx=None):
     import curses
     curses.start_color()
     curses.use_default_colors()
@@ -308,18 +384,27 @@ def main_loop(stdscr, state, rate):
     # in State, which the snapshot path also uses) so the write-capable UI
     # only exists at all in live mode -- see render_dashboard's docstring.
     knob_ui = knobs.KnobUI()
+    cluster_ui = cluster_ctx["ui"] if cluster_ctx else None
     while True:
         if theme_toast_ticks > 0:
             theme_toast_ticks -= 1
             if theme_toast_ticks <= 0:
                 theme_toast_text = None
         theme_toast = (theme_toast_text, 9) if theme_toast_text else None
+        # Knobs are strictly local-only (spec): a registry built while
+        # looking at a remote node's page 2 would still write to THIS
+        # machine's hardware while showing someone else's numbers, so every
+        # Phase-4 key below is gated on NOT being in a cluster drilldown --
+        # render_dashboard independently skips building the registry for
+        # the same reason (belt and suspenders: the key handler can't apply
+        # a knob that was never focused because its registry never built).
+        in_remote = bool(cluster_ui and cluster_ui.drilldown)
         try:
             stdscr.erase()
             h, _ = stdscr.getmaxyx()
             render_dashboard(stdscr, colors, state, active_nics_only, height_hint=h, page_num=state.page,
                               knob_ui=knob_ui, sort_nics=sort_nics, show_help=show_help,
-                              theme_toast=theme_toast)
+                              theme_toast=theme_toast, cluster_ctx=cluster_ctx)
             stdscr.refresh()
         except Exception:
             pass
@@ -343,6 +428,41 @@ def main_loop(stdscr, state, rate):
                 show_help = True
                 stdscr.clear()
                 break
+            # Phase 6 (--cluster only): page 3's own key bindings. '3' is
+            # inert without --cluster (cluster_ctx is None, so every branch
+            # here is a no-op and the key falls through unhandled below).
+            if ch == ord('3') and cluster_ctx:
+                if cluster_ui.drilldown:
+                    cluster_ui.exit_drilldown()
+                state.page = 3
+                stdscr.clear()
+                break
+            if ch == 27 and cluster_ui and cluster_ui.drilldown:  # Esc: drilldown -> back to page 3
+                cluster_ui.exit_drilldown()
+                state.page = 3
+                stdscr.clear()
+                break
+            if state.page == 3 and cluster_ctx:
+                if ch == curses.KEY_UP:
+                    cluster_ui.move(-1, cluster_ui.last_n)
+                    break
+                if ch == curses.KEY_DOWN:
+                    cluster_ui.move(1, cluster_ui.last_n)
+                    break
+                if ch == ord('a'):
+                    cluster_ui.toggle_filter()
+                    stdscr.clear()
+                    break
+                if ch == ord('o'):
+                    cluster_ui.cycle_sort()
+                    stdscr.clear()
+                    break
+                if ch in (curses.KEY_ENTER, 10, 13):
+                    if cluster_ui.selected_name:
+                        cluster_ui.enter_drilldown(cluster_ui.selected_name)
+                        state.page = 1
+                        stdscr.clear()
+                    break
             if ch == ord('s'):
                 sort_nics = not sort_nics
                 stdscr.clear()
@@ -401,20 +521,20 @@ def main_loop(stdscr, state, rate):
             # anything else -- including Esc, or wandering into another
             # knob's key -- cancels), per spec: "y executes, anything else
             # cancels" must hold for every key, not just the ones below.
-            if state.page == 2 and knob_ui.confirming:
+            if state.page == 2 and not in_remote and knob_ui.confirming:
                 if ch != -1:
                     if ch in (ord('y'), ord('Y')):
                         knob_ui.confirm_yes(knob_ui.last_registry)
                     else:
                         knob_ui.cancel()
                     break
-            elif state.page == 2 and ch == 9:  # Tab
+            elif state.page == 2 and not in_remote and ch == 9:  # Tab
                 knob_ui.select_next_gpu(knob_ui.n_gpus)
                 break
-            elif state.page == 2 and ch in (ord('P'), ord('p')):
+            elif state.page == 2 and not in_remote and ch in (ord('P'), ord('p')):
                 knob_ui.focus_power_cycle(knob_ui.last_registry)
                 break
-            elif state.page == 2 and ch == ord('C'):
+            elif state.page == 2 and not in_remote and ch == ord('C'):
                 # Capital-only: lowercase 'c' is the global theme-cycle key
                 # (handled far above, before this whole Phase 4 block, so it
                 # never reaches here) -- keeping this case-sensitive is what
@@ -422,25 +542,25 @@ def main_loop(stdscr, state, rate):
                 # the sm clock-lock knob.
                 knob_ui.focus_clock(knob_ui.last_registry, "sm")
                 break
-            elif state.page == 2 and ch in (ord('M'), ord('m')):
+            elif state.page == 2 and not in_remote and ch in (ord('M'), ord('m')):
                 knob_ui.focus_clock(knob_ui.last_registry, "mem")
                 break
-            elif state.page == 2 and ch in (ord('R'), ord('r')):
+            elif state.page == 2 and not in_remote and ch in (ord('R'), ord('r')):
                 knob_ui.arm_reset(knob_ui.last_registry)
                 break
-            elif state.page == 2 and ch in (ord('X'), ord('x')):
+            elif state.page == 2 and not in_remote and ch in (ord('X'), ord('x')):
                 knob_ui.arm_persist(knob_ui.last_registry)
                 break
-            elif state.page == 2 and ch == curses.KEY_LEFT:
+            elif state.page == 2 and not in_remote and ch == curses.KEY_LEFT:
                 knob_ui.step(knob_ui.last_registry, -1)
                 break
-            elif state.page == 2 and ch == curses.KEY_RIGHT:
+            elif state.page == 2 and not in_remote and ch == curses.KEY_RIGHT:
                 knob_ui.step(knob_ui.last_registry, 1)
                 break
-            elif state.page == 2 and ch in (curses.KEY_ENTER, 10, 13):
+            elif state.page == 2 and not in_remote and ch in (curses.KEY_ENTER, 10, 13):
                 knob_ui.enter(knob_ui.last_registry)
                 break
-            elif state.page == 2 and ch == 27:  # Esc
+            elif state.page == 2 and not in_remote and ch == 27:  # Esc
                 knob_ui.cancel()
                 break
             time.sleep(0.05)
@@ -472,6 +592,39 @@ def main():
     state = State(opts["rate"])
     state.page = opts["page"]
 
+    # --json: print one sample (+ node metadata) and exit -- the same wire
+    # format --serve's /sample and --cluster's pollers use, so `spark-smi
+    # --json | python -m json.tool` is also the quickest way to sanity-check
+    # what a cluster member will hand its aggregator.
+    if opts["json"]:
+        payload = cluster.build_json_payload(state)
+        print(cluster.dumps(payload))
+        return
+
+    # --serve: block forever answering GET /sample + /healthz. Never reaches
+    # the render paths below -- this process IS the server, nothing else.
+    if opts["serve"] is not None:
+        cluster.run_server(state, port=opts["serve"], verbose=opts["serve_verbose"])
+        return
+
+    # --cluster: build the aggregator (and its ClusterUI) up front so both
+    # the live and snapshot paths below can hand it to render_dashboard --
+    # cluster_ctx stays None (page 3 unreachable, key '3' inert, no 3rd tab)
+    # whenever --cluster wasn't given at all.
+    cluster_ctx = None
+    if opts["cluster"] is not _UNSET:
+        try:
+            entries, cname = cluster.parse_cluster_hosts(opts["cluster"])
+        except Exception as e:
+            print(f"--cluster: {e}", file=sys.stderr)
+            sys.exit(1)
+        if not entries:
+            print("--cluster: no hosts to poll (empty list/file)", file=sys.stderr)
+            sys.exit(1)
+        token = os.environ.get("SPARK_SMI_TOKEN") or None
+        aggregator = cluster.ClusterAggregator(entries, state, rate=opts["rate"], token=token)
+        cluster_ctx = {"name": cname, "aggregator": aggregator, "ui": cluster.ClusterUI()}
+
     if opts["loop"]:
         try:
             import curses
@@ -485,14 +638,24 @@ def main():
             locale.setlocale(locale.LC_ALL, "")
         except Exception:
             pass
+        if cluster_ctx:
+            cluster_ctx["aggregator"].start()
         try:
-            curses.wrapper(main_loop, state, opts["rate"])
+            curses.wrapper(main_loop, state, opts["rate"], cluster_ctx)
         except KeyboardInterrupt:
             pass
+        finally:
+            if cluster_ctx:
+                cluster_ctx["aggregator"].stop()
     else:
+        if cluster_ctx and state.page == 3:
+            # Snapshot mode has no background thread ticking -- one blocking
+            # poll round (2s cap, spec) gets every member's freshest sample
+            # before the single render.
+            cluster_ctx["aggregator"].poll_once_sync(budget=2.0)
         v = term.VirtualCurses()
         colors = {i: i for i in term.PALETTE_256}
-        render_dashboard(v, colors, state, page_num=state.page)
+        render_dashboard(v, colors, state, page_num=state.page, cluster_ctx=cluster_ctx)
         output = v.render()
         # Some Windows consoles/pipes report a non-UTF-8 stdout encoding
         # (cp1252/cp437) even when BAR_STYLE picked "ascii" for the bars --

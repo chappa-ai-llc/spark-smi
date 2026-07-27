@@ -169,12 +169,13 @@ directory, plus ASIC temperature from the NIC's own hwmon device.
 
 | Key | Page | Action |
 |:---:|:---:|:---|
-| `q` | both | Quit |
-| `1` / `2` | both | Switch page (overview / advanced) |
-| `t` | both | Toggle temperature units (°C / °F) |
-| `u` | both | Toggle memory units (GiB / GB, decimal) |
-| `c` | both | Cycle color theme (see "Themes" above; capital `T` is an undocumented alias) |
-| `?` | both | Toggle the help overlay (any key dismisses it) |
+| `q` | all | Quit |
+| `1` / `2` | all | Switch page (overview / advanced) |
+| `3` | all | Cluster page (only live with `--cluster`; inert otherwise) |
+| `t` | all | Toggle temperature units (°C / °F) |
+| `u` | all | Toggle memory units (GiB / GB, decimal) |
+| `c` | all | Cycle color theme (see "Themes" above; capital `T` is an undocumented alias) |
+| `?` | 1 / 2 | Toggle the help overlay (any key dismisses it) |
 | `n` | 1 | Show active NICs only |
 | `s` | 1 | Sort NIC rows by current rate (max of RX/TX), descending — toggle back to detection order |
 | `Tab` | 2 | Select GPU (when more than one) |
@@ -184,11 +185,17 @@ directory, plus ASIC temperature from the NIC's own hwmon device.
 | `X` | 2 | Toggle GPU persistence mode (confirm required) |
 | `←` / `→` | 2 | Step the focused knob's pending value |
 | `Enter` | 2 | Apply the focused knob (raises a `y`/`N` confirm) |
-| `Esc` | 2 | Cancel the pending step or confirm |
+| `Enter` | 3 | Drill into the selected node's page 1 (remote sample; knobs disabled) |
+| `↑` / `↓` | 3 | Select a node |
+| `a` | 3 | Fleet matrix (>8 nodes) only: show alerting nodes only |
+| `o` | 3 | Fleet matrix only: cycle sort column (name / GPU / power / alerts-first) |
+| `Esc` | 2 / 3 | Cancel the pending step or confirm (page 2) / back out of a node drilldown to the cluster page |
 
 Knobs only ever appear when they're actually writable for the hardware in
 front of you (see "Power tuning notes"), and applying one always goes through
-an explicit confirm prompt before anything is written.
+an explicit confirm prompt before anything is written. Knobs are always
+local-only: drilling into a remote node's page 2 (cluster mode) shows that
+node's data read-only, with a "knobs are local-only" note in the footer.
 
 ---
 
@@ -226,16 +233,60 @@ spark-smi [options]
 
   -l, --loop       live mode: curses TUI, refreshed continuously
   -n <secs>        refresh rate in seconds (default: 1)
-  -p, --page <n>   which page to render in snapshot mode: 1 overview (default)
-                   or 2 advanced (GPU detail, NIC/thermal/SMART panels)
+  -p, --page <n>   which page to render in snapshot mode: 1 overview (default),
+                   2 advanced (GPU detail, NIC/thermal/SMART panels), or
+                   3 cluster (requires --cluster)
   --theme <name>   color theme (default: spark; or $SPARK_SMI_THEME)
   --theme list     print the available theme names, one per line, and exit
   --ascii          force plain-ASCII bars/frames (no UTF-8 box drawing)
+  --json           print one sample as JSON (+ node/model/version/ts) and exit
+  --serve [PORT]   read-only HTTP sample server (default port 8817);
+                   GET /sample, GET /healthz. $SPARK_SMI_TOKEN, if set, is
+                   required as the X-Spark-Token header on /sample
+  --serve-verbose  log one line per request to stderr (--serve only)
+  --cluster HOSTS  cluster mode: page 3 shows every node in HOSTS (comma-
+                   separated "host"/"host:port"/"ssh:host" entries, or
+                   "@file" -- one entry per line, # comments). Bare
+                   --cluster (no value) tries ~/.config/spark-smi/cluster
   -h, --help       show this help and exit
 ```
 
 Snapshot mode (no `-l`) renders once and prints ANSI to stdout — pipe it, log
 it, script it, same as `nvidia-smi`.
+
+---
+
+## Cluster mode
+
+Point one `spark-smi` at several nodes and page 3 turns into a fleet view:
+
+```bash
+# on each node you want to monitor from elsewhere:
+spark-smi --serve                      # serves GET /sample + /healthz on :8817
+
+# on the node you're watching from:
+spark-smi -l --cluster sparky-1,sparky-2,sparky-3,sparky-4
+spark-smi -l --cluster @~/.config/spark-smi/cluster   # or bare --cluster to try that path
+spark-smi --cluster sparky-1,sparky-2 --page 3         # one-shot snapshot (2s poll cap)
+```
+
+- `host` polls `http://host:8817/sample`; `host:port` overrides the port;
+  `ssh:host` falls back to `ssh -o BatchMode=yes host spark-smi --json` per
+  tick — fine for bootstrapping a small cluster, not a substitute for
+  `--serve` at any real scale. The entry matching the local hostname reads
+  the local dashboard's own state directly instead of going over the
+  network.
+- Up to 8 nodes: a SECTIONS view, one row per node under CPU / MEMORY / GPU /
+  FABRIC / STORAGE. More than 8: a FLEET matrix (one compact row per node)
+  plus an ALERTS panel (unreachable · temp ≥ 80°C · CNP storm · link down ·
+  disk ≥ 85%).
+- A node that stops answering is marked stale (dim "unreachable Ns" row with
+  its last-seen values) after 3× the poll interval — the render loop never
+  blocks on the network; it always draws whatever the background poller last
+  collected.
+- `$SPARK_SMI_TOKEN`, if set, is sent as the `X-Spark-Token` header on every
+  poll and required by `--serve` on the polled side (both ends read the same
+  variable).
 
 ---
 

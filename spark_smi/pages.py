@@ -178,32 +178,70 @@ def _short_mem(bytes_val):
 # Header / footer (plain, borderless panels)
 # =========================================================================
 
-def _build_header(x0, width, tier, page=1):
-    host = _safe(platform.node, "host") or "host"
-    model = _machine_model()
-    arch = _safe(platform.machine, "") or ""
-    uptime = _fmt_uptime(time.time() - _safe(psutil.boot_time, time.time()))
+def _cluster_tabs_text(page):
+    order = [(1, "NODE"), (2, "ADV"), (3, "CLUSTER")]
+    return " ".join(f"▌{n} {t}▐" if n == page else f"{n} {t}" for n, t in order) + " "
+
+
+def _cluster_tabs_compact(page):
+    return "".join(f"▌{n}▐" if n == page else str(n) for n in (1, 2, 3)) + "  "
+
+
+def _build_header(x0, width, tier, page=1, cluster_tabs=False, cluster_summary=None, remote=None):
+    """`cluster_tabs` (Phase 6, --cluster only) swaps the 2-tab
+    "OVERVIEW/ADVANCED" bar for the 3-tab "NODE/ADV/CLUSTER" one shown in
+    mock_cluster_sections/fleet -- pages 1/2 use it too whenever --cluster
+    was given (not just page 3 itself), since key '3' is live on all of
+    them in that mode. `cluster_summary` (page 3 only) replaces the normal
+    host/model/uptime block with the cluster-level line ("spark-grid — 4
+    nodes · all up │ Σ wall 412 W"). `remote` (pages 1/2 drilldown only) is
+    the selected node's name -- shown in place of the local hostname, with
+    a dim " · remote" tag appended so it's never confused with the local
+    node's own page 1/2."""
+    host = remote or (_safe(platform.node, "host") or "host")
+    # model/arch/uptime are LOCAL machine probes (device-tree/DMI, uname,
+    # psutil.boot_time()) -- meaningless (actively misleading) for a remote
+    # drilldown node, since nothing about that data travels over the wire
+    # format. Skip probing them entirely when `remote` is set; the header
+    # just shows the remote node's name + the dim "· remote" tag.
+    model = _machine_model() if not remote else None
+    arch = (_safe(platform.machine, "") or "") if not remote else ""
+    uptime = _fmt_uptime(time.time() - _safe(psutil.boot_time, time.time())) if not remote else ""
     clock = time.strftime("%H:%M:%S")
+    remote_tag = [(" · remote", 6)] if remote else []
 
     if tier == "compact":
-        chip = model or arch
-        core = f" │ {host}" + (f" · {chip}" if chip else "")
-        tabs = "1 ▌2▐  " if page == 2 else "▌1▐ 2  "
+        if cluster_summary is not None:
+            core = f" │ {cluster_summary}"
+        elif remote:
+            core = f" │ {host}"
+        else:
+            chip = model or arch
+            core = f" │ {host}" + (f" · {chip}" if chip else "")
+        tabs = _cluster_tabs_compact(page) if cluster_tabs else ("1 ▌2▐  " if page == 2 else "▌1▐ 2  ")
         right = [(tabs, 9), (clock, 3)]
         p = panels.Panel(0, x0, width, kind="plain")
-        p.rows.append(([(" SPARK-SMI 2.0", 9), (core, 3)], right))
+        p.rows.append(([(" SPARK-SMI 2.0", 9), (core, 3)] + remote_tag, right))
         return p
 
-    tabs = "1 OVERVIEW  ▌2▐ ADVANCED  " if page == 2 else "▌1▐ OVERVIEW  2 ADVANCED  "
+    tabs = _cluster_tabs_text(page) if cluster_tabs else \
+        ("1 OVERVIEW  ▌2▐ ADVANCED  " if page == 2 else "▌1▐ OVERVIEW  2 ADVANCED  ")
     right = [(tabs, 9), (clock, 3)]
     right_len = sum(len(t) for t, _ in right)
+    remote_len = sum(len(t) for t, _ in remote_tag)
+
+    prefix = " SPARK-SMI 2.0"
+
+    if cluster_summary is not None:
+        core = f" │ {cluster_summary}"
+        p = panels.Panel(0, x0, width, kind="plain")
+        p.rows.append(([(prefix, 9), (core, 3)], right))
+        return p
 
     # Never truncate mid-token: drop whole optional segments right-to-left
     # in this priority order (arch first, then uptime, then model) until
     # the line fits.
-    show = {"model": bool(model), "arch": bool(arch), "uptime": True}
-
-    prefix = " SPARK-SMI 2.0"
+    show = {"model": bool(model), "arch": bool(arch), "uptime": not remote}
 
     def build():
         tail = [t for t, key in ((model, "model"), (arch, "arch")) if show[key] and t]
@@ -216,21 +254,31 @@ def _build_header(x0, width, tier, page=1):
 
     core = build()
     for key in ("arch", "uptime", "model"):
-        if len(prefix) + len(core) + right_len + 1 <= width:
+        if len(prefix) + len(core) + remote_len + right_len + 1 <= width:
             break
         show[key] = False
         core = build()
 
     p = panels.Panel(0, x0, width, kind="plain")
-    p.rows.append(([(prefix, 9), (core, 3)], right))
+    p.rows.append(([(prefix, 9), (core, 3)] + remote_tag, right))
     return p
 
 
-def _build_footer(x0, width, y, driver, cuda, rate, has_nvml, extra_keys=None, knob_ui=None):
+def _build_footer(x0, width, y, driver, cuda, rate, has_nvml, extra_keys=None, knob_ui=None, remote_note=None):
     """`extra_keys`/`knob_ui` (Phase 4, page 2 only -- build_page1 never
     passes them) add the tab/P/C/M/R/X knob hints to the key-bar ladder and,
     while a knob is armed or a toast is live, replace the whole footer line
-    with the confirm prompt / apply result instead."""
+    with the confirm prompt / apply result instead. `remote_note` (Phase 6,
+    page 2 drilldown only) replaces the whole footer with a short key
+    reminder plus a dim note that knobs aren't available against a remote
+    sample -- the registry is never built for one (see app.py), so nothing
+    downstream of this even has to know why; this is purely the visible
+    explanation."""
+    if remote_note:
+        p = panels.Panel(y, x0, width, kind="plain")
+        p.rows.append(([(" q quit · 1 2 3 page · esc back to cluster", 9), (f"  {remote_note}", 6)], []))
+        return p
+
     if knob_ui and (knob_ui.get("confirming") or knob_ui.get("toast")):
         if knob_ui.get("confirming"):
             text, slot = (knob_ui.get("confirm_text") or "apply? y/N"), 5
@@ -816,7 +864,8 @@ def _build_storage_panel(y, x0, width, disks, tier):
 # Page 1 assembly
 # =========================================================================
 
-def build_page1(state, tier, width, x0=0, height=None, sort_nics=False, theme_toast=None):
+def build_page1(state, tier, width, x0=0, height=None, sort_nics=False, theme_toast=None,
+                 remote=None, cluster_tabs=False):
     """Builds page 1: header, CPU+MEMORY compound frame, GPU card(s),
     NETWORK+STORAGE compound frame, footer. `height` (available screen rows),
     when given, drives a simple degrade order: sparklines -> memory legend
@@ -858,7 +907,7 @@ def build_page1(state, tier, width, x0=0, height=None, sort_nics=False, theme_to
         if est > height and len(nics) > 1:
             collapse_nics = True
 
-    out.append(_build_header(x0, width, tier))
+    out.append(_build_header(x0, width, tier, cluster_tabs=cluster_tabs, remote=remote))
     y = 1
 
     cpu_panel = _build_cpu_panel(y, x0, width, cpu, tier, show_sparkline)
@@ -1425,7 +1474,8 @@ def _build_nvme_smart_panel(y, x0, width, smart, kind="top"):
     return p
 
 
-def build_page2(state, tier, width, x0=0, height=None, knob_ui=None, theme_toast=None):
+def build_page2(state, tier, width, x0=0, height=None, knob_ui=None, theme_toast=None,
+                 remote=None, cluster_tabs=False):
     """Builds page 2: header (ADVANCED tab active), one full-width detail
     panel per GPU, the NIC advanced panel (ungrouped per-PF rows), and
     THERMALS / POWER RAILS / NVME SMART. Every panel build is wrapped
@@ -1485,7 +1535,7 @@ def build_page2(state, tier, width, x0=0, height=None, knob_ui=None, theme_toast
     if drop_zones:
         thermal_entries = [e for e in thermal_entries if e.get("kind") != "thermal"]
 
-    out.append(_build_header(x0, width, tier, page=2))
+    out.append(_build_header(x0, width, tier, page=2, cluster_tabs=cluster_tabs, remote=remote))
     y = 1
 
     for idx, gpu in enumerate(gpus):
@@ -1567,6 +1617,590 @@ def build_page2(state, tier, width, x0=0, height=None, knob_ui=None, theme_toast
         footer_knob_ui = dict(knob_ui) if knob_ui else {}
         footer_knob_ui["toast"] = theme_toast
 
+    remote_note = "knobs are local-only" if remote else None
     out.append(_build_footer(x0, width, y, driver, cuda, rate, has_nvml,
-                              extra_keys=extra_keys, knob_ui=footer_knob_ui))
+                              extra_keys=extra_keys, knob_ui=footer_knob_ui, remote_note=remote_note))
+    return out
+
+
+# =========================================================================
+# Page 3 (Phase 6, --cluster only): SECTIONS (<=8 nodes) / FLEET (>8 nodes)
+# =========================================================================
+# `cluster_ctx` (build_page3's only argument besides the usual tier/width/x0/
+# height) is a plain dict: {"name": str, "views": [...] (from
+# cluster.ClusterAggregator.get_views()), "rate": float, "ui": a
+# cluster.ClusterUI or None}. Each view's "sample" -- when present -- is the
+# SAME shape build_page1/build_page2 already consume (local State.sample()
+# or cluster.from_wire() of a remote /sample payload), so every helper below
+# reads it exactly like page 1's builders read the local sample. Every
+# section/row builder takes `selected_idx` as a plain int (-1 = none) rather
+# than threading a ClusterUI object around, matching the "screen-agnostic,
+# pure data in" style of the rest of this module.
+
+def _cluster_fmt_capacity(bytes_val):
+    """Sum-of-nodes capacity, TiB once it's big enough to want it -- unlike
+    term.fmt_mem (GiB only) or term.fmt_disk_size (no space/i, single disk
+    scale), the SECTIONS header sums whole-cluster storage/memory into the
+    TiB range routinely (mock: "Σ 14.9 TiB")."""
+    try:
+        v = float(bytes_val)
+    except Exception:
+        return "N/A"
+    div = 1024.0 ** 4
+    if v >= div:
+        return f"{v / div:.1f} TiB"
+    return f"{v / (1024.0 ** 3):.1f} GiB"
+
+
+def _cluster_metrics(sample):
+    """Node-level rollups from one node's sample dict -- shared by the
+    SECTIONS row builders, the FLEET matrix, and the alert rules. Returns
+    None for a node with no sample yet (unreachable / never polled)."""
+    if not sample:
+        return None
+    try:
+        cpu = sample.get("cpu") or {}
+        clusters = cpu.get("clusters") or []
+        total_cores = sum(len(c.get("cores") or []) for c in clusters)
+        cpu_pct = (sum(c.get("avg", 0.0) * len(c.get("cores") or []) for c in clusters) / total_cores
+                   if total_cores else 0.0)
+        cpu_ghz = max((c.get("ghz") or 0.0 for c in clusters), default=0.0)
+        pairs = []
+        for c in clusters:
+            pairs.extend(zip(c.get("cores") or [], c.get("loads") or []))
+        pairs.sort(key=lambda t: t[0])
+        percpu = [l for _, l in pairs] or (cpu.get("percpu") or [])
+        hist_len = max((len(c.get("history") or []) for c in clusters), default=0)
+        cpu_hist = []
+        for i in range(hist_len):
+            num = den = 0.0
+            for c in clusters:
+                h = c.get("history") or []
+                if i < len(h):
+                    w = len(c.get("cores") or []) or 1
+                    num += h[i] * w
+                    den += w
+            cpu_hist.append(num / den if den else 0.0)
+
+        mem = sample.get("mem") or {}
+        vm = mem.get("vm")
+        mem_total = getattr(vm, "total", None) if vm is not None else None
+        mem_used = getattr(vm, "used", None) if vm is not None else None
+        gpu_alloc = mem.get("gpu_alloc") or 0
+
+        gpus = sample.get("gpus") or []
+        gpu_util_max = max((g.get("util", 0) or 0 for g in gpus), default=0)
+        gpu_pwr_sum = 0.0
+        for g in gpus:
+            try:
+                gpu_pwr_sum += float(str(g.get("pwr_str", "")).replace("W", "").strip())
+            except Exception:
+                pass
+
+        nics = sample.get("nics") or []
+        rx_sum = sum(n.get("rx_bps", 0) or 0 for n in nics)
+        tx_sum = sum(n.get("tx_bps", 0) or 0 for n in nics)
+
+        nic_pf = sample.get("nic_pf") or []
+        cnp_sent_sum = sum((p.get("cnp_sent") or 0) for p in nic_pf)
+        cnp_handled_sum = sum((p.get("cnp_handled") or 0) for p in nic_pf)
+
+        disks = sample.get("disks") or []
+        worst_disk_pct = max((d.get("used_pct") or 0 for d in disks), default=0)
+        hottest_disk = max((d for d in disks if d.get("temp") is not None),
+                            key=lambda d: d["temp"], default=(disks[0] if disks else None))
+
+        all_temps = [cpu.get("temp")] + [g.get("temp") for g in gpus] + [sample.get("nic_asic_temp")]
+        max_temp = max((t for t in all_temps if isinstance(t, (int, float))), default=None)
+
+        power_rails = sample.get("power_rails") or []
+
+        return {
+            "cpu_pct": cpu_pct, "cpu_ghz": cpu_ghz, "cpu_temp": cpu.get("temp"),
+            "percpu": percpu, "cpu_hist": cpu_hist,
+            "mem_total": mem_total, "mem_used": mem_used,
+            "mem_pct": (mem_used / mem_total * 100) if mem_total else 0.0,
+            "gpu_alloc": gpu_alloc, "gpus": gpus,
+            "gpu_util_max": gpu_util_max, "gpu_pwr_sum": gpu_pwr_sum,
+            "nics": nics, "rx_sum": rx_sum, "tx_sum": tx_sum,
+            "nic_pf": nic_pf, "cnp_sent_sum": cnp_sent_sum, "cnp_handled_sum": cnp_handled_sum,
+            "nic_asic_temp": sample.get("nic_asic_temp"),
+            "disks": disks, "worst_disk_pct": worst_disk_pct, "hottest_disk": hottest_disk,
+            "max_temp": max_temp, "power_rails": power_rails,
+        }
+    except Exception:
+        return None
+
+
+def _cluster_alerts(view, m):
+    """[(node_name, reason_text, "red"|"amber"), ...] for one node, per the
+    spec's rules: unreachable is the only "red" case, everything else
+    (temp>=80, cnp rate>50/s, a port link down, a disk>=85% used) is
+    "amber" -- matches mock_cluster_fleet's ALERTS row (sparky-03 cnp+temp,
+    sparky-04 link down, both amber; sparky-07 unreachable, red)."""
+    name = view.get("name") or "?"
+    if view.get("stale") or not view.get("sample"):
+        return [(name, "unreachable", "red")]
+    if m is None:
+        return []
+    out = []
+    if m.get("max_temp") is not None and m["max_temp"] >= 80:
+        out.append((name, f"{m['max_temp']:.0f}°C", "amber"))
+    for p in m.get("nic_pf") or []:
+        if (p.get("cnp_sent") or 0) > 50:
+            out.append((name, f"cnp storm {p.get('port', '?')}", "amber"))
+    for n in m.get("nics") or []:
+        if not n.get("up"):
+            out.append((name, f"{n.get('name', '?')} link down", "amber"))
+    for d in m.get("disks") or []:
+        if (d.get("used_pct") or 0) >= 85:
+            out.append((name, f"{d.get('name', '?')} {d.get('used_pct'):.0f}%", "amber"))
+    return out
+
+
+def _short_health_code(reason):
+    if reason == "unreachable":
+        return "down"
+    if reason.startswith("cnp storm"):
+        return "cnp"
+    if reason.endswith("link down"):
+        port = reason.split()[0]
+        return f"{port}▼"
+    if reason.endswith("%"):
+        return reason.rsplit(" ", 1)[-1]
+    if "°C" in reason:
+        return "hot"
+    return reason[:6]
+
+
+def _cluster_sort_key(mode):
+    if mode == "gpu":
+        return lambda vm: -((vm[1] or {}).get("gpu_util_max", 0))
+    if mode == "power":
+        return lambda vm: -((vm[1] or {}).get("gpu_pwr_sum", 0))
+    if mode == "alerts":
+        return lambda vm: 0 if _cluster_alerts(vm[0], vm[1]) else 1
+    return lambda vm: (vm[0].get("name") or "")
+
+
+def _cluster_node_field(name, w):
+    return f"{(name or '?')[:w]:<{w}}"
+
+
+def _cluster_row_prefix(f, view, is_selected, name_w):
+    f.add("▶ " if is_selected else "  ", 9 if is_selected else 3)
+    f.add(_cluster_node_field(view.get("name"), name_w) + " ", 8)
+
+
+def _cluster_pct_bar(f, pct, width, suffix_slot=3):
+    lb, rb = term.bar_brackets()
+    bar, slot = term.make_bar(pct, width)
+    f.add(lb, 6)
+    f.add(bar, slot)
+    f.add(rb, 6)
+    f.add(f" {int(pct):>3}%", suffix_slot)
+
+
+# --- SECTIONS mode (<=8 nodes) ------------------------------------------
+
+def _cluster_cpu_summary(views):
+    total_cores = total_clusters = 0
+    family = None
+    for v in views:
+        s = v.get("sample")
+        if not s:
+            continue
+        clusters = (s.get("cpu") or {}).get("clusters") or []
+        total_clusters += len(clusters)
+        total_cores += sum(len(c.get("cores") or []) for c in clusters)
+        if clusters and family is None:
+            family = (clusters[0].get("label") or "CPU").split("-")[0]
+    if not total_clusters:
+        return "no data"
+    return f"{total_cores} cores · {total_clusters}× {family or 'CPU'} clusters"
+
+
+def _build_cluster_cpu_section(y, x0, width, views, metrics, selected_idx, name_w, kind):
+    inner = width - 2
+    loadavg_sum = 0.0
+    have_loadavg = False
+    for v, m in zip(views, metrics):
+        s = v.get("sample")
+        if s and not v.get("stale"):
+            la = (s.get("cpu") or {}).get("loadavg")
+            if la:
+                loadavg_sum += la[0]
+                have_loadavg = True
+    title_right = [(f"Σ load {loadavg_sum:.1f}", 3)] if have_loadavg else []
+    p = panels.Panel(y, x0, width, title=[("CPU", 9), (f" {_cluster_cpu_summary(views)}", 3)],
+                      title_right=title_right, kind=kind)
+    for i, (view, m) in enumerate(zip(views, metrics)):
+        f = _Flow(inner - 2)
+        _cluster_row_prefix(f, view, i == selected_idx, name_w)
+        if view.get("stale") or m is None:
+            f.add("— unreachable", 6)
+            p.add_row(_finish_row(f, 1))
+            continue
+        _cluster_pct_bar(f, m["cpu_pct"], 11)
+        f.add("  ", 3)
+        strip = term.core_strip(m["percpu"])
+        if strip:
+            f.try_add(strip + "  ", 1)
+        f.try_add(f"{m['cpu_ghz']:.2f} GHz  ", 3)
+        f.try_add(f"{term.fmt_temp(m['cpu_temp']):<5} ", 3)
+        spark = term.sparkline(m["cpu_hist"], min(16, max(0, f.room())))
+        if spark:
+            f.add(spark, 2)
+        p.add_row(_finish_row(f, 1))
+    return p
+
+
+def _build_cluster_mem_section(y, x0, width, views, metrics, selected_idx, name_w, kind):
+    inner = width - 2
+    total = sum((m or {}).get("mem_total") or 0 for m in metrics)
+    used = sum((m or {}).get("mem_used") or 0 for m in metrics)
+    subtitle = (f"Σ {_cluster_fmt_capacity(total)} unified · Σ used {_cluster_fmt_capacity(used)}"
+                if total else "no data")
+    p = panels.Panel(y, x0, width, title=[("MEMORY", 9), (f" {subtitle}", 3)], kind=kind)
+    for i, (view, m) in enumerate(zip(views, metrics)):
+        f = _Flow(inner - 2)
+        _cluster_row_prefix(f, view, i == selected_idx, name_w)
+        if view.get("stale") or m is None or not m.get("mem_total"):
+            f.add("— unreachable" if (view.get("stale") or m is None) else "no data", 6)
+            p.add_row(_finish_row(f, 1))
+            continue
+        gpu_alloc = m.get("gpu_alloc") or 0
+        used_other = max(0.0, (m["mem_used"] or 0) - gpu_alloc)
+        segs_spec = [(used_other / m["mem_total"], 1, "█")]
+        if gpu_alloc > 0:
+            segs_spec.append((gpu_alloc / m["mem_total"], 2, "▓"))
+        segs_spec.append((max(0.0, 1.0 - sum(s[0] for s in segs_spec)), 7, "░"))
+        chunks = term.seg_bar(segs_spec, 16)
+        lb, rb = term.bar_brackets()
+        f.add(lb, 6)
+        for text, slot in chunks:
+            f.add(text, slot)
+        f.add(rb, 6)
+        f.add(f" {int(m['mem_pct']):>3}%  ", 3)
+        f.try_add(f"{m['mem_used'] / (1024 ** 3):.1f} / {m['mem_total'] / (1024 ** 3):.1f} G  ", 3)
+        if gpu_alloc > 0:
+            f.try_add(f"gpu-alloc {gpu_alloc / (1024 ** 3):.1f}G", 3)
+        else:
+            f.try_add("gpu-alloc —", 6)
+        p.add_row(_finish_row(f, 1))
+    return p
+
+
+def _build_cluster_gpu_section(y, x0, width, views, metrics, selected_idx, name_w, kind):
+    inner = width - 2
+    first_gpu = next((g for m in metrics if m for g in (m.get("gpus") or [])), None)
+    total_gpus = sum(len((m or {}).get("gpus") or []) for m in metrics)
+    gname = first_gpu.get("name", "GPU") if first_gpu else "GPU"
+    unified = bool(re.match(r"^GB\d+", gname or ""))
+    subtitle = f"{total_gpus}× {gname}" + (" (unified)" if unified else "") if total_gpus else "no data"
+    p = panels.Panel(y, x0, width, title=[("GPU", 9), (f" {subtitle}", 3)], kind=kind)
+    for i, (view, m) in enumerate(zip(views, metrics)):
+        gpus = (m or {}).get("gpus") or []
+        if not gpus:
+            f = _Flow(inner - 2)
+            _cluster_row_prefix(f, view, i == selected_idx, name_w)
+            f.add("— unreachable" if (view.get("stale") or m is None) else "no GPU", 6)
+            p.add_row(_finish_row(f, 1))
+            continue
+        for gi, g in enumerate(gpus):
+            f = _Flow(inner - 2)
+            if gi == 0:
+                _cluster_row_prefix(f, view, i == selected_idx, name_w)
+            else:
+                f.add("  ", 3)
+                f.add(_cluster_node_field(view.get("name"), name_w) + " ", 6)
+            util = g.get("util", 0) or 0
+            _cluster_pct_bar(f, util, 11)
+            f.add("  ", 3)
+            gpu_alloc = m.get("gpu_alloc") or 0
+            if gpu_alloc:
+                f.try_add(f"alloc {gpu_alloc / (1024 ** 3):.1f}G  ", 3)
+            else:
+                f.try_add("alloc —  ", 6)
+            f.try_add(f"{term.fmt_temp(g.get('temp')):<5} ", 3)
+            f.try_add(f"{g.get('pwr_str', 'N/A'):<6} ", 8)
+            spark = term.sparkline(g.get("history") or [], min(16, max(0, f.room())))
+            if spark:
+                f.add(spark, 2)
+            p.add_row(_finish_row(f, 1))
+    return p
+
+
+def _build_cluster_fabric_section(y, x0, width, views, metrics, selected_idx, name_w, kind):
+    inner = width - 2
+    rx_sum = sum((m or {}).get("rx_sum", 0) for m in metrics)
+    tx_sum = sum((m or {}).get("tx_sum", 0) for m in metrics)
+    hw = next((m["nics"][0].get("hw_label") for m in metrics if m and m.get("nics")), None)
+    subtitle = (f"{hw or 'NIC'} · RoCEv2 · Σ ▼ {term.fmt_rate(rx_sum, 'bit')} "
+                f"· Σ ▲ {term.fmt_rate(tx_sum, 'bit')}")
+    p = panels.Panel(y, x0, width, title=[("FABRIC", 9), (f" {subtitle}", 3)], kind=kind)
+    for i, (view, m) in enumerate(zip(views, metrics)):
+        f = _Flow(inner - 2)
+        _cluster_row_prefix(f, view, i == selected_idx, name_w)
+        if view.get("stale") or m is None:
+            f.add("— unreachable", 6)
+            p.add_row(_finish_row(f, 1))
+            continue
+        nics = m.get("nics") or []
+        if not nics:
+            f.try_add("no NICs  ", 6)
+        for j, n in enumerate(nics[:2]):
+            # "p0"/"p1" like the mock -- the netdev name truncates uselessly
+            label = f"p{j}"
+            if not n.get("up"):
+                f.try_add_multi([(f"{label} ", 3), ("— link down  ", 6)])
+                continue
+            f.try_add_multi([
+                (f"{label} ", 3),
+                (f"▼{term.fmt_rate(n.get('rx_bps', 0), 'bit')} ", 2),
+                (f"▲{term.fmt_rate(n.get('tx_bps', 0), 'bit')}  ", 1),
+            ])
+        cnp_s, cnp_h = m.get("cnp_sent_sum", 0), m.get("cnp_handled_sum", 0)
+        f.try_add(f"cnp {int(cnp_s)}/{int(cnp_h)}  ", 5 if cnp_s > 50 else 3)
+        asic = m.get("nic_asic_temp")
+        if asic is not None:
+            f.try_add(f"asic {term.fmt_temp(asic)}", 5 if asic >= 80 else 3)
+        p.add_row(_finish_row(f, 1))
+    return p
+
+
+def _build_cluster_storage_section(y, x0, width, views, metrics, selected_idx, name_w, kind):
+    inner = width - 2
+    total_size = 0
+    hottest = None
+    for m in metrics:
+        if not m:
+            continue
+        for d in m.get("disks") or []:
+            total_size += d.get("size") or 0
+            if d.get("temp") is not None and (hottest is None or d["temp"] > hottest):
+                hottest = d["temp"]
+    subtitle = f"Σ {_cluster_fmt_capacity(total_size)}" if total_size else "no data"
+    if hottest is not None:
+        subtitle += f" · hottest {term.fmt_temp(hottest)}"
+    p = panels.Panel(y, x0, width, title=[("STORAGE", 9), (f" {subtitle}", 3)], kind=kind)
+    for i, (view, m) in enumerate(zip(views, metrics)):
+        f = _Flow(inner - 2)
+        _cluster_row_prefix(f, view, i == selected_idx, name_w)
+        if view.get("stale") or m is None:
+            f.add("— unreachable", 6)
+            p.add_row(_finish_row(f, 1))
+            continue
+        hd = m.get("hottest_disk")
+        if hd is None:
+            f.add("no disks", 6)
+        else:
+            f.try_add(f"{(hd.get('name') or '?')[:5]:<5} ", 3)
+            used_pct = hd.get("used_pct")
+            if used_pct is not None:
+                lb, rb = term.bar_brackets()
+                bar, slot = term.make_bar(used_pct, 10)
+                f.try_add_multi([(lb, 6), (bar, slot), (rb, 6), (f" {int(used_pct):>2}%  ", 3)])
+            f.try_add(f"R {term.fmt_rate(hd.get('read_bps', 0), 'byte')}  ", 2)
+            f.try_add(f"W {term.fmt_rate(hd.get('write_bps', 0), 'byte')}  ", 2)
+            if hd.get("temp") is not None:
+                f.try_add(term.fmt_temp(hd["temp"]), 3)
+        p.add_row(_finish_row(f, 1))
+    return p
+
+
+# --- FLEET mode (>8 nodes) -----------------------------------------------
+
+_FLEET_HEADER_COLS = ["NODE", "CPU", "MEM", "GPU", "ALLOC", "TEMP", "PWR", "FAB ▼", "FAB ▲", "DISK", "HEALTH"]
+
+
+def _build_fleet_row(f, view, m, is_selected, name_w):
+    f.add("▶ " if is_selected else "  ", 9 if is_selected else 3)
+    f.add(_cluster_node_field(view.get("name"), name_w) + " ", 6 if (view.get("stale") or m is None) else 8)
+    if view.get("stale") or m is None:
+        last_ok = view.get("last_ok_ts") or 0
+        last = view.get("last_seen_summary")
+        if last_ok:
+            text = f"— unreachable {time.time() - last_ok:.0f} s"
+        else:
+            text = "— never reachable"
+        text += f" — last seen: {last}" if last else ""
+        f.try_add(text, 6)
+        return
+    bar, slot = term.make_bar(m["cpu_pct"], 5)
+    f.add(bar, slot)
+    f.add(f" {int(m['cpu_pct']):>3} ", 8)
+    bar, slot = term.make_bar(m["mem_pct"], 5)
+    f.add(bar, slot)
+    f.add(f" {int(m['mem_pct']):>3} ", 8)
+    bar, slot = term.make_bar(m["gpu_util_max"], 5)
+    f.add(bar, slot)
+    f.add(f" {int(m['gpu_util_max']):>3} ", 8)
+    alloc = m.get("gpu_alloc") or 0
+    f.try_add(f"{alloc / (1024 ** 3):>6.1f}G " if alloc else f"{'—':>7} ", 3 if alloc else 6)
+    maxtemp = m.get("max_temp")
+    f.try_add(f"{term.fmt_temp(maxtemp) if maxtemp is not None else 'N/A':>5} ", 5 if (maxtemp or 0) >= 80 else 3)
+    f.try_add(f"{m.get('gpu_pwr_sum', 0):>4.0f}W ", 8)
+    f.try_add(f"{term.fmt_rate(m.get('rx_sum', 0), 'bit'):>9} ", 2)
+    f.try_add(f"{term.fmt_rate(m.get('tx_sum', 0), 'bit'):>9} ", 1)
+    worst = m.get("worst_disk_pct", 0)
+    f.try_add(f"{int(worst):>3}% ", 5 if worst >= 85 else 3)
+    alerts = _cluster_alerts(view, m)
+    if any(sev == "red" for _, _, sev in alerts):
+        health, hslot = "down", 4
+    elif alerts:
+        health, hslot = _short_health_code(alerts[0][1]), 5
+    else:
+        health, hslot = "ok", 1
+    f.try_add(health, hslot)
+
+
+def _build_fleet_panel(y, x0, width, views, metrics, selected_idx, name_w, more_above=0, more_below=0):
+    inner = width - 2
+    rx_tot = sum((m or {}).get("rx_sum", 0) for m in metrics)
+    tx_tot = sum((m or {}).get("tx_sum", 0) for m in metrics)
+    title_right = [(f"Σ▼ {term.fmt_rate(rx_tot, 'bit')} · Σ▲ {term.fmt_rate(tx_tot, 'bit')}", 3)]
+    p = panels.Panel(y, x0, width, title=[("FLEET", 9), (" one row per node — auto-selected above 8 nodes", 3)],
+                      title_right=title_right, kind="top")
+    f = _Flow(inner - 2)
+    f.add("  ", 3)
+    for label in _FLEET_HEADER_COLS:
+        f.try_add(f"{label:<8}", 6)
+    p.add_row(_finish_row(f, 1))
+    if more_above:
+        p.add_row([(1, f"▲ {more_above} more", 6)])
+    for i, (view, m) in enumerate(zip(views, metrics)):
+        f = _Flow(inner - 2)
+        _build_fleet_row(f, view, m, i == selected_idx, name_w)
+        p.add_row(_finish_row(f, 1))
+    if more_below:
+        p.add_row([(1, f"▼ {more_below} more", 6)])
+    return p
+
+
+def _build_alerts_panel(y, x0, width, views, metrics, kind):
+    inner = width - 2
+    all_alerts = []
+    for view, m in zip(views, metrics):
+        all_alerts.extend(_cluster_alerts(view, m))
+    # Reds (unreachable) first -- the highest-severity alerts must survive
+    # width/height truncation, not whichever node happened to sort first by
+    # iteration order.
+    all_alerts.sort(key=lambda a: 0 if a[2] == "red" else 1)
+    p = panels.Panel(y, x0, width, title=[("ALERTS", 9)], kind=kind)
+    if not all_alerts:
+        p.add_row([(1, "no active alerts", 1)])
+        return p
+    # Wrap onto additional rows rather than silently dropping alerts once
+    # one row's width runs out -- an alert list, unlike a decorative status
+    # line, must never just disappear because of a narrow terminal.
+    f = _Flow(inner - 2)
+    started = False
+    for name, reason, sev in all_alerts:
+        slot = 4 if sev == "red" else 5
+        item = [("▪ ", slot), (f"{name} {reason}", 3)]
+        parts = ([("  ·  ", 6)] + item) if started else item
+        if f.try_add_multi(parts):
+            started = True
+            continue
+        if started:
+            p.add_row(_finish_row(f, 1))
+        f = _Flow(inner - 2)
+        started = f.try_add_multi(item)
+    if started:
+        p.add_row(_finish_row(f, 1))
+    return p
+
+
+# --- Assembly --------------------------------------------------------
+
+def build_page3(cluster_ctx, tier, width, x0=0, height=None):
+    """Builds page 3 (--cluster only): header (3-tab, cluster summary),
+    then either the SECTIONS compound frame (<=8 nodes, one row per node
+    per CPU/MEMORY/GPU/FABRIC/STORAGE panel) or the FLEET matrix + ALERTS
+    (>8 nodes), then the footer. `cluster_ctx` = {"name", "views", "rate",
+    "ui"} -- see the module-level comment above this section."""
+    out = []
+    name = cluster_ctx.get("name", "cluster")
+    views = list(cluster_ctx.get("views") or [])
+    ui = cluster_ctx.get("ui")
+    rate = cluster_ctx.get("rate", 1.0)
+
+    metrics = [_cluster_metrics(v.get("sample")) for v in views]
+    pairs = list(zip(views, metrics))
+
+    if ui and ui.filter_alerts:
+        pairs = [(v, m) for v, m in pairs if _cluster_alerts(v, m)]
+    if ui and ui.sort_mode != "name":
+        pairs = sorted(pairs, key=_cluster_sort_key(ui.sort_mode))
+    elif ui:
+        pairs = sorted(pairs, key=_cluster_sort_key("name"))
+    views = [p[0] for p in pairs]
+    metrics = [p[1] for p in pairs]
+    n = len(views)
+
+    total_nodes = len(cluster_ctx.get("views") or [])
+    up = sum(1 for v in (cluster_ctx.get("views") or []) if not v.get("stale") and v.get("sample"))
+    wall_w, total_w, has_rail = None, 0.0, False
+    for m in metrics:
+        if not m:
+            continue
+        for r in m.get("power_rails") or []:
+            if r.get("label") == "dc_input":
+                has_rail = True
+                total_w += r.get("watts") or 0
+    if has_rail:
+        wall_w = total_w
+
+    summary = f"{total_nodes} node{'s' if total_nodes != 1 else ''} · {'all up' if up == total_nodes else f'{up} up'}"
+    if wall_w is not None:
+        summary += f"  │  Σ wall {wall_w / 1000:.2f} kW" if wall_w >= 1000 else f"  │  Σ wall {wall_w:.0f} W"
+    summary = f"{name} — {summary}"
+
+    out.append(_build_header(x0, width, tier, page=3, cluster_tabs=True, cluster_summary=summary))
+    y = 1
+
+    if ui:
+        ui.selected = 0 if n == 0 else max(0, min(n - 1, ui.selected))
+        ui.last_n = n
+        ui.selected_name = views[ui.selected].get("name") if n else None
+    selected_idx = ui.selected if ui else -1
+
+    name_w = 8 if tier == "compact" else 10
+    fleet_mode = n > 8
+    avail_rows = max(4, (height or 30) - y - 3)
+
+    if not fleet_mode:
+        cpu_p = _build_cluster_cpu_section(y, x0, width, views, metrics, selected_idx, name_w, kind="top")
+        out.append(cpu_p); y += cpu_p.total_height
+        mem_p = _build_cluster_mem_section(y, x0, width, views, metrics, selected_idx, name_w, kind="mid")
+        out.append(mem_p); y += mem_p.total_height
+        gpu_p = _build_cluster_gpu_section(y, x0, width, views, metrics, selected_idx, name_w, kind="mid")
+        out.append(gpu_p); y += gpu_p.total_height
+        fab_p = _build_cluster_fabric_section(y, x0, width, views, metrics, selected_idx, name_w, kind="mid")
+        out.append(fab_p); y += fab_p.total_height
+        stor_p = _build_cluster_storage_section(y, x0, width, views, metrics, selected_idx, name_w, kind="mid")
+        out.append(stor_p); y += stor_p.total_height + 1
+    else:
+        visible = max(2, avail_rows - 4)  # reserve a few rows for ALERTS
+        start = 0
+        if ui:
+            ui.clamp_scroll(n, visible)
+            start = ui.scroll
+        end = min(n, start + visible)
+        sel_in_window = (selected_idx - start) if start <= selected_idx < end else -1
+        fleet_p = _build_fleet_panel(y, x0, width, views[start:end], metrics[start:end], sel_in_window,
+                                      name_w, more_above=start, more_below=n - end)
+        out.append(fleet_p); y += fleet_p.total_height
+        alerts_p = _build_alerts_panel(y, x0, width, views, metrics, kind="mid")
+        out.append(alerts_p); y += alerts_p.total_height + 1
+
+    if fleet_mode:
+        keys = " q quit · ↑↓ select · enter node detail · a alerts only · o sort col · c colors"
+    else:
+        keys = " q quit · ↑↓ select · enter drill into node · 1 2 3 page · c colors"
+    info = f"agents {up}/{total_nodes} · poll {rate:g} s" + ("" if fleet_mode else " · spark-smi --serve")
+    p = panels.Panel(y, x0, width, kind="plain")
+    p.rows.append(([(keys, 9)], [(info, 6)]))
+    out.append(p)
     return out
