@@ -41,10 +41,10 @@ def _detect_256color():
 
 HAS_256COLOR = _detect_256color()
 
-# --- Color slots -------------------------------------------------------
+# --- Color slots / themes -----------------------------------------------
 # Logical slots used throughout both rendering backends. Bar-threshold
 # coloring (<50 slot1, <80 slot5, else slot4) is applied by make_bar().
-#   slot : meaning                 xterm-256  basic-8 fallback
+#   slot : meaning                 (spark theme) xterm-256  basic-8 fallback
 #     1  : good / bar fill            70       green
 #     2  : info / graphs / io         74       cyan
 #     3  : label text                250       white
@@ -54,19 +54,100 @@ HAS_256COLOR = _detect_256color()
 #     7  : bar track (empty)         238       white + dim
 #     8  : bright value              255       white + bold
 #     9  : accent: titles/keys       112       green + bold
-PALETTE_256 = {1: 70, 2: 74, 3: 250, 4: 167, 5: 172, 6: 243, 7: 238, 8: 255, 9: 112}
-
-# Basic-8 fallback: (curses color constant name, bold, dim) -- app.py maps
-# the name to the real curses.COLOR_* constant since that's curses-specific.
-BASIC_SLOTS = {
-    1: ("GREEN", False, False), 2: ("CYAN", False, False), 3: ("WHITE", False, False),
-    4: ("RED", False, False), 5: ("YELLOW", False, False),
-    6: ("WHITE", False, True), 7: ("WHITE", False, True),
-    8: ("WHITE", True, False), 9: ("GREEN", True, False),
+#
+# THEMES holds every named theme's full 9-slot xterm-256 remapping, in the
+# order they cycle through (live mode's 'c' key, --theme list). "spark" is
+# slot-for-slot identical to the pre-theme default, so a fresh install with
+# no --theme/SPARK_SMI_THEME behaves exactly as before.
+THEMES = {
+    "spark":     {1: 70,  2: 74,  3: 250, 4: 167, 5: 172, 6: 243, 7: 238, 8: 255, 9: 112},
+    "nord":      {1: 109, 2: 116, 3: 252, 4: 131, 5: 222, 6: 240, 7: 237, 8: 255, 9: 110},
+    "dracula":   {1: 141, 2: 117, 3: 253, 4: 203, 5: 215, 6: 243, 7: 238, 8: 231, 9: 212},
+    "solarized": {1: 37,  2: 33,  3: 247, 4: 160, 5: 136, 6: 241, 7: 236, 8: 254, 9: 33},
+    "gruvbox":   {1: 214, 2: 108, 3: 223, 4: 167, 5: 208, 6: 243, 7: 237, 8: 230, 9: 208},
+    "mono":      {1: 252, 2: 245, 3: 247, 4: 231, 5: 250, 6: 240, 7: 236, 8: 255, 9: 255},
+    "amber":     {1: 214, 2: 178, 3: 180, 4: 208, 5: 220, 6: 94,  7: 58,  8: 230, 9: 214},
+    "ice":       {1: 75,  2: 123, 3: 253, 4: 167, 5: 186, 6: 242, 7: 238, 8: 255, 9: 81},
+    "sunset":    {1: 205, 2: 215, 3: 252, 4: 196, 5: 220, 6: 243, 7: 238, 8: 255, 9: 209},
+    "cyber":     {1: 81,  2: 201, 3: 252, 4: 197, 5: 214, 6: 60,  7: 237, 8: 255, 9: 201},
 }
 
-# Plain ANSI (no 256-color, no curses) SGR codes for VirtualCurses fallback.
-_ANSI_BASIC = {1: "32", 2: "36", 3: "37", 4: "31", 5: "33", 6: "90", 7: "90", 8: "1;37", 9: "1;32"}
+# Each theme's basic-8 "good" color (slot 1 and, bolded, slot 9) -- the only
+# thing that actually varies theme to theme in the <256-color fallback (see
+# _basic_slots_for below for the fixed rules governing the rest).
+_THEME_BASIC1 = {
+    "spark": "GREEN", "nord": "BLUE", "dracula": "MAGENTA", "solarized": "CYAN",
+    "gruvbox": "YELLOW", "mono": "WHITE", "amber": "YELLOW", "ice": "CYAN",
+    "sunset": "MAGENTA", "cyber": "CYAN",
+}
+
+_ANSI_CODE = {"BLACK": 30, "RED": 31, "GREEN": 32, "YELLOW": 33,
+              "BLUE": 34, "MAGENTA": 35, "CYAN": 36, "WHITE": 37}
+
+
+def _basic_slots_for(name):
+    """(curses color constant name, bold, dim) per slot for theme `name`'s
+    <256-color fallback. Fixed rules per the architect's spec: slot 1/9
+    follow the theme's basic "good" color; slot 2 is cyan except nord
+    (blue) and amber/gruvbox (yellow); slots 4/5 are red/yellow except mono
+    (white, since mono has no red/yellow to spend); 3/8 are always white
+    (8 bold); 6/7 are always white+dim."""
+    basic1 = _THEME_BASIC1[name]
+    slot2 = "BLUE" if name == "nord" else ("YELLOW" if name in ("amber", "gruvbox") else "CYAN")
+    slot4 = "WHITE" if name == "mono" else "RED"
+    slot5 = "WHITE" if name == "mono" else "YELLOW"
+    return {
+        1: (basic1, False, False), 2: (slot2, False, False), 3: ("WHITE", False, False),
+        4: (slot4, False, False), 5: (slot5, False, False),
+        6: ("WHITE", False, True), 7: ("WHITE", False, True),
+        8: ("WHITE", True, False), 9: (basic1, True, False),
+    }
+
+
+def _ansi_basic_for(basic_slots):
+    """Plain ANSI (no 256-color, no curses) SGR codes for VirtualCurses's
+    fallback, derived from a theme's basic_slots. Dim white keeps the
+    original convention of rendering as bright-black ("90") rather than the
+    poorly-supported literal SGR dim code."""
+    out = {}
+    for slot, (name, bold, dim) in basic_slots.items():
+        code = _ANSI_CODE.get(name, 37)
+        if bold:
+            out[slot] = f"1;{code}"
+        elif dim:
+            out[slot] = "90" if name == "WHITE" else str(code)
+        else:
+            out[slot] = str(code)
+    return out
+
+
+# Live palette -- module globals every renderer reads at draw/construct
+# time. Populated by set_theme() below (called once at import for "spark",
+# so nothing regresses for callers that never touch themes at all).
+ACTIVE_THEME = None
+PALETTE_256 = {}
+BASIC_SLOTS = {}
+_ANSI_BASIC = {}
+
+
+def set_theme(name):
+    """Swaps the live 9-slot color mapping to the named theme. Both
+    rendering backends read PALETTE_256/BASIC_SLOTS/_ANSI_BASIC at
+    draw/construct time (module-global lookups, not copies taken at import),
+    so this takes effect on the next frame -- app.py's live-mode 'c' key
+    additionally re-runs curses.init_pair() since curses caches color-pair
+    definitions across frames. Raises ValueError (never crashes) for an
+    unknown name, message includes the valid list."""
+    global ACTIVE_THEME, PALETTE_256, BASIC_SLOTS, _ANSI_BASIC
+    if name not in THEMES:
+        raise ValueError(f"unknown theme '{name}' -- valid: {', '.join(THEMES)}")
+    ACTIVE_THEME = name
+    PALETTE_256 = dict(THEMES[name])
+    BASIC_SLOTS = _basic_slots_for(name)
+    _ANSI_BASIC = _ansi_basic_for(BASIC_SLOTS)
+
+
+set_theme("spark")
 
 def _ansi_for_slot(slot):
     if HAS_256COLOR:

@@ -173,6 +173,7 @@ directory, plus ASIC temperature from the NIC's own hwmon device.
 | `1` / `2` | both | Switch page (overview / advanced) |
 | `t` | both | Toggle temperature units (°C / °F) |
 | `u` | both | Toggle memory units (GiB / GB, decimal) |
+| `c` | both | Cycle color theme (see "Themes" above; capital `T` is an undocumented alias) |
 | `?` | both | Toggle the help overlay (any key dismisses it) |
 | `n` | 1 | Show active NICs only |
 | `s` | 1 | Sort NIC rows by current rate (max of RX/TX), descending — toggle back to detection order |
@@ -191,6 +192,33 @@ an explicit confirm prompt before anything is written.
 
 ---
 
+## Themes
+
+Ten named color themes, each a full remapping of the dashboard's 9 color
+slots (bar fill, labels, warn/critical, frame dimming, accents, etc.) —
+`spark` (green, the original default), `nord` (blue), `dracula` (magenta),
+`solarized` (cyan), `gruvbox` (yellow), `mono` (grayscale), `amber`,
+`ice` (cyan), `sunset` (magenta), `cyber` (cyan).
+
+- `--theme <name>` picks one for the session; `--theme list` (or `--themes`)
+  prints the ten names and exits.
+- `$SPARK_SMI_THEME` sets the default when `--theme` isn't passed.
+- In live mode (`-l`), the `c` key cycles through them (wrapping back to
+  `spark` after `cyber`) — a footer toast confirms the new name for a few
+  ticks. Lowercase `c` is deliberate: it's distinct from page 2's capital
+  `C` (SM clock-lock knob focus), so theme cycling works on both pages
+  without stealing that binding. Terminals below 256-color fall back to
+  each theme's basic-8 approximation automatically, same as the default
+  theme always has.
+
+```bash
+spark-smi --theme nord
+spark-smi --theme list
+SPARK_SMI_THEME=dracula spark-smi -l
+```
+
+---
+
 ## CLI flags
 
 ```
@@ -200,6 +228,8 @@ spark-smi [options]
   -n <secs>        refresh rate in seconds (default: 1)
   -p, --page <n>   which page to render in snapshot mode: 1 overview (default)
                    or 2 advanced (GPU detail, NIC/thermal/SMART panels)
+  --theme <name>   color theme (default: spark; or $SPARK_SMI_THEME)
+  --theme list     print the available theme names, one per line, and exit
   --ascii          force plain-ASCII bars/frames (no UTF-8 box drawing)
   -h, --help       show this help and exit
 ```

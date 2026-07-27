@@ -257,15 +257,15 @@ def _build_footer(x0, width, y, driver, cuda, rate, has_nvml, extra_keys=None, k
         base = " q quit · 1 2 page"
         short_keys = extra_keys.replace("pwr limit", "pwr").replace("clock locks", "clk")
         variants = [
-            base + " · t °C/°F · u GiB/GB" + extra_keys,
+            base + " · t °C/°F · u GiB/GB · c colors" + extra_keys,
             base + extra_keys,
             base + short_keys,
             base,
         ]
     else:
         variants = [
-            " q quit · 1 2 page · t °C/°F · u GiB/GB · n active NICs · s sort · ? help",
-            " q quit · 1 2 page · t °C/°F · u GiB/GB · n NICs",
+            " q quit · 1 2 page · t °C/°F · u GiB/GB · c colors · n active NICs · s sort · ? help",
+            " q quit · 1 2 page · t °C/°F · u GiB/GB · c colors · n NICs",
             " q quit · 1 2 page · t temp · u units",
         ]
     src = "NVML" if has_nvml else "CLI"
@@ -303,6 +303,7 @@ def build_help_overlay(term_w, term_h):
         ("  1 / 2        switch page: overview / advanced", 3),
         ("  t            toggle °C / °F", 3),
         ("  u            toggle GiB / GB (decimal units)", 3),
+        (f"  c            cycle color theme  (now: {term.ACTIVE_THEME})", 3),
         ("  ?            toggle this help", 3),
         ("", 3),
         ("Page 1 -- overview", 9),
@@ -815,14 +816,19 @@ def _build_storage_panel(y, x0, width, disks, tier):
 # Page 1 assembly
 # =========================================================================
 
-def build_page1(state, tier, width, x0=0, height=None, sort_nics=False):
+def build_page1(state, tier, width, x0=0, height=None, sort_nics=False, theme_toast=None):
     """Builds page 1: header, CPU+MEMORY compound frame, GPU card(s),
     NETWORK+STORAGE compound frame, footer. `height` (available screen rows),
     when given, drives a simple degrade order: sparklines -> memory legend
     row -> NIC rows collapse to one summary line. `sort_nics` ('s' key)
     reorders the NETWORK rows by max(rx, tx) rate descending, recomputed
     fresh every frame; False (default) keeps the collector's detection
-    order (grouped by physical port, stable frame-to-frame)."""
+    order (grouped by physical port, stable frame-to-frame). `theme_toast`
+    ('c' key, live mode; capital 'T' is an undocumented alias) is a
+    (text, slot) pair shown briefly in the footer
+    via the same toast rendering _build_footer already has for Phase 4's
+    knob-apply toast -- reused here by handing it a knob_ui-shaped dict with
+    just a "toast" key."""
     out = []
     show_sparkline = True
     show_legend = True
@@ -878,7 +884,8 @@ def build_page1(state, tier, width, x0=0, height=None, sort_nics=False):
     driver, cuda = state.get("driver", "Unknown"), state.get("cuda", "Unknown")
     has_nvml = (state.get("caps") or {}).get("has_nvml", False)
     rate = state.get("rate", 1.0)
-    out.append(_build_footer(x0, width, y, driver, cuda, rate, has_nvml))
+    footer_knob_ui = {"toast": theme_toast} if theme_toast else None
+    out.append(_build_footer(x0, width, y, driver, cuda, rate, has_nvml, knob_ui=footer_knob_ui))
 
     return out
 
@@ -1418,7 +1425,7 @@ def _build_nvme_smart_panel(y, x0, width, smart, kind="top"):
     return p
 
 
-def build_page2(state, tier, width, x0=0, height=None, knob_ui=None):
+def build_page2(state, tier, width, x0=0, height=None, knob_ui=None, theme_toast=None):
     """Builds page 2: header (ADVANCED tab active), one full-width detail
     panel per GPU, the NIC advanced panel (ungrouped per-PF rows), and
     THERMALS / POWER RAILS / NVME SMART. Every panel build is wrapped
@@ -1430,7 +1437,12 @@ def build_page2(state, tier, width, x0=0, height=None, knob_ui=None):
     dict {registry, selected_gpu, focus_id, pending, confirming,
     confirm_text, toast} threaded into the GPU/POWER-RAILS panels for the
     focused-knob widget and into the footer for the tab/P/C/M/R/X hints and
-    the confirm/toast overlay."""
+    the confirm/toast overlay. `theme_toast` ('c' key, live mode) is a
+    (text, slot) pair that overlays the footer's toast slot for a few ticks
+    after a theme switch -- deferred to a KnobUI apply-toast that's
+    currently confirming (that prompt needs the key press it's waiting on),
+    otherwise shown in preference to (and without disturbing) any other
+    knob_ui state the per-GPU/rail widgets still read this frame."""
     out = []
 
     gpus = state.get("gpus") or []
@@ -1550,6 +1562,11 @@ def build_page2(state, tier, width, x0=0, height=None, knob_ui=None):
             bits.append("X persist")
         extra_keys = (" · " + " · ".join(bits)) if bits else None
 
+    footer_knob_ui = knob_ui
+    if theme_toast and not (knob_ui and knob_ui.get("confirming")):
+        footer_knob_ui = dict(knob_ui) if knob_ui else {}
+        footer_knob_ui["toast"] = theme_toast
+
     out.append(_build_footer(x0, width, y, driver, cuda, rate, has_nvml,
-                              extra_keys=extra_keys, knob_ui=knob_ui))
+                              extra_keys=extra_keys, knob_ui=footer_knob_ui))
     return out

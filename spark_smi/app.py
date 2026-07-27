@@ -4,6 +4,7 @@ Curses-specific calls are confined to this module -- everything else draws
 through the duck-typed screen interface shared by VirtualCurses and real
 curses windows.
 """
+import os
 import sys
 import time
 from collections import deque
@@ -29,19 +30,27 @@ Usage: spark-smi [options]
   -n <secs>        refresh rate in seconds (default: {DEFAULT_REFRESH_RATE:g})
   -p, --page <n>   which page to render in snapshot mode: 1 overview (default)
                    or 2 advanced (GPU detail, NIC/thermal/SMART panels)
+  --theme <name>   color theme (default: spark; or $SPARK_SMI_THEME)
+  --theme list     print the available theme names, one per line, and exit
   --ascii          force plain-ASCII bars/frames (no UTF-8 box drawing)
   -h, --help       show this help and exit
+
+Themes: {", ".join(term.THEMES)}, cycled live with the 'c' key.
+$SPARK_SMI_THEME sets the default when --theme isn't passed; an unknown name
+prints the valid list and exits 1.
 
 Snapshot mode (default, no -l) renders once and prints ANSI to stdout.
 
 Live-mode keys: q quit  ·  t toggle C/F  ·  u toggle GiB/GB  ·  1/2 page
-                n active-NICs-only  ·  s sort NICs by rate  ·  ? help overlay
+                n active-NICs-only  ·  s sort NICs by rate  ·  c cycle theme
+                ? help overlay
                 page 2: tab select GPU  ·  P/C/M/R/X knobs
 """
 
 
 def _parse_args(argv):
-    opts = {"loop": False, "rate": DEFAULT_REFRESH_RATE, "help": False, "page": 1}
+    opts = {"loop": False, "rate": DEFAULT_REFRESH_RATE, "help": False, "page": 1,
+            "theme": None, "theme_list": False}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -61,6 +70,15 @@ def _parse_args(argv):
                     opts["page"] = 2 if int(argv[i]) == 2 else 1
                 except ValueError:
                     pass
+        elif a == "--theme":
+            i += 1
+            if i < len(argv):
+                if argv[i] == "list":
+                    opts["theme_list"] = True
+                else:
+                    opts["theme"] = argv[i]
+        elif a == "--themes":
+            opts["theme_list"] = True
         elif a in ("-h", "--help"):
             opts["help"] = True
         # --ascii is read directly from sys.argv by term._detect_bar_style()
@@ -174,7 +192,7 @@ class State:
 
 
 def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_hint=None, page_num=1,
-                      knob_ui=None, sort_nics=False, show_help=False):
+                      knob_ui=None, sort_nics=False, show_help=False, theme_toast=None):
     """Single UI entry point for both backends. Builds the requested page
     (1 overview, 2 advanced) and draws it.
 
@@ -187,7 +205,10 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
     `sort_nics` ('s' key, page 1 only) reorders NETWORK rows by max(rx, tx)
     rate descending each frame; `show_help` ('?' key, live mode, both pages)
     draws a help overlay panel appended last so it paints over everything
-    else already built this frame."""
+    else already built this frame. `theme_toast` ('c' key, live mode, both
+    pages) is a (text, slot) pair shown via the footer's existing toast
+    rendering (see pages._build_footer) for a few ticks after a theme
+    switch, or None the rest of the time."""
     try:
         h, w = stdscr.getmaxyx()
     except Exception:
@@ -221,9 +242,11 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
 
     try:
         if page_num == 2:
-            built = pages.build_page2(sample, tier, draw_w, x0, height=height_hint or h, knob_ui=knob_ctx)
+            built = pages.build_page2(sample, tier, draw_w, x0, height=height_hint or h, knob_ui=knob_ctx,
+                                       theme_toast=theme_toast)
         else:
-            built = pages.build_page1(sample, tier, draw_w, x0, height=height_hint or h, sort_nics=sort_nics)
+            built = pages.build_page1(sample, tier, draw_w, x0, height=height_hint or h, sort_nics=sort_nics,
+                                       theme_toast=theme_toast)
     except Exception:
         built = []
 
@@ -239,19 +262,19 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
         pass
 
 
-def main_loop(stdscr, state, rate):
-    import curses
-    curses.start_color()
-    curses.use_default_colors()
-    curses.curs_set(0)
-    stdscr.nodelay(True)
-
+def _init_curses_colors(curses):
+    """(Re-)runs curses.init_pair() against the CURRENT term.PALETTE_256/
+    BASIC_SLOTS and returns the resulting {slot: attr} colors_map. Curses
+    caches color-pair definitions across frames, so this has to be re-run
+    -- not just re-read -- whenever the active theme changes (main_loop's
+    'c' key), in addition to the one-time call at loop startup."""
     if curses.COLORS >= 256:
         for slot, code in term.PALETTE_256.items():
             curses.init_pair(slot, code, -1)
     else:
         basic = {"GREEN": curses.COLOR_GREEN, "CYAN": curses.COLOR_CYAN, "WHITE": curses.COLOR_WHITE,
-                 "RED": curses.COLOR_RED, "YELLOW": curses.COLOR_YELLOW}
+                 "RED": curses.COLOR_RED, "YELLOW": curses.COLOR_YELLOW,
+                 "BLUE": curses.COLOR_BLUE, "MAGENTA": curses.COLOR_MAGENTA}
         for slot, (name, bold, dim) in term.BASIC_SLOTS.items():
             curses.init_pair(slot, basic.get(name, curses.COLOR_WHITE), -1)
     colors = {}
@@ -263,20 +286,40 @@ def main_loop(stdscr, state, rate):
         if dim:
             attr |= curses.A_DIM
         colors[slot] = attr
+    return colors
+
+
+def main_loop(stdscr, state, rate):
+    import curses
+    curses.start_color()
+    curses.use_default_colors()
+    curses.curs_set(0)
+    stdscr.nodelay(True)
+
+    colors = _init_curses_colors(curses)
 
     active_nics_only = False
     sort_nics = False
     show_help = False
+    theme_toast_text = None
+    theme_toast_ticks = 0
+    THEME_TOAST_TICKS = knobs.KnobUI.TOAST_TICKS
     # Phase 4: page 2's interactive power/clock knobs. Constructed here (not
     # in State, which the snapshot path also uses) so the write-capable UI
     # only exists at all in live mode -- see render_dashboard's docstring.
     knob_ui = knobs.KnobUI()
     while True:
+        if theme_toast_ticks > 0:
+            theme_toast_ticks -= 1
+            if theme_toast_ticks <= 0:
+                theme_toast_text = None
+        theme_toast = (theme_toast_text, 9) if theme_toast_text else None
         try:
             stdscr.erase()
             h, _ = stdscr.getmaxyx()
             render_dashboard(stdscr, colors, state, active_nics_only, height_hint=h, page_num=state.page,
-                              knob_ui=knob_ui, sort_nics=sort_nics, show_help=show_help)
+                              knob_ui=knob_ui, sort_nics=sort_nics, show_help=show_help,
+                              theme_toast=theme_toast)
             stdscr.refresh()
         except Exception:
             pass
@@ -306,6 +349,27 @@ def main_loop(stdscr, state, rate):
                 break
             if ch == ord('t'):
                 term.USE_FAHRENHEIT = not term.USE_FAHRENHEIT
+                break
+            if ch in (ord('c'), ord('T')):
+                # 'c' is the documented key (footer/help/README); capital
+                # 'T' still works as an undocumented alias -- cheap to keep
+                # now that 'c' is primary. Global on both pages: this check
+                # runs before the page-2 Phase 4 dispatch below, so it wins
+                # over that block's OWN 'C'/'c' handling -- which is why
+                # that block was narrowed to capital-only 'C' (see its
+                # comment) rather than colliding with this key. Cycles to
+                # the next theme (wrapping), re-runs curses.init_pair() for
+                # it (colors are cached by curses across frames,
+                # term.set_theme() alone wouldn't repaint), and forces a
+                # full clear/redraw.
+                names = list(term.THEMES)
+                idx = names.index(term.ACTIVE_THEME) if term.ACTIVE_THEME in names else -1
+                next_name = names[(idx + 1) % len(names)]
+                term.set_theme(next_name)
+                colors = _init_curses_colors(curses)
+                theme_toast_text = f"theme: {next_name}"
+                theme_toast_ticks = THEME_TOAST_TICKS
+                stdscr.clear()
                 break
             if ch == ord('u'):
                 term.USE_DECIMAL_UNITS = not term.USE_DECIMAL_UNITS
@@ -350,7 +414,12 @@ def main_loop(stdscr, state, rate):
             elif state.page == 2 and ch in (ord('P'), ord('p')):
                 knob_ui.focus_power_cycle(knob_ui.last_registry)
                 break
-            elif state.page == 2 and ch in (ord('C'), ord('c')):
+            elif state.page == 2 and ch == ord('C'):
+                # Capital-only: lowercase 'c' is the global theme-cycle key
+                # (handled far above, before this whole Phase 4 block, so it
+                # never reaches here) -- keeping this case-sensitive is what
+                # lets 'c' cycle themes on page 2 while 'C' still focuses
+                # the sm clock-lock knob.
                 knob_ui.focus_clock(knob_ui.last_registry, "sm")
                 break
             elif state.page == 2 and ch in (ord('M'), ord('m')):
@@ -380,9 +449,25 @@ def main_loop(stdscr, state, rate):
 def main():
     argv = sys.argv[1:]
     opts = _parse_args(argv)
+    if opts["theme_list"]:
+        for name in term.THEMES:
+            print(name)
+        sys.exit(0)
     if opts["help"]:
         print(HELP_TEXT)
         return
+
+    # --theme flag wins over $SPARK_SMI_THEME wins over the "spark" default
+    # set_theme() already applied at import. Resolved (and applied) here,
+    # BEFORE either rendering path constructs anything that reads the
+    # palette -- VirtualCurses() below and main_loop's curses.init_pair()
+    # both need the final theme in place first.
+    theme_name = opts["theme"] or os.environ.get("SPARK_SMI_THEME") or term.ACTIVE_THEME
+    try:
+        term.set_theme(theme_name)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
 
     state = State(opts["rate"])
     state.page = opts["page"]
