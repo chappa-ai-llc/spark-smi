@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spark-smi"
-version = "3.6.0"
+version = "2.0.0.dev0"
 description = "A terminal-based system monitor (TUI) for NVIDIA Grace Blackwell (GB10) and hybrid CPU architectures"
 readme = "README.md"
 license = { file = "LICENSE" }

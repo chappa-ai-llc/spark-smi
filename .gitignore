@@ -12,3 +12,6 @@ env/
 # OS specific
 .DS_Store
 Thumbs.db
+
+# Session working files (never committed)
+scratchpad/
