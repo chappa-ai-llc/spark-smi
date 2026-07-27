@@ -15,3 +15,8 @@ Thumbs.db
 
 # Session working files (never committed)
 scratchpad/
+
+# Packaging output
+dist/
+build/
+*.egg-info/
