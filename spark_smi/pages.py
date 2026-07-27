@@ -102,6 +102,63 @@ def _machine_model():
          or _read_text_stripped("/sys/devices/virtual/dmi/id/product_name"))
     return m.replace("_", " ") if m else None
 
+def _fmt_kbs(v):
+    """NVML PCIe throughput is reported in KB/s -- a short human string for
+    page 2's PCIE row, or None (segment hidden) when the value is missing."""
+    if v is None:
+        return None
+    try:
+        v = float(v)
+    except Exception:
+        return None
+    if v >= 1e6:
+        return f"{v / 1e6:.1f} GB/s"
+    if v >= 1e3:
+        return f"{v / 1e3:.1f} MB/s"
+    return f"{v:.0f} KB/s"
+
+def _fmt_count_rate(v):
+    """Per-second delta formatter for the NIC advanced panel's hw_counters
+    columns (CNP/ECN/discard): bare integer below 1000/s, "X.X k/s" above.
+    None (rendered "n/a") when the counter file wasn't readable."""
+    if v is None:
+        return None
+    try:
+        v = float(v)
+    except Exception:
+        return None
+    if v >= 1000:
+        return f"{v / 1000:.1f} k/s"
+    return f"{int(round(v))}"
+
+def _flow_join(inner, items, col=2):
+    """Row segments from a list of (text, slot) | None items, dropping Nones
+    and joining the survivors with "  ·  " -- unlike a bare sequence of
+    try_add_multi() calls gated only on "is this field present", this never
+    emits a leading/orphaned separator when an earlier field in the list was
+    absent (the NVME SMART panel's rows are all fully-optional fields, so
+    that per-field gating alone isn't enough there)."""
+    f = _Flow(inner - 1)
+    started = False
+    for item in items:
+        if item is None:
+            continue
+        text, slot = item
+        parts = [("  ·  ", 6), (text, slot)] if started else [(text, slot)]
+        if f.try_add_multi(parts):
+            started = True
+    return _finish_row(f, col) if started else None
+
+
+def _finish_row(f, col=2):
+    """Re-tags a _Flow's first segment with its column stop -- the shared
+    idiom every page-2 row builder below ends with (mirrors the
+    `segs[0] = (col, ...)` pattern used throughout page 1)."""
+    segs = list(f.segs)
+    if segs:
+        segs[0] = (col, segs[0][1], segs[0][2])
+    return segs
+
 def _short_mem(bytes_val):
     """Ultra-compact single-letter-unit form used only in the compact-tier
     MEMORY row suffix ("68.5/121.7G", matching mock_compact) -- fmt_mem's
@@ -116,7 +173,7 @@ def _short_mem(bytes_val):
 # Header / footer (plain, borderless panels)
 # =========================================================================
 
-def _build_header(x0, width, tier):
+def _build_header(x0, width, tier, page=1):
     host = _safe(platform.node, "host") or "host"
     model = _machine_model()
     arch = _safe(platform.machine, "") or ""
@@ -126,12 +183,14 @@ def _build_header(x0, width, tier):
     if tier == "compact":
         chip = model or arch
         core = f" │ {host}" + (f" · {chip}" if chip else "")
-        right = [("▌1▐ 2  ", 9), (clock, 3)]
+        tabs = "1 ▌2▐  " if page == 2 else "▌1▐ 2  "
+        right = [(tabs, 9), (clock, 3)]
         p = panels.Panel(0, x0, width, kind="plain")
         p.rows.append(([(" SPARK-SMI 2.0", 9), (core, 3)], right))
         return p
 
-    right = [("▌1▐ OVERVIEW  2 ADVANCED  ", 9), (clock, 3)]
+    tabs = "1 OVERVIEW  ▌2▐ ADVANCED  " if page == 2 else "▌1▐ OVERVIEW  2 ADVANCED  "
+    right = [(tabs, 9), (clock, 3)]
     right_len = sum(len(t) for t, _ in right)
 
     # Never truncate mid-token: drop whole optional segments right-to-left
@@ -733,4 +792,591 @@ def build_page1(state, tier, width, x0=0, height=None):
     rate = state.get("rate", 1.0)
     out.append(_build_footer(x0, width, y, driver, cuda, rate, has_nvml))
 
+    return out
+
+
+# =========================================================================
+# Page 2: per-GPU detail, NIC advanced, THERMALS / POWER RAILS / NVME SMART
+# =========================================================================
+# Read-only (Phase 3) -- every row below is capability-driven: a field the
+# collector couldn't read is either an atomic try_add_multi() that drops the
+# whole segment, or (for whole rows -- PCIE/POWER/THERMAL/THROTTLE) the row
+# builder returning None/falsy and the caller skipping p.add_row() entirely.
+# Nothing here ever prints a bare "N/A" for a missing API -- either the
+# field/row is absent, or (STATE's ecc, matching mock_page2) an explicit
+# "n/a" note for a field that IS queryable but unsupported on this GPU.
+
+def _right_reserve(right):
+    """Column budget to withhold from a row's _Flow so its atomic segments
+    drop WHOLE when a `right` group is also present -- mirrors the
+    `reserve`/`room()` idiom in _build_memory_panel's legend row. Without
+    this, a too-long left segment would rely on panels.render's per-row
+    `limit` clip for correctness, which truncates mid-token rather than
+    dropping the segment, exactly what _Flow exists to avoid."""
+    return sum(len(t) for t, _ in right) + 2 if right else 0
+
+
+def _row_clocks(inner, gpu, caps, reserve=0):
+    f = _Flow(inner - 1 - reserve)
+    f.add(f"{'CLOCKS':<11}", 3)
+    clk = gpu.get("clk_sm")
+    if caps.get("clocks") and clk not in (None, "N/A"):
+        txt = f"sm {clk} MHz"
+        mx = gpu.get("clk_sm_max")
+        if mx not in (None, "N/A"):
+            txt += f" (max {mx})"
+        f.add(txt, 8)
+    else:
+        f.add("sm N/A", 6)
+    mem = gpu.get("clk_mem")
+    if mem is not None:
+        f.try_add_multi([("  ·  ", 6), (f"mem {mem} MHz", 2)])
+    vid = gpu.get("clk_video")
+    if vid is not None:
+        f.try_add_multi([("  ·  ", 6), (f"video {vid} MHz", 2)])
+    enc, dec = gpu.get("enc_util"), gpu.get("dec_util")
+    if enc is not None or dec is not None:
+        parts = []
+        if enc is not None:
+            parts.append(f"enc {enc}%")
+        if dec is not None:
+            parts.append(f"dec {dec}%")
+        f.try_add_multi([("  ·  ", 6), (" · ".join(parts), 2)])
+    return f
+
+
+def _row_pcie(inner, gpu):
+    gen_c, w_c = gpu.get("pcie_gen_cur"), gpu.get("pcie_width_cur")
+    if gen_c is None or w_c is None:
+        return None
+    f = _Flow(inner - 1)
+    f.add(f"{'PCIE':<11}", 3)
+    f.add(f"gen {gen_c} ×{w_c}", 8)
+    gen_m, w_m = gpu.get("pcie_gen_max"), gpu.get("pcie_width_max")
+    if gen_m is not None and w_m is not None:
+        f.try_add_multi([(" ", 3), (f"(max gen {gen_m} ×{w_m})", 6)])
+    rx, tx = _fmt_kbs(gpu.get("pcie_rx_kbs")), _fmt_kbs(gpu.get("pcie_tx_kbs"))
+    if rx is not None:
+        f.try_add_multi([("  ·  ", 6), (f"rx {rx}", 2)])
+    if tx is not None:
+        f.try_add_multi([("  ·  ", 6), (f"tx {tx}", 2)])
+    replay = gpu.get("pcie_replay")
+    if replay is not None:
+        f.try_add_multi([("  ·  ", 6), (f"replays {replay}", 3)])
+    return f
+
+
+def _row_power(inner, gpu):
+    """(flow, right_segments) when caps.power_limit is True, else (None,
+    None) -- caller only calls this once that cap's already been checked,
+    but the limit value itself can still independently be missing."""
+    limit_mw = gpu.get("power_limit_mw")
+    if limit_mw is None:
+        return None, None
+    limit_w = limit_mw / 1000.0
+    draw = gpu.get("pwr_str", "N/A")
+    try:
+        draw_w = float(str(draw).replace("W", "").strip())
+    except Exception:
+        draw_w = None
+    pct = max(0.0, min((draw_w / limit_w) * 100, 100.0)) if draw_w is not None and limit_w else 0.0
+    right = [(f"limit {limit_w:.0f} W", 6)]
+    lo, hi = gpu.get("power_min_mw"), gpu.get("power_max_mw")
+    if lo is not None and hi is not None:
+        right.append((f"  range {lo / 1000:.0f}–{hi / 1000:.0f} W", 6))
+    f = _Flow(inner - 1 - _right_reserve(right))
+    f.add(f"{'POWER':<11}", 3)
+    f.add(f"draw {draw}  ", 8)
+    lb, rb = term.bar_brackets()
+    bar_w = 20 if inner > 90 else 14
+    bar, slot = term.make_bar(pct, bar_w)
+    f.add(lb, 6)
+    f.add(bar, slot)
+    f.add(rb, 6)
+    f.add(f" {int(pct)}% of limit", 3)
+    return f, right
+
+
+def _row_thermal(inner, gpu):
+    hotspot, vram = gpu.get("temp_hotspot"), gpu.get("temp_vram")
+    slowdown, shutdown = gpu.get("temp_slowdown"), gpu.get("temp_shutdown")
+    if hotspot is None and vram is None and slowdown is None and shutdown is None:
+        return None, None
+    right = []
+    if slowdown is not None:
+        right.append((f"slowdown {term.fmt_temp(slowdown)}", 6))
+    if shutdown is not None:
+        right.append((f"  shutdown {term.fmt_temp(shutdown)}", 6))
+    f = _Flow(inner - 1 - _right_reserve(right))
+    f.add(f"{'THERMAL':<11}", 3)
+    f.add(f"core {term.fmt_temp(gpu.get('temp'))}", 8)
+    if hotspot is not None:
+        f.try_add_multi([("  ·  ", 6), (f"hotspot {term.fmt_temp(hotspot)}", 2)])
+    if vram is not None:
+        f.try_add_multi([("  ·  ", 6), (f"vram {term.fmt_temp(vram)}", 2)])
+    return f, right
+
+
+_THROTTLE_ORDER = ["power", "thermal", "hw-slowdown", "sync-boost"]
+
+def _row_throttle(inner, gpu):
+    th = gpu.get("throttle")
+    if th is None:
+        return None
+    f = _Flow(inner - 1)
+    f.add(f"{'THROTTLE':<11}", 3)
+    if not th.get("any"):
+        f.add("none  ", 1)
+    else:
+        active = [k for k in _THROTTLE_ORDER if th.get("flags", {}).get(k)]
+        f.add((", ".join(active) or "active") + "  ", 4)
+    for i, k in enumerate(_THROTTLE_ORDER):
+        if i > 0:
+            f.add(" · ", 6)
+        f.add(k, 3)
+        on = th.get("flags", {}).get(k)
+        f.add(" ●" if on else " ─", 4 if on else 6)
+    return f
+
+
+def _row_state(inner, gpu, show_driver_cuda, driver, cuda):
+    right = [(f"driver {driver}", 2), (f"    CUDA {cuda}", 2)] if show_driver_cuda else []
+    f = _Flow(inner - 1 - _right_reserve(right))
+    f.add(f"{'STATE':<11}", 3)
+    f.add(f"persistence {gpu.get('persistence') or 'n/a'}", 8)
+    compute_mode = gpu.get("compute_mode")
+    if compute_mode:
+        f.try_add_multi([("  ·  ", 6), (f"compute {compute_mode}", 2)])
+        f.try_add_multi([("  ·  ", 6), (f"ecc {gpu.get('ecc') or 'n/a'}", 2)])
+    vbios = gpu.get("vbios")
+    if vbios:
+        f.try_add_multi([("  ·  ", 6), (f"vbios {vbios}", 2)])
+    return f, right
+
+
+def _row_memory_unified(inner, gpu, caps, alloc_gib, swap_text):
+    right = [] if caps.get("fan") else [("fan: no sensor — hidden", 6)]
+    f = _Flow(inner - 1 - _right_reserve(right))
+    f.add(f"{'MEMORY':<11}", 3)
+    f.add("unified with system", 8)
+    if alloc_gib:
+        f.try_add_multi([(" — ", 6), (f"{alloc_gib:.1f} GiB allocated", 2)])
+    if swap_text:
+        f.try_add_multi([("  ·  ", 6), (swap_text, 3)])
+    return f, right
+
+
+def _row_procs(inner, gpu):
+    f = _Flow(inner - 1)
+    f.add(f"{'PROCS':<11}", 3)
+    procs = gpu.get("procs") or []
+    if not procs:
+        f.add("none", 6)
+        return f
+    started = False
+    for p in procs:
+        txt = f"{p.get('pid', '?')} {p.get('name', '?')}"
+        mem = p.get("mem")
+        if mem is not None:
+            txt += f" {term.fmt_mem(mem)}"
+        sep = [("   ·   ", 6)] if started else []
+        if f.try_add_multi(sep + [(txt, 3)]):
+            started = True
+        else:
+            break
+    return f
+
+
+def _build_gpu_detail_panel(y, x0, width, gpu, caps, mem_state, show_driver_cuda, driver, cuda):
+    name = gpu.get("name", "Unknown")
+    inner = width - 2
+    title = f"GPU {gpu.get('id', '?')} {name}"
+    if len(title) > inner - 2:
+        title = title[:inner - 3] + "…"
+    temp, pwr = term.fmt_temp(gpu.get("temp")), gpu.get("pwr_str", "N/A")
+    right_bits = [temp, pwr]
+    if caps.get("fan"):
+        fan = gpu.get("fan", "N/A")
+        if fan not in ("N/A", "None"):
+            right_bits.append(f"fan {fan}")
+    p = panels.Panel(y, x0, width, title=[(title, 9)], title_right=[(" · ".join(right_bits), 2)], kind="top")
+
+    unified = not caps.get("mem_local", True)
+
+    clk_right = [] if caps.get("power_limit") else [("power-limit API: N/A — knob hidden", 6)]
+    f_clk = _row_clocks(inner, gpu, caps, reserve=_right_reserve(clk_right))
+    p.add_row(_finish_row(f_clk), right=clk_right)
+
+    if unified:
+        alloc = mem_state.get("gpu_alloc") or 0
+        swap = mem_state.get("swap")
+        swap_text = ""
+        if swap is not None and getattr(swap, "total", 0) > 0:
+            swap_text = f"swap {term.fmt_mem(swap.used)} / {term.fmt_mem(swap.total)}"
+        f_mem, mem_right = _row_memory_unified(inner, gpu, caps, alloc / (1024 ** 3) if alloc else 0, swap_text)
+        p.add_row(_finish_row(f_mem), right=mem_right)
+    else:
+        if caps.get("pcie"):
+            f_pcie = _row_pcie(inner, gpu)
+            if f_pcie is not None:
+                p.add_row(_finish_row(f_pcie))
+        if caps.get("power_limit"):
+            f_pwr, pwr_right = _row_power(inner, gpu)
+            if f_pwr is not None:
+                p.add_row(_finish_row(f_pwr), right=pwr_right)
+        f_th, th_right = _row_thermal(inner, gpu)
+        if f_th is not None:
+            p.add_row(_finish_row(f_th), right=th_right)
+        f_thr = _row_throttle(inner, gpu)
+        if f_thr is not None:
+            p.add_row(_finish_row(f_thr))
+
+    f_state, state_right = _row_state(inner, gpu, show_driver_cuda, driver, cuda)
+    p.add_row(_finish_row(f_state), right=state_right)
+
+    if not unified:
+        p.add_row(_finish_row(_row_procs(inner, gpu)))
+
+    return p
+
+
+# --- NIC advanced panel -------------------------------------------------
+
+def _nic_panel_title(nics, nics_pf, nic_fw):
+    hw_label = nics[0].get("hw_label") if nics else "NIC"
+    n_ports = len(nics)
+    total_pf = len(nics_pf) or sum(n.get("pf_count", 1) for n in nics)
+    if n_ports and total_pf and total_pf % n_ports == 0:
+        pf_each = total_pf // n_ports
+        extra = (f"{hw_label} · {n_ports} port{'s' if n_ports != 1 else ''} "
+                 f"× {pf_each} PF{'s' if pf_each != 1 else ''} each")
+    elif total_pf:
+        extra = f"{hw_label} · {total_pf} PFs"
+    else:
+        extra = hw_label
+    fw = next(iter(nic_fw.values()), None) if nic_fw else None
+    if fw and fw != "?":
+        extra += f" · fw {fw}"
+    return extra
+
+
+_NIC_COLS = [("PORT", 5), ("RDMA DEV", 16), ("NETDEV", 16), ("STATE", 7), ("SPEED", 7),
+             ("RDMA RX", 12), ("RDMA TX", 12), ("CNP S/H", 11), ("ECN MARK", 11), ("DISCARD", 9)]
+# Column ladder: at narrow widths, drop whole trailing columns in this order
+# (least essential first) rather than let panels.render's per-row clip cut
+# them off mid-token ("RDMA TX     C..."). PORT..RDMA TX are never dropped.
+_NIC_DROPPABLE = ["DISCARD", "ECN MARK", "CNP S/H"]
+
+def _nic_columns_for_width(inner):
+    cols = list(_NIC_COLS)
+    for name in _NIC_DROPPABLE:
+        if sum(w for _, w in cols) + 2 <= inner:
+            break
+        cols = [c for c in cols if c[0] != name]
+    return cols
+
+
+def _build_nic_panel(y, x0, width, nics_pf, title_extra, asic_temp):
+    inner = width - 2
+    title_right = [(f"asic {term.fmt_temp(asic_temp)}", 2)] if asic_temp is not None else []
+    p = panels.Panel(y, x0, width, title=[("NIC", 9), (f" {title_extra}", 3)],
+                      title_right=title_right, kind="top")
+    if not nics_pf:
+        p.add_row([(1, "no RDMA-capable NICs detected", 6)])
+        return p
+
+    cols = _nic_columns_for_width(inner)
+    positions, x = [], 2
+    for _label, w in cols:
+        positions.append(x)
+        x += w
+    p.add_row([(pos, label, 6) for pos, (label, _w) in zip(positions, cols)])
+
+    for row in nics_pf:
+        state_txt, state_slot = ("up", 1) if row.get("up") else ("down", 4)
+        cnp_s = _fmt_count_rate(row.get("cnp_sent"))
+        cnp_h = _fmt_count_rate(row.get("cnp_handled"))
+        cnp = f"{cnp_s} / {cnp_h}" if cnp_s is not None and cnp_h is not None else "n/a"
+        ecn = _fmt_count_rate(row.get("ecn_marked"))
+        disc = _fmt_count_rate(row.get("discard"))
+        by_col = {
+            "PORT": (row.get("port", "-"), 3), "RDMA DEV": (row.get("rdma_dev", "-"), 8),
+            "NETDEV": (row.get("netdev", "-"), 3), "STATE": (state_txt, state_slot),
+            "SPEED": (row.get("speed_str", "-"), 3),
+            "RDMA RX": (term.fmt_rate(row.get("rx_bps", 0), "bit"), 2),
+            "RDMA TX": (term.fmt_rate(row.get("tx_bps", 0), "bit"), 2),
+            "CNP S/H": (cnp, 3), "ECN MARK": (ecn if ecn is not None else "n/a", 3),
+            "DISCARD": (disc if disc is not None else "n/a", 3),
+        }
+        segs = [(pos, str(by_col[name][0]), by_col[name][1])
+                for pos, (name, _w) in zip(positions, cols)]
+        p.add_row(segs)
+    return p
+
+
+# --- THERMALS / POWER RAILS / NVME SMART ---------------------------------
+
+def _build_thermals_panel(y, x0, width, entries, kind="top", paired=False, show_bars=True, has_spbm=False):
+    """`paired` is True in the wide-tier THERMALS/NVME-SMART side-by-side
+    layout: that card has plenty of per-row width (~50+ cols) for a single
+    "label temp bar" entry, so it always packs ONE entry per row WITH its
+    bar -- two-per-row packing is for the full-width standalone variant
+    only (cramming two cells into half the width is what silently starved
+    the bar of room before). `show_bars` only applies in that standalone
+    mode; the paired layout never drops bars (see build_page2's degrade
+    order: it drops the Zone-A..G group first instead)."""
+    inner = width - 2
+    title = [("THERMALS", 9), (" zones + hwmon · spbm" if has_spbm else " zones + hwmon", 3)]
+    p = panels.Panel(y, x0, width, title=title, kind=kind)
+    if not entries:
+        p.add_row([(1, "no thermal sensors detected", 6)])
+        return p
+
+    label_w = 14
+    if paired:
+        for e in entries:
+            f = _Flow(inner - 1)
+            f.try_add_multi([(f"{e['label'][:label_w]:<{label_w}}", 3), (f"{term.fmt_temp(e['temp_c']):>5} ", 8)])
+            lb, rb = term.bar_brackets()
+            bar, slot = term.make_bar(max(0.0, min(e["temp_c"], 100.0)), 11)
+            f.try_add_multi([(lb, 6), (bar, slot), (rb, 6)])
+            p.add_row(_finish_row(f))
+        return p
+
+    per_row = 2 if inner >= (label_w + 20) * 2 else 1
+    show_bars = show_bars and inner // per_row >= label_w + 20
+    cell_w = inner // per_row
+    for i in range(0, len(entries), per_row):
+        chunk = entries[i:i + per_row]
+        row = []
+        for j, e in enumerate(chunk):
+            f = _Flow(cell_w - 1)
+            f.try_add_multi([(f"{e['label'][:label_w]:<{label_w}}", 3), (f"{term.fmt_temp(e['temp_c']):>5} ", 8)])
+            if show_bars:
+                lb, rb = term.bar_brackets()
+                bar, slot = term.make_bar(max(0.0, min(e["temp_c"], 100.0)), 11)
+                f.try_add_multi([(lb, 6), (bar, slot), (rb, 6)])
+            segs = list(f.segs)
+            if segs:
+                segs[0] = (j * cell_w + 1, segs[0][1], segs[0][2])
+            row.extend(segs)
+        p.add_row(row)
+    return p
+
+
+_RAIL_ORDER = ["dc_input", "sys_total", "soc_pkg", "cpu_gpu", "gpu", "cpu_p", "cpu_e",
+               "vcore", "prereg", "dla"]
+_CONTROLLER_ORDER = ["pl1", "pl2", "syspl1", "syspl2"]
+_RAIL_ESSENTIALS = ["dc_input", "sys_total"]
+_CONTROLLER_ESSENTIALS = ["pl1", "syspl1"]
+
+def _build_power_rails_panel(y, x0, width, rails, kind="top", essentials_only=False):
+    inner = width - 2
+    p = panels.Panel(y, x0, width, title=[("POWER RAILS", 9), (" spbm power monitor", 3)], kind=kind)
+    if not rails:
+        p.add_row([(1, "no power-rail data", 6)])
+        return p
+    by_label = {r["label"]: r for r in rails}
+    plain_order = _RAIL_ESSENTIALS if essentials_only else _RAIL_ORDER
+    ctrl_order = _CONTROLLER_ESSENTIALS if essentials_only else _CONTROLLER_ORDER
+    plain = [by_label[l] for l in plain_order if l in by_label]
+    controllers = [by_label[l] for l in ctrl_order if l in by_label]
+    if not essentials_only:
+        known = set(_RAIL_ORDER) | set(_CONTROLLER_ORDER)
+        for r in rails:
+            if r["label"] in known:
+                continue
+            (controllers if r.get("cap_w") is not None else plain).append(r)
+
+    per_row = 2 if inner >= 34 else 1
+    cell_w = inner // per_row
+    for i in range(0, len(plain), per_row):
+        chunk = plain[i:i + per_row]
+        row = []
+        for j, r in enumerate(chunk):
+            f = _Flow(cell_w - 1)
+            f.try_add_multi([(f"{r['label'][:10]:<10}", 3), (f"{r['watts']:>6.1f} W", 8)])
+            segs = list(f.segs)
+            if segs:
+                segs[0] = (j * cell_w + 1, segs[0][1], segs[0][2])
+            row.extend(segs)
+        p.add_row(row)
+
+    for r in controllers:
+        cap = r.get("cap_w")
+        if cap is None:
+            continue
+        pct = max(0.0, min((r["watts"] / cap) * 100 if cap else 0.0, 100.0))
+        f = _Flow(inner - 1)
+        f.add(f"{r['label']:<10}", 3)
+        f.add(f"{r['watts']:>5.1f} W ", 8)
+        lb, rb = term.bar_brackets()
+        bar, slot = term.make_bar(pct, 16 if inner > 60 else 10)
+        f.add(lb, 6)
+        f.add(bar, slot)
+        f.add(rb, 6)
+        f.add(f" of {cap:.0f} W", 3)
+        p.add_row(_finish_row(f))
+    return p
+
+
+def _build_nvme_smart_panel(y, x0, width, smart, kind="top"):
+    inner = width - 2
+    if smart is None:
+        p = panels.Panel(y, x0, width, title=[("NVME SMART", 9)], kind=kind)
+        p.add_row([(1, "no NVMe device detected", 6)])
+        return p
+
+    device, model = smart.get("device", "nvme?"), smart.get("model") or "Unknown"
+    p = panels.Panel(y, x0, width, title=[("NVME SMART", 9), (f" {device} · {model}", 3)], kind=kind)
+
+    if smart.get("needs_root"):
+        temp = smart.get("temp")
+        if temp is not None:
+            p.add_row([(2, f"composite {term.fmt_temp(temp)}", 3)])
+        p.add_row([(2, "SMART needs root — run with sudo (composite temp via hwmon)", 6)])
+        return p
+
+    wear, spare = smart.get("wear_pct"), smart.get("spare_pct")
+    temp = smart.get("smart_temp") if smart.get("smart_temp") is not None else smart.get("temp")
+    row1 = _flow_join(inner, [
+        (f"wear {wear}%", 3) if wear is not None else None,
+        (f"spare {spare}%", 3) if spare is not None else None,
+        (f"composite {term.fmt_temp(temp)}", 3) if temp is not None else None,
+    ])
+    if row1:
+        p.add_row(row1)
+
+    written, read = smart.get("written_tb"), smart.get("read_tb")
+    row2 = _flow_join(inner, [
+        (f"written {written:.1f} TB", 3) if written is not None else None,
+        (f"read {read:.1f} TB", 3) if read is not None else None,
+    ])
+    if row2:
+        p.add_row(row2)
+
+    poh, cycles = smart.get("power_on_hours"), smart.get("cycles")
+    row3 = _flow_join(inner, [
+        (f"power-on {poh:,} h", 3) if poh is not None else None,
+        (f"cycles {cycles}", 3) if cycles is not None else None,
+    ])
+    if row3:
+        p.add_row(row3)
+
+    unsafe, media = smart.get("unsafe_shutdowns"), smart.get("media_errors")
+    row4 = _flow_join(inner, [
+        (f"unsafe shutdowns {unsafe}", 3) if unsafe is not None else None,
+        (f"media errors {media}", 3) if media is not None else None,
+    ])
+    if row4:
+        p.add_row(row4)
+
+    p.add_row([(2, "via nvme hwmon · smartctl/nvme -j fallback", 6)])
+    return p
+
+
+def build_page2(state, tier, width, x0=0, height=None):
+    """Builds page 2 (read-only, Phase 3): header (ADVANCED tab active), one
+    full-width detail panel per GPU, the NIC advanced panel (ungrouped
+    per-PF rows), and THERMALS / POWER RAILS / NVME SMART. Every panel build
+    is wrapped defensively same as build_page1 -- missing/degraded collector
+    data must never stop the rest of the page from rendering."""
+    out = []
+
+    gpus = state.get("gpus") or []
+    gpu_caps = (state.get("caps") or {}).get("gpu") or []
+    mem = state.get("mem") or {}
+    nics = state.get("nics") or []
+    nics_pf = state.get("nic_pf") or []
+    thermal_entries = state.get("thermal") or []
+    power_rails = state.get("power_rails") or []
+    smart = state.get("smart")
+    thermal_caps = (state.get("caps") or {}).get("thermal") or {}
+    driver, cuda = state.get("driver", "Unknown"), state.get("cuda", "Unknown")
+    nic_asic_temp = state.get("nic_asic_temp")
+    nic_fw = state.get("nic_fw") or {}
+
+    has_spbm = bool(thermal_caps.get("spbm"))
+    paired = tier == "wide" and width >= 90
+
+    # Height degrade order differs by layout: the paired (side-by-side)
+    # THERMALS card always has room for one-entry-per-row WITH its bar (see
+    # _build_thermals_panel), so it degrades by dropping the redundant
+    # Zone-A..G group (only once spbm's own named zones are live) before it
+    # ever touches bars; the standalone full-width card has no zone
+    # redundancy to shed, so it degrades by dropping bars first instead.
+    drop_zones = False
+    show_thermal_bars = True
+    essentials_only = False
+    if height:
+        if paired:
+            if height < 42:
+                drop_zones = has_spbm
+            if height < 36:
+                essentials_only = True
+        else:
+            if height < 45:
+                show_thermal_bars = False
+            if height < 38:
+                essentials_only = True
+
+    if drop_zones:
+        thermal_entries = [e for e in thermal_entries if e.get("kind") != "thermal"]
+
+    out.append(_build_header(x0, width, tier, page=2))
+    y = 1
+
+    for idx, gpu in enumerate(gpus):
+        try:
+            caps = gpu_caps[idx] if idx < len(gpu_caps) else {}
+            panel = _build_gpu_detail_panel(y, x0, width, gpu, caps, mem,
+                                             idx == len(gpus) - 1, driver, cuda)
+            out.append(panel)
+            y += panel.total_height + 1
+        except Exception:
+            continue
+
+    try:
+        title_extra = _nic_panel_title(nics, nics_pf, nic_fw)
+        nic_panel = _build_nic_panel(y, x0, width, nics_pf, title_extra, nic_asic_temp)
+        out.append(nic_panel)
+        y += nic_panel.total_height + 1
+    except Exception:
+        pass
+
+    show_rails = has_spbm and bool(power_rails)
+
+    try:
+        if paired:
+            half = (width - 2) // 2
+            w1, w2 = half, width - half - 2
+            th_panel = _build_thermals_panel(y, x0, w1, thermal_entries, paired=True, has_spbm=has_spbm)
+            sm_panel = _build_nvme_smart_panel(y, x0 + w1 + 2, w2, smart)
+            out.append(th_panel)
+            out.append(sm_panel)
+            y += max(th_panel.total_height, sm_panel.total_height) + 1
+            if show_rails:
+                rails_panel = _build_power_rails_panel(y, x0, width, power_rails,
+                                                         essentials_only=essentials_only)
+                out.append(rails_panel)
+                y += rails_panel.total_height + 1
+        else:
+            th_panel = _build_thermals_panel(y, x0, width, thermal_entries,
+                                              show_bars=show_thermal_bars, has_spbm=has_spbm)
+            out.append(th_panel)
+            y += th_panel.total_height + 1
+            if show_rails:
+                rails_panel = _build_power_rails_panel(y, x0, width, power_rails,
+                                                         essentials_only=essentials_only)
+                out.append(rails_panel)
+                y += rails_panel.total_height + 1
+            sm_panel = _build_nvme_smart_panel(y, x0, width, smart)
+            out.append(sm_panel)
+            y += sm_panel.total_height + 1
+    except Exception:
+        pass
+
+    has_nvml = (state.get("caps") or {}).get("has_nvml", False)
+    rate = state.get("rate", 1.0)
+    out.append(_build_footer(x0, width, y, driver, cuda, rate, has_nvml))
     return out

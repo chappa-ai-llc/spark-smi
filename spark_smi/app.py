@@ -26,18 +26,20 @@ Usage: spark-smi [options]
 
   -l, --loop       live mode: curses TUI, refreshed continuously
   -n <secs>        refresh rate in seconds (default: {DEFAULT_REFRESH_RATE:g})
+  -p, --page <n>   which page to render in snapshot mode: 1 overview (default)
+                   or 2 advanced (GPU detail, NIC/thermal/SMART panels)
   --ascii          force plain-ASCII bars/frames (no UTF-8 box drawing)
   -h, --help       show this help and exit
 
 Snapshot mode (default, no -l) renders once and prints ANSI to stdout.
 
 Live-mode keys: q quit  ·  t toggle C/F  ·  u toggle GiB/GB
-                n active-NICs-only  ·  1/2 page (2 is a placeholder)
+                n active-NICs-only  ·  1/2 page
 """
 
 
 def _parse_args(argv):
-    opts = {"loop": False, "rate": DEFAULT_REFRESH_RATE, "help": False}
+    opts = {"loop": False, "rate": DEFAULT_REFRESH_RATE, "help": False, "page": 1}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -48,6 +50,13 @@ def _parse_args(argv):
             if i < len(argv):
                 try:
                     opts["rate"] = max(0.1, float(argv[i]))
+                except ValueError:
+                    pass
+        elif a in ("-p", "--page"):
+            i += 1
+            if i < len(argv):
+                try:
+                    opts["page"] = 2 if int(argv[i]) == 2 else 1
                 except ValueError:
                     pass
         elif a in ("-h", "--help"):
@@ -64,11 +73,14 @@ class State:
 
     def __init__(self, rate):
         self.rate = rate
+        self.page = 1
         self.cpu = collectors.CpuCollector()
         self.mem = collectors.MemoryCollector()
         self.gpu = collectors.GpuCollector()
         self.net = collectors.NetCollector()
         self.disk = collectors.DiskCollector()
+        self.thermal = collectors.ThermalCollector()
+        self.smart = collectors.SmartCollector()
         self.cluster_hist = [deque(maxlen=HIST_LEN) for _ in self.cpu.clusters]
         self.gpu_hist = {}
         self.nic_hist = {}
@@ -94,6 +106,30 @@ class State:
             disks = self.disk.sample()
         except Exception:
             disks = []
+        try:
+            thermal = self.thermal.sample()
+        except Exception:
+            thermal = []
+        try:
+            power_rails = self.thermal.sample_power()
+        except Exception:
+            power_rails = []
+        try:
+            smart = self.smart.sample(disks)
+        except Exception:
+            smart = None
+        try:
+            nic_pf = self.net.sample_pf_detail()
+        except Exception:
+            nic_pf = []
+        try:
+            nic_asic_temp = self.net.mlx5_asic_temp()
+        except Exception:
+            nic_asic_temp = None
+        try:
+            nic_fw = {r["rdma_dev"]: self.net.rdma_fw_ver(r["rdma_dev"]) for r in nic_pf}
+        except Exception:
+            nic_fw = {}
 
         for i, cl in enumerate(cpu.get("clusters") or []):
             if i >= len(self.cluster_hist):
@@ -127,13 +163,17 @@ class State:
 
         return {
             "cpu": cpu, "mem": mem, "gpus": gpus, "nics": nics, "disks": disks,
+            "thermal": thermal, "power_rails": power_rails, "smart": smart, "nic_pf": nic_pf,
+            "nic_asic_temp": nic_asic_temp, "nic_fw": nic_fw,
             "driver": driver, "cuda": cuda, "rate": self.rate,
-            "caps": {"gpu": self.gpu.caps, "net": self.net.caps, "has_nvml": collectors.HAS_NVML},
+            "caps": {"gpu": self.gpu.caps, "net": self.net.caps, "has_nvml": collectors.HAS_NVML,
+                     "thermal": self.thermal.caps, "smart": self.smart.caps},
         }
 
 
-def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_hint=None):
-    """Single UI entry point for both backends. Builds page 1 and draws it."""
+def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_hint=None, page_num=1):
+    """Single UI entry point for both backends. Builds the requested page
+    (1 overview, 2 advanced) and draws it."""
     try:
         h, w = stdscr.getmaxyx()
     except Exception:
@@ -147,19 +187,23 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
     try:
         sample = state.sample()
     except Exception:
-        sample = {"cpu": {}, "mem": {}, "gpus": [], "nics": [], "disks": [], "driver": "Unknown",
+        sample = {"cpu": {}, "mem": {}, "gpus": [], "nics": [], "disks": [], "thermal": [],
+                  "power_rails": [], "smart": None, "nic_pf": [], "driver": "Unknown",
                   "cuda": "Unknown", "rate": state.rate, "caps": {}}
 
     if active_nics_only:
         sample["nics"] = [n for n in sample.get("nics", []) if n.get("up")]
 
     try:
-        page = pages.build_page1(sample, tier, draw_w, x0, height=height_hint or h)
+        if page_num == 2:
+            built = pages.build_page2(sample, tier, draw_w, x0, height=height_hint or h)
+        else:
+            built = pages.build_page1(sample, tier, draw_w, x0, height=height_hint or h)
     except Exception:
-        page = []
+        built = []
 
     try:
-        panels.render(stdscr, page, colors_map)
+        panels.render(stdscr, built, colors_map)
     except Exception:
         pass
 
@@ -194,7 +238,7 @@ def main_loop(stdscr, state, rate):
         try:
             stdscr.erase()
             h, _ = stdscr.getmaxyx()
-            render_dashboard(stdscr, colors, state, active_nics_only, height_hint=h)
+            render_dashboard(stdscr, colors, state, active_nics_only, height_hint=h, page_num=state.page)
             stdscr.refresh()
         except Exception:
             pass
@@ -214,9 +258,15 @@ def main_loop(stdscr, state, rate):
                 active_nics_only = not active_nics_only
                 stdscr.clear()
                 break
-            if ch in (ord('1'), ord('2')):
-                # Page switching lands in Phase 3; '1' is a no-op (already on
-                # page 1) and '2' is a placeholder until page 2 exists.
+            if ch == ord('1'):
+                if state.page != 1:
+                    state.page = 1
+                    stdscr.clear()
+                break
+            if ch == ord('2'):
+                if state.page != 2:
+                    state.page = 2
+                    stdscr.clear()
                 break
             if ch == curses.KEY_RESIZE:
                 stdscr.clear()
@@ -232,6 +282,7 @@ def main():
         return
 
     state = State(opts["rate"])
+    state.page = opts["page"]
 
     if opts["loop"]:
         import curses
@@ -247,7 +298,7 @@ def main():
     else:
         v = term.VirtualCurses()
         colors = {i: i for i in term.PALETTE_256}
-        render_dashboard(v, colors, state)
+        render_dashboard(v, colors, state, page_num=state.page)
         output = v.render()
         # Some Windows consoles/pipes report a non-UTF-8 stdout encoding
         # (cp1252/cp437) even when BAR_STYLE picked "ascii" for the bars --

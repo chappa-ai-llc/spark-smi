@@ -271,6 +271,155 @@ class MemoryCollector:
 # Cache so we don't shell out to nvidia-smi on every render tick.
 _CACHED_DRIVER_INFO = None
 
+# Static-ish per-GPU fields (VBIOS, persistence/compute-mode/ECC CLI fallback)
+# fetched via `nvidia-smi -q` ONCE per GPU id and cached -- a full -q query is
+# too slow to run every tick, and these rarely change mid-session. Verified
+# need on GB10: NVML's own VBIOS/persistence calls can be flaky while
+# `nvidia-smi -q` still reports them ("9A.0B.25.00.00").
+_CACHED_GPU_STATIC = {}
+
+
+def _nvidia_smi_full_query(idx):
+    try:
+        res = subprocess.run(["nvidia-smi", "-q", f"-i={idx}"], capture_output=True, text=True, timeout=2)
+        if res.returncode == 0:
+            return res.stdout
+    except Exception:
+        pass
+    return None
+
+def _parse_smi_field(text, label):
+    if not text:
+        return None
+    m = re.search(rf"{re.escape(label)}\s*:\s*(.+)", text)
+    return m.group(1).strip() if m else None
+
+def _gpu_static_info(idx):
+    """CLI fallback for VBIOS/persistence/compute-mode/ECC, used only to fill
+    in whatever NVML couldn't read for this GPU -- see module docstring
+    above. Cached per GPU id after the first (successful or not) attempt."""
+    if idx in _CACHED_GPU_STATIC:
+        return _CACHED_GPU_STATIC[idx]
+    info = {"vbios": None, "persistence": None, "compute_mode": None, "ecc": None}
+    text = _nvidia_smi_full_query(idx)
+    if text:
+        info["vbios"] = _parse_smi_field(text, "VBIOS Version")
+        info["persistence"] = _parse_smi_field(text, "Persistence Mode")
+        info["compute_mode"] = _parse_smi_field(text, "Compute Mode")
+        m = re.search(r"ECC Mode\s*\n\s*Current\s*:\s*(.+)", text)
+        if m:
+            info["ecc"] = m.group(1).strip()
+    _CACHED_GPU_STATIC[idx] = info
+    return info
+
+
+# --- Page-2 GPU detail (clocks/pcie/power/thermal/throttle/state/procs) ----
+# All NVML-only, each field individually guarded -- a missing API on a given
+# driver/GPU just leaves the key absent from the sample dict, and pages.py
+# hides the corresponding row/segment rather than printing "N/A" spam.
+
+_THROTTLE_BITS = {
+    "power": ("nvmlClocksThrottleReasonSwPowerCap", "nvmlClocksThrottleReasonHwPowerBrakeSlowdown"),
+    "thermal": ("nvmlClocksThrottleReasonSwThermalSlowdown", "nvmlClocksThrottleReasonHwThermalSlowdown"),
+    "hw-slowdown": ("nvmlClocksThrottleReasonHwSlowdown",),
+    "sync-boost": ("nvmlClocksThrottleReasonSyncBoost",),
+}
+
+def _decode_throttle(handle):
+    """{"any": bool, "flags": {label: bool}} decoded from
+    nvmlDeviceGetCurrentClocksThrottleReasons, or None when that API isn't
+    available on this driver/GPU (row hidden entirely per spec)."""
+    try:
+        mask = pynvml.nvmlDeviceGetCurrentClocksThrottleReasons(handle)
+    except Exception:
+        return None
+    flags = {}
+    any_active = False
+    for label, bitnames in _THROTTLE_BITS.items():
+        active = False
+        for bn in bitnames:
+            bit = getattr(pynvml, bn, 0)
+            if bit and (mask & bit):
+                active = True
+        flags[label] = active
+        any_active = any_active or active
+    return {"any": any_active, "flags": flags}
+
+def _nvml_field_temp(handle, field_names):
+    """Best-effort hotspot/VRAM temperature via nvmlDeviceGetFieldValues --
+    public NVML doesn't guarantee these sensors on every GPU/driver, so this
+    tries each candidate field-id constant (by name, since not every pynvml
+    build defines all of them) and returns the first that resolves to a
+    plausible reading, or None (hidden) if none do."""
+    getter = getattr(pynvml, "nvmlDeviceGetFieldValues", None)
+    if getter is None:
+        return None
+    for name in field_names:
+        fid = getattr(pynvml, name, None)
+        if fid is None:
+            continue
+        try:
+            vals = getter(handle, [fid])
+            v = vals[0]
+            if getattr(v, "nvmlReturn", 1) != 0:
+                continue
+            raw = v.value
+            val = getattr(raw, "dVal", None)
+            if val is None:
+                val = getattr(raw, "uiVal", None)
+            if val is None:
+                val = getattr(raw, "siVal", None)
+            if val is not None and 0 < float(val) < 200:
+                return float(val)
+        except Exception:
+            continue
+    return None
+
+def _proc_name(pid):
+    try:
+        with open(f"/proc/{pid}/comm") as f:
+            return f.read().strip() or str(pid)
+    except Exception:
+        return str(pid)
+
+def _gpu_processes(handle):
+    """Compute+graphics processes on this GPU, deduped by pid (a pid can
+    appear in both lists on some drivers). Name via /proc/<pid>/comm,
+    falling back to the bare pid when that read fails (e.g. non-Linux)."""
+    procs = {}
+    for getter in (getattr(pynvml, "nvmlDeviceGetComputeRunningProcesses", None),
+                   getattr(pynvml, "nvmlDeviceGetGraphicsRunningProcesses", None)):
+        if getter is None:
+            continue
+        try:
+            for p in getter(handle):
+                pid = getattr(p, "pid", None)
+                if pid is None:
+                    continue
+                used = getattr(p, "usedGpuMemory", None)
+                if used == getattr(pynvml, "NVML_VALUE_NOT_AVAILABLE", -1):
+                    used = None
+                prev = procs.get(pid)
+                if prev is None or (used is not None and (prev is None or used > (prev or 0))):
+                    procs[pid] = used
+        except Exception:
+            pass
+    return [{"pid": pid, "name": _proc_name(pid), "mem": mem} for pid, mem in procs.items()]
+
+def _fmt_kbs(v):
+    """KB/s (NVML's PCIe throughput unit) -> a short human string."""
+    if v is None:
+        return None
+    try:
+        v = float(v)
+    except Exception:
+        return None
+    if v >= 1e6:
+        return f"{v / 1e6:.1f} GB/s"
+    if v >= 1e3:
+        return f"{v / 1e3:.1f} MB/s"
+    return f"{v:.0f} KB/s"
+
 def get_driver_info_safe():
     global _CACHED_DRIVER_INFO
     if _CACHED_DRIVER_INFO is not None:
@@ -442,16 +591,123 @@ def _collect_gpus():
                         gpu["clk_sm"] = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_SM)
                     except Exception:
                         pass
+
+                    # --- Page-2 detail fields (all individually guarded) ---
+                    try:
+                        gpu["clk_sm_max"] = pynvml.nvmlDeviceGetMaxClockInfo(handle, pynvml.NVML_CLOCK_SM)
+                    except Exception:
+                        pass
+                    try:
+                        gpu["clk_mem"] = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_MEM)
+                    except Exception:
+                        pass
+                    try:
+                        gpu["clk_video"] = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_VIDEO)
+                    except Exception:
+                        pass
+                    try:
+                        gpu["enc_util"] = pynvml.nvmlDeviceGetEncoderUtilization(handle)[0]
+                    except Exception:
+                        pass
+                    try:
+                        gpu["dec_util"] = pynvml.nvmlDeviceGetDecoderUtilization(handle)[0]
+                    except Exception:
+                        pass
+                    try:
+                        gpu["pcie_gen_cur"] = pynvml.nvmlDeviceGetCurrPcieLinkGeneration(handle)
+                        gpu["pcie_width_cur"] = pynvml.nvmlDeviceGetCurrPcieLinkWidth(handle)
+                    except Exception:
+                        pass
+                    try:
+                        gpu["pcie_gen_max"] = pynvml.nvmlDeviceGetMaxPcieLinkGeneration(handle)
+                        gpu["pcie_width_max"] = pynvml.nvmlDeviceGetMaxPcieLinkWidth(handle)
+                    except Exception:
+                        pass
+                    try:
+                        gpu["pcie_tx_kbs"] = pynvml.nvmlDeviceGetPcieThroughput(handle, pynvml.NVML_PCIE_UTIL_TX_BYTES)
+                        gpu["pcie_rx_kbs"] = pynvml.nvmlDeviceGetPcieThroughput(handle, pynvml.NVML_PCIE_UTIL_RX_BYTES)
+                    except Exception:
+                        pass
+                    try:
+                        gpu["pcie_replay"] = pynvml.nvmlDeviceGetPcieReplayCounter(handle)
+                    except Exception:
+                        pass
+                    try:
+                        gpu["power_limit_mw"] = pynvml.nvmlDeviceGetPowerManagementLimit(handle)
+                    except Exception:
+                        pass
+                    try:
+                        lo, hi = pynvml.nvmlDeviceGetPowerManagementLimitConstraints(handle)
+                        gpu["power_min_mw"], gpu["power_max_mw"] = lo, hi
+                    except Exception:
+                        pass
+                    try:
+                        gpu["temp_slowdown"] = pynvml.nvmlDeviceGetTemperatureThreshold(
+                            handle, pynvml.NVML_TEMPERATURE_THRESHOLD_SLOWDOWN)
+                    except Exception:
+                        pass
+                    try:
+                        gpu["temp_shutdown"] = pynvml.nvmlDeviceGetTemperatureThreshold(
+                            handle, pynvml.NVML_TEMPERATURE_THRESHOLD_SHUTDOWN)
+                    except Exception:
+                        pass
+                    gpu["temp_hotspot"] = _nvml_field_temp(
+                        handle, ("NVML_FI_DEV_GPU_TEMP_TLIMIT", "NVML_FI_DEV_HOTSPOT_TEMP"))
+                    gpu["temp_vram"] = _nvml_field_temp(
+                        handle, ("NVML_FI_DEV_MEMORY_TEMP",))
+                    gpu["throttle"] = _decode_throttle(handle)
+                    try:
+                        gpu["persistence"] = ("on" if pynvml.nvmlDeviceGetPersistenceMode(handle)
+                                               == pynvml.NVML_FEATURE_ENABLED else "off")
+                    except Exception:
+                        pass
+                    try:
+                        cm = pynvml.nvmlDeviceGetComputeMode(handle)
+                        gpu["compute_mode"] = {0: "default", 1: "exclusive-thread", 2: "prohibited",
+                                                3: "exclusive-process"}.get(cm, str(cm))
+                    except Exception:
+                        pass
+                    try:
+                        cur, _pend = pynvml.nvmlDeviceGetEccMode(handle)
+                        gpu["ecc"] = "on" if cur else "off"
+                    except Exception:
+                        pass
+                    try:
+                        v = pynvml.nvmlDeviceGetVbiosVersion(handle)
+                        gpu["vbios"] = v.decode() if isinstance(v, bytes) else v
+                    except Exception:
+                        pass
+                    try:
+                        gpu["procs"] = _gpu_processes(handle)
+                    except Exception:
+                        pass
+
                     nvml_success = True
                 except Exception:
                     nvml_success = False
+
+            # CLI fallback for the mostly-static STATE fields, only for
+            # whatever NVML didn't come back with (verified need on GB10:
+            # VBIOS/persistence readable via `nvidia-smi -q` even when the
+            # NVML calls above aren't).
+            if gpu.get("vbios") is None or gpu.get("persistence") is None or gpu.get("compute_mode") is None:
+                static = _gpu_static_info(gid)
+                if gpu.get("vbios") is None and static.get("vbios"):
+                    gpu["vbios"] = static["vbios"]
+                if gpu.get("persistence") is None and static.get("persistence"):
+                    gpu["persistence"] = static["persistence"].lower()
+                if gpu.get("compute_mode") is None and static.get("compute_mode"):
+                    gpu["compute_mode"] = static["compute_mode"].lower()
+                if gpu.get("ecc") is None and static.get("ecc"):
+                    gpu["ecc"] = static["ecc"].lower()
 
             if (not nvml_success or gpu["pwr_str"] == "N/A" or gpu["fan"] in ["N/A", "0%"]
                     or gpu["clk_sm"] in ["N/A", None]):
                 try:
                     # clocks.sm appended last: verified on GB10 that NVML's
                     # own clock query can fail while this CLI field works.
-                    query = "name,temperature.gpu,utilization.gpu,memory.used,memory.total,power.draw,fan.speed,clocks.sm"
+                    query = ("name,temperature.gpu,utilization.gpu,memory.used,memory.total,power.draw,"
+                             "fan.speed,clocks.sm,clocks.max.sm")
                     cmd = ["nvidia-smi", f"--id={gid}", f"--query-gpu={query}", "--format=csv,noheader,nounits"]
                     res = subprocess.run(cmd, capture_output=True, text=True, timeout=1)
                     if res.returncode == 0:
@@ -474,6 +730,8 @@ def _collect_gpus():
                             gpu["fan"] = f"{r[6]}%"
                         if gpu["clk_sm"] in ["N/A", None] and len(r) > 7 and "N/A" not in r[7] and "[Not" not in r[7]:
                             gpu["clk_sm"] = int(float(r[7]))
+                        if gpu.get("clk_sm_max") is None and len(r) > 8 and "N/A" not in r[8] and "[Not" not in r[8]:
+                            gpu["clk_sm_max"] = int(float(r[8]))
                 except Exception:
                     pass
 
@@ -621,9 +879,11 @@ class NetCollector:
 
     def __init__(self):
         self.interfaces = self._detect_interfaces()
+        self._rdma_dev_map = {}  # iface -> (ib_device_name, port_str), filled by _map_rdma_counters
         self.rdma_counters = self._map_rdma_counters()
         self.groups = self._group_physical()
-        self.caps = {"rdma": bool(self.rdma_counters), "interfaces": len(self.interfaces)}
+        self.caps = {"rdma": bool(self.rdma_counters), "interfaces": len(self.interfaces),
+                     "pf_detail": bool(self._rdma_dev_map)}
         try:
             netdev_stats = psutil.net_io_counters(pernic=True)
         except Exception:
@@ -634,6 +894,24 @@ class NetCollector:
             if b is not None:
                 self.prev_bytes[name] = b
         self.prev_time = time.time()
+        # Separate delta-tracking state for sample_pf_detail() (page 2's
+        # ungrouped per-PF panel) -- kept independent of the grouped-port
+        # bookkeeping above so the two methods can be called in either order.
+        # Baselined HERE at construction (mirroring self.prev_bytes above),
+        # NOT lazily on first sample_pf_detail() call: a lazy "prev = cur"
+        # fallback on the first call always yields a zero delta, which in
+        # live mode self-corrects on tick 2 but in SNAPSHOT mode (exactly
+        # one sample() call, ever) meant every RDMA rate on page 2 read a
+        # permanent 0 Mb/s even under real traffic, while page 1's
+        # construction-baselined NetMonitor.sample() correctly showed it.
+        self.prev_bytes_pf = {}
+        self.prev_hw = {}
+        for iface in self._rdma_dev_map:
+            b = self._read_byte_counters(iface, {})
+            if b is not None:
+                self.prev_bytes_pf[iface] = b
+            self.prev_hw[iface] = self._hw_counter_snapshot(iface)
+        self.prev_time_pf = time.time()
 
     def _detect_interfaces(self):
         """Physical NICs only: on Linux, anything in /sys/class/net with a
@@ -654,7 +932,10 @@ class NetCollector:
         """RDMA/RoCE traffic (NCCL, GPUDirect) bypasses the kernel network
         stack, so netdev byte counters never see it. The HCA's per-port
         counters under /sys/class/infiniband do count it. Map each netdev
-        to those counter files via the shared PCI device's net/ dir."""
+        to those counter files via the shared PCI device's net/ dir. As a
+        side effect, also populates self._rdma_dev_map (iface -> (ib, port))
+        for page 2's ungrouped per-PF panel, which needs the raw device/port
+        identity rather than just the two counter file paths."""
         mapping = {}
         ib_root = "/sys/class/infiniband"
         try:
@@ -674,6 +955,7 @@ class NetCollector:
                          os.path.join(cdir, "port_xmit_data"))
                 if all(os.path.exists(p) for p in paths):
                     mapping[iface] = paths
+                    self._rdma_dev_map[iface] = (ib, port)
         return mapping
 
     def _ib_port_for(self, iface, ports):
@@ -875,6 +1157,101 @@ class NetCollector:
 
         self.prev_time = curr_time
         return nics
+
+    # --- Page-2 NIC advanced panel: one row per PF, not grouped by port ---
+    def _hw_counter_snapshot(self, iface):
+        ib, port = self._rdma_dev_map[iface]
+        hw_dir = f"/sys/class/infiniband/{ib}/ports/{port}/hw_counters"
+        return {k: _read_int(f"{hw_dir}/{k}") for k in
+                ("np_cnp_sent", "rp_cnp_handled", "np_ecn_marked_roce_packets", "out_of_buffer")}
+
+    def sample_pf_detail(self):
+        """One row per netdev with an RDMA device behind it (ungrouped,
+        unlike sample()'s physical-port grouping) -- port name, RDMA device,
+        state/speed, RX/TX rates, and the hw_counters CNP/ECN/discard
+        figures as PER-SECOND deltas (a counter reset from a driver reload
+        clamps to 0 rather than showing a negative spike)."""
+        curr_time = time.time()
+        dt = max(curr_time - self.prev_time_pf, 0.1)
+        rows = []
+        for iface in sorted(self._rdma_dev_map):
+            ib = self._rdma_dev_map[iface][0]
+
+            b = self._read_byte_counters(iface, {})
+            rx_bps = tx_bps = 0.0
+            if b is not None:
+                # NOT `.get(iface, b)` -- that fallback-to-current-value
+                # trick only looks safe; it silently zeros the very first
+                # reading (see the __init__ comment on why that's wrong for
+                # snapshot mode). Both prev_bytes_pf and prev_hw are always
+                # pre-seeded at construction, so a genuinely missing entry
+                # here would mean a newly-appeared iface, not the common case.
+                prev_b = self.prev_bytes_pf.get(iface, b)
+                rx_bps = max(b[0] - prev_b[0], 0) * 8 / dt
+                tx_bps = max(b[1] - prev_b[1], 0) * 8 / dt
+                self.prev_bytes_pf[iface] = b
+
+            raw = self._hw_counter_snapshot(iface)
+            prev_hw = self.prev_hw.get(iface, raw)
+            rates = {}
+            for k, v in raw.items():
+                if v is None:
+                    rates[k] = None
+                else:
+                    p = prev_hw.get(k)
+                    rates[k] = max(v - p, 0) / dt if p is not None else 0.0
+            self.prev_hw[iface] = raw
+
+            phys = self._phys_port_key(iface)
+            port_name = phys[1] if phys else "-"
+            speed_mbit = self.get_interface_speed(iface)
+            up = self._carrier_up(iface) and speed_mbit > 0
+            rows.append({
+                "port": port_name, "rdma_dev": ib, "netdev": iface,
+                "up": up, "speed_str": self._fmt_speed(speed_mbit) if speed_mbit else "down",
+                "rx_bps": rx_bps, "tx_bps": tx_bps,
+                "cnp_sent": rates["np_cnp_sent"], "cnp_handled": rates["rp_cnp_handled"],
+                "ecn_marked": rates["np_ecn_marked_roce_packets"],
+                "discard": rates["out_of_buffer"],
+            })
+        # Sort by (port, rdma dev) rather than the netdev iteration order
+        # above: sorting by netdev name alone put both P2-domain PFs
+        # ("enP2p1s0f0np0", "enP2p1s0f1np1") ahead of the p0-numbered PF on
+        # the other card ("enp1s0f0np0") purely because 'P' < 'p' in ASCII,
+        # interleaving p0/p1/p0/p1 instead of grouping same-port PFs together.
+        rows.sort(key=lambda r: (r["port"], r["rdma_dev"]))
+        self.prev_time_pf = curr_time
+        return rows
+
+    def rdma_fw_ver(self, ib):
+        return _read_text(f"/sys/class/infiniband/{ib}/fw_ver") or "?"
+
+    def mlx5_asic_temp(self):
+        """First "asic"-labeled temp channel found on any mlx5-named hwmon
+        (DGX Spark's CX-7 exposes one identical hwmon per port), for the NIC
+        panel's title-right. None (hidden) when no such hwmon exists."""
+        try:
+            names = os.listdir("/sys/class/hwmon")
+        except Exception:
+            return None
+        for n in names:
+            hpath = f"/sys/class/hwmon/{n}"
+            hwname = _read_text(f"{hpath}/name") or ""
+            if "mlx5" not in hwname.lower():
+                continue
+            try:
+                files = os.listdir(hpath)
+            except Exception:
+                continue
+            for fn in sorted(f for f in files if re.fullmatch(r"temp\d+_input", f)):
+                idx = re.sub(r"\D", "", fn)
+                label = (_read_text(f"{hpath}/temp{idx}_label") or "").lower()
+                if label and "asic" not in label:
+                    continue
+                val = _read_int(f"{hpath}/{fn}")
+                if val is not None:
+                    return val / 1000.0
+        return None
 
 
 # =========================================================================
@@ -1130,10 +1507,18 @@ class ThermalCollector:
             out.append({"label": label, "temp_c": z["temp_c"], "kind": "thermal"})
         return out
 
+    # Vendor short-names for THERMALS collapse labels -- purely cosmetic
+    # (mock's "cx7 asic ×4" vs. the raw kernel hwmon name "mlx5").
+    _HWMON_SHORT_NAMES = {"mlx5": "cx7"}
+
     def _hwmon_entries(self):
         """(entries, spbm_entries) -- temp channels from every named hwmon
         device except "acpitz" (already covered as thermal zones), split out
-        separately when the hwmon is "spbm" so callers can list it first."""
+        separately when the hwmon is "spbm" so callers can list it first.
+        Each entry's label is prefixed with the (short-named) hwmon device
+        name when the kernel's own temp*_label is generic ("Composite",
+        "Sensor 1" on nvme controllers) so it reads as "nvme Composite"
+        rather than a bare, deviceless "Composite"."""
         try:
             names = sorted(os.listdir("/sys/class/hwmon"))
         except Exception:
@@ -1144,6 +1529,7 @@ class ThermalCollector:
             hwname = _read_text(f"{hpath}/name")
             if not hwname or hwname == "acpitz":
                 continue
+            short = self._HWMON_SHORT_NAMES.get(hwname, hwname)
             try:
                 files = os.listdir(hpath)
             except Exception:
@@ -1155,16 +1541,49 @@ class ThermalCollector:
                 val = _read_int(f"{hpath}/{fn}")
                 if val is None:
                     continue
-                label = _read_text(f"{hpath}/temp{idx}_label")
-                if not label:
-                    label = hwname if len(temp_inputs) == 1 else f"{hwname}{idx}"
-                chans.append({"label": label, "temp_c": val / 1000.0, "kind": "hwmon"})
+                raw_label = _read_text(f"{hpath}/temp{idx}_label")
+                if hwname == "spbm":
+                    # spbm's own labels (tj_max, cpu_e_clu0, cpu_p_clu1, ...)
+                    # are already unique zone names -- prefixing them would
+                    # only add noise, and at the panel's truncated column
+                    # width previously ate the very digit that told
+                    # cpu_e_clu0 apart from cpu_e_clu1.
+                    label = raw_label or f"rail{idx}"
+                elif raw_label:
+                    label = raw_label if raw_label.lower().startswith(short.lower()) else f"{short} {raw_label}"
+                else:
+                    label = short if len(temp_inputs) == 1 else f"{short}{idx}"
+                chans.append({"label": label, "temp_c": val / 1000.0, "kind": "hwmon", "hwname": hwname})
             (spbm_entries if hwname == "spbm" else entries).extend(chans)
         return entries, spbm_entries
+
+    @staticmethod
+    def _collapse_consecutive(entries):
+        """Collapses runs of CONSECUTIVE entries sharing the same label into
+        one "label ×N" row using the max temp -- e.g. the CX-7's four
+        identical "cx7 asic" hwmon rows (one per port's mlx5 instance)
+        become a single "cx7 asic ×4" row. Order-preserving; entries that
+        aren't adjacent duplicates are left alone."""
+        out = []
+        i = 0
+        while i < len(entries):
+            e = entries[i]
+            j = i + 1
+            while j < len(entries) and entries[j]["label"] == e["label"]:
+                j += 1
+            run = entries[i:j]
+            if len(run) > 1:
+                out.append({"label": f"{e['label']} ×{len(run)}",
+                            "temp_c": max(r["temp_c"] for r in run), "kind": e["kind"]})
+            else:
+                out.append(e)
+            i = j
+        return out
 
     def sample(self):
         zones = self._relabel_zones(self._thermal_zones())
         hwmon_entries, spbm_entries = self._hwmon_entries()
+        hwmon_entries = self._collapse_consecutive(hwmon_entries)
         # Dedupe: an hwmon channel wins over a thermal zone reporting the
         # same name (e.g. some platforms expose both).
         hwmon_labels = {e["label"] for e in hwmon_entries + spbm_entries}
@@ -1172,9 +1591,12 @@ class ThermalCollector:
         return spbm_entries + zones + hwmon_entries
 
     def sample_power(self):
-        """[{"label": rail name, "watts": float}, ...] from the "spbm" hwmon's
-        powerN_label/powerN_input channels (microwatts), for Phase 3's
-        power-rails display. Empty list when no spbm hwmon exists."""
+        """[{"label", "watts", "cap_w", "cap_max_w"}, ...] from the "spbm"
+        hwmon's powerN_label/powerN_input/powerN_cap[_max] channels
+        (microwatts), for the page-2 POWER RAILS display. cap_w/cap_max_w
+        are None when the kernel driver doesn't expose a cap for that rail
+        (most plain measurement rails don't -- only the pl1/pl2/syspl1/
+        syspl2 limit controllers do). Empty list when no spbm hwmon exists."""
         out = []
         try:
             names = os.listdir("/sys/class/hwmon")
@@ -1194,5 +1616,120 @@ class ThermalCollector:
                 if val is None:
                     continue
                 label = _read_text(f"{hpath}/power{idx}_label") or f"rail{idx}"
-                out.append({"label": label, "watts": val / 1_000_000.0})
+                cap = _read_int(f"{hpath}/power{idx}_cap")
+                cap_max = _read_int(f"{hpath}/power{idx}_cap_max")
+                out.append({
+                    "label": label, "watts": val / 1_000_000.0,
+                    "cap_w": cap / 1_000_000.0 if cap is not None else None,
+                    "cap_max_w": cap_max / 1_000_000.0 if cap_max is not None else None,
+                })
+        return out
+
+
+# =========================================================================
+# NVMe SMART/health (page 2 only)
+# =========================================================================
+
+class SmartCollector:
+    """Enriches DiskCollector's hwmon composite temp with NVMe SMART/health
+    data via `smartctl -j` or `nvme smart-log -o json`, whichever is on
+    PATH. Both need root for the NVMe admin passthrough ioctl, so a
+    permission failure (or the tool being entirely absent) sets
+    needs_root=True and the caller renders a single dim explanatory row
+    instead of fabricating data. The parsed result is cached and only
+    re-fetched every REFRESH_EVERY samples -- these fields barely change
+    tick to tick and a subprocess + root ioctl every second is wasteful."""
+
+    REFRESH_EVERY = 60
+
+    def __init__(self):
+        if shutil.which("smartctl"):
+            self.tool = "smartctl"
+        elif shutil.which("nvme"):
+            self.tool = "nvme"
+        else:
+            self.tool = None
+        self.caps = {"tool": bool(self.tool)}
+        self._tick = 0
+        self._cache = {}
+        self._failed = set()
+
+    @staticmethod
+    def _pick_target(disks):
+        """First NVMe disk in DiskCollector's list -- the panel shows one
+        device (matching the mock); multi-NVMe hosts only see the first."""
+        for d in disks or []:
+            if str(d.get("name", "")).startswith("nvme"):
+                return d
+        return None
+
+    def _run_json(self, args):
+        try:
+            res = subprocess.run(args, capture_output=True, text=True, timeout=2)
+            if not res.stdout:
+                return None
+            import json
+            return json.loads(res.stdout)
+        except Exception:
+            return None
+
+    def _parse(self, data):
+        try:
+            # smartctl -j nests health fields under this key; `nvme
+            # smart-log -o json` reports the same field names at the top
+            # level -- .get(key, data) lets one parser handle both shapes.
+            log = data.get("nvme_smart_health_information_log", data)
+            units_w = log.get("data_units_written")
+            units_r = log.get("data_units_read")
+            return {
+                "wear_pct": log.get("percentage_used"),
+                "spare_pct": log.get("available_spare"),
+                "smart_temp": log.get("temperature"),
+                "written_tb": (units_w * 512000 / 1e12) if units_w is not None else None,
+                "read_tb": (units_r * 512000 / 1e12) if units_r is not None else None,
+                "power_on_hours": log.get("power_on_hours"),
+                "cycles": log.get("power_cycles"),
+                "unsafe_shutdowns": log.get("unsafe_shutdowns"),
+                "media_errors": log.get("media_errors"),
+            }
+        except Exception:
+            return None
+
+    def sample(self, disks):
+        """None when there's no NVMe disk at all; otherwise a dict with at
+        least device/model/temp/size (from DiskCollector, always available)
+        plus the SMART fields above when the CLI tool + root access worked,
+        or needs_root=True (dim explanatory row) when they didn't."""
+        d = self._pick_target(disks)
+        if d is None:
+            return None
+        name = d["name"]
+        m = re.match(r"(nvme\d+)", name)
+        ctrl = m.group(1) if m else name
+        out = {"device": ctrl, "model": d.get("model"), "temp": d.get("temp"),
+               "size": d.get("size"), "needs_root": False}
+        if not self.tool:
+            out["needs_root"] = True
+            return out
+
+        self._tick += 1
+        cached = self._cache.get(ctrl)
+        if cached is not None and ctrl not in self._failed and self._tick % self.REFRESH_EVERY != 0:
+            out.update(cached)
+            return out
+
+        dev_path = f"/dev/{ctrl}"
+        data = None
+        if self.tool == "smartctl":
+            data = self._run_json(["smartctl", "-j", "-a", dev_path])
+        if data is None and shutil.which("nvme"):
+            data = self._run_json(["nvme", "smart-log", dev_path, "-o", "json"])
+        parsed = self._parse(data) if data else None
+        if parsed is None:
+            self._failed.add(ctrl)
+            out["needs_root"] = True
+            return out
+        self._failed.discard(ctrl)
+        self._cache[ctrl] = parsed
+        out.update(parsed)
         return out
