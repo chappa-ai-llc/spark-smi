@@ -68,8 +68,10 @@ class State:
         self.mem = collectors.MemoryCollector()
         self.gpu = collectors.GpuCollector()
         self.net = collectors.NetCollector()
+        self.disk = collectors.DiskCollector()
         self.cluster_hist = [deque(maxlen=HIST_LEN) for _ in self.cpu.clusters]
         self.gpu_hist = {}
+        self.nic_hist = {}
 
     def sample(self):
         try:
@@ -88,6 +90,10 @@ class State:
             nics = self.net.sample()
         except Exception:
             nics = []
+        try:
+            disks = self.disk.sample()
+        except Exception:
+            disks = []
 
         for i, cl in enumerate(cpu.get("clusters") or []):
             if i >= len(self.cluster_hist):
@@ -104,13 +110,23 @@ class State:
                 hist.append(0.0)
             g["history"] = list(hist)
 
+        # Keyed by primary netdev name -- groups are stable frame-to-frame
+        # (grouping is topology, detected once at construction), so this
+        # doesn't need the same re-detection care as CPU cluster indices.
+        for n in nics:
+            hist = self.nic_hist.setdefault(n.get("name"), {"rx": deque(maxlen=HIST_LEN), "tx": deque(maxlen=HIST_LEN)})
+            hist["rx"].append(n.get("rx_bps", 0) or 0)
+            hist["tx"].append(n.get("tx_bps", 0) or 0)
+            n["rx_history"] = list(hist["rx"])
+            n["tx_history"] = list(hist["tx"])
+
         try:
             driver, cuda = self.gpu.driver_info()
         except Exception:
             driver, cuda = "Unknown", "Unknown"
 
         return {
-            "cpu": cpu, "mem": mem, "gpus": gpus, "nics": nics,
+            "cpu": cpu, "mem": mem, "gpus": gpus, "nics": nics, "disks": disks,
             "driver": driver, "cuda": cuda, "rate": self.rate,
             "caps": {"gpu": self.gpu.caps, "net": self.net.caps, "has_nvml": collectors.HAS_NVML},
         }
@@ -131,7 +147,7 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
     try:
         sample = state.sample()
     except Exception:
-        sample = {"cpu": {}, "mem": {}, "gpus": [], "nics": [], "driver": "Unknown",
+        sample = {"cpu": {}, "mem": {}, "gpus": [], "nics": [], "disks": [], "driver": "Unknown",
                   "cuda": "Unknown", "rate": state.rate, "caps": {}}
 
     if active_nics_only:

@@ -4,6 +4,7 @@ state for pages.py to render -- no rendering logic lives here. Every sysfs
 read and subprocess call is guarded; a missing sensor degrades to N/A or a
 capability flag, it never raises past this module.
 """
+import math
 import os
 import re
 import shutil
@@ -527,7 +528,8 @@ class GpuCollector:
 # =========================================================================
 
 # Kernel driver -> short vendor tag for NIC labels (kept <=7 chars so
-# "<tag> <speed>" fits the 12-char label cell)
+# "<tag> <speed>" fits the 12-char label cell). Final fallback when PCI-ID
+# naming below can't resolve anything at all.
 NIC_DRIVER_NAMES = {
     "mlx5_core": "MLX5", "mlx4_en": "MLX4", "r8169": "Realtek", "r8125": "Realtek",
     "r8126": "Realtek", "r8127": "Realtek", "r8152": "Realtek",
@@ -535,6 +537,81 @@ NIC_DRIVER_NAMES = {
     "ixgbe": "Intel", "i40e": "Intel", "ice": "Intel", "tg3": "Brcm",
     "bnxt_en": "Brcm", "atlantic": "Aqtia", "virtio_net": "VirtIO",
 }
+
+# --- NIC hardware naming from PCI IDs ----------------------------------
+# Built-in vendor/device table (spec: NETWORK data section). Composed as
+# "Vendor Model" e.g. "Mellanox ConnectX-7". Hex IDs are lowercase, no "0x".
+PCI_VENDOR_NAMES = {
+    "15b3": "Mellanox", "10ec": "Realtek", "8086": "Intel", "14e4": "Broadcom",
+    "14c3": "MediaTek", "1d6a": "Aquantia", "10de": "NVIDIA",
+}
+PCI_DEVICE_NAMES = {
+    ("15b3", "1021"): "ConnectX-7",
+    ("10ec", "8127"): "RTL8127",
+}
+
+# Lazily-parsed /usr/share/hwdata/pci.ids (or the Debian-ism .../misc/pci.ids)
+# used only when the built-in vendor table above doesn't know the card.
+# None = not yet attempted; {} = attempted and absent/unparseable (still a
+# valid cache entry, so a missing file only costs one failed open() per run).
+_PCI_IDS_CACHE = None
+
+def _load_pci_ids():
+    global _PCI_IDS_CACHE
+    if _PCI_IDS_CACHE is not None:
+        return _PCI_IDS_CACHE
+    data = {}
+    for path in ("/usr/share/hwdata/pci.ids", "/usr/share/misc/pci.ids"):
+        try:
+            with open(path, encoding="utf-8", errors="ignore") as f:
+                vendor_hex = None
+                for line in f:
+                    if not line.strip() or line.startswith("#"):
+                        continue
+                    if line.startswith("\t\t"):
+                        continue  # subvendor/subdevice lines -- not needed here
+                    if line.startswith("\t"):
+                        if vendor_hex is None:
+                            continue
+                        parts = line.strip().split(None, 1)
+                        if len(parts) == 2:
+                            data[vendor_hex]["devices"][parts[0].lower()] = parts[1].strip()
+                        continue
+                    if line[0] in "0123456789abcdefABCDEF":
+                        parts = line.strip().split(None, 1)
+                        if len(parts) == 2:
+                            vendor_hex = parts[0].lower()
+                            data[vendor_hex] = {"name": parts[1].strip(), "devices": {}}
+            break  # first readable file wins
+        except Exception:
+            continue
+    _PCI_IDS_CACHE = data
+    return data
+
+def _pci_ids_lookup(vendor_hex, device_hex):
+    """Vendor+device name pair from pci.ids, or None if either is unknown or
+    the file is unavailable -- caller falls back to the driver-name label."""
+    v = _load_pci_ids().get(vendor_hex)
+    if not v:
+        return None
+    dname = v["devices"].get(device_hex)
+    return f"{v['name']} {dname}" if dname else None
+
+def _pci_vendor_device(iface):
+    """(vendor_hex, device_hex) lowercase, no "0x", for one netdev's backing
+    PCI device -- or (None, None) on any non-PCI/virtual device."""
+    try:
+        v = _read_text_stripped_hex(f"/sys/class/net/{iface}/device/vendor")
+        d = _read_text_stripped_hex(f"/sys/class/net/{iface}/device/device")
+        if v and d:
+            return v, d
+    except Exception:
+        pass
+    return None, None
+
+def _read_text_stripped_hex(path):
+    with open(path) as f:
+        return f.read().strip().lower().replace("0x", "")
 
 class NetCollector:
     """Physical-NIC discovery + RDMA-aware, physical-port-grouped throughput.
@@ -678,6 +755,23 @@ class NetCollector:
         except Exception:
             return iface[:7]
 
+    def _nic_hw_label(self, iface):
+        """"Vendor Model" hardware label from PCI IDs (spec's NETWORK data
+        section), e.g. "Mellanox ConnectX-7". Fallback chain: built-in vendor
+        table with unknown device -> "Vendor 0xdead"; unknown vendor -> the
+        system's pci.ids database; nothing resolvable at all (non-PCI device,
+        or pci.ids absent) -> the pre-existing driver-name label."""
+        vendor_hex, device_hex = _pci_vendor_device(iface)
+        if vendor_hex:
+            vendor_name = PCI_VENDOR_NAMES.get(vendor_hex)
+            if vendor_name:
+                device_name = PCI_DEVICE_NAMES.get((vendor_hex, device_hex))
+                return f"{vendor_name} {device_name}" if device_name else f"{vendor_name} 0x{device_hex}"
+            looked_up = _pci_ids_lookup(vendor_hex, device_hex)
+            if looked_up:
+                return looked_up
+        return self._driver_label(iface)
+
     def _carrier_up(self, iface):
         # Reading carrier raises EINVAL while the interface is admin-down
         try:
@@ -716,6 +810,11 @@ class NetCollector:
         return self._fmt_speed(sum(speeds))
 
     def sample(self):
+        """Per physical-port group: primary netdev name (first member,
+        regardless of link state), PCI-ID hardware label, PF count, link
+        speed, carrier state, and RX/TX rates kept SEPARATE (the RDMA HCA
+        counters are read as a (rx, tx) tuple upstream in
+        _read_byte_counters -- this is where they stop being summed)."""
         curr_time = time.time()
         dt = max(curr_time - self.prev_time, 0.1)
         try:
@@ -723,21 +822,29 @@ class NetCollector:
         except Exception:
             netdev_stats = {}
 
-        bps = {}
+        rate = {}
         for name in self.interfaces:
             b = self._read_byte_counters(name, netdev_stats)
             if b is None:
                 continue
             p = self.prev_bytes.get(name, b)
-            delta = (b[0] - p[0]) + (b[1] - p[1])
-            bps[name] = max(delta, 0) * 8 / dt  # negative delta = counter reset
+            drx = max(b[0] - p[0], 0)  # negative delta = counter reset
+            dtx = max(b[1] - p[1], 0)
+            rate[name] = (drx * 8 / dt, dtx * 8 / dt)
             self.prev_bytes[name] = b
 
         nics = []
         for g in self.groups:
-            live = [m for m in g["members"] if m in bps]
+            primary = g["members"][0]
+            base = {
+                "name": primary, "hw_label": self._nic_hw_label(primary),
+                "pf_count": len(g["members"]),
+            }
+            live = [m for m in g["members"] if m in rate]
             if not live:
-                nics.append({"label": "Offline", "usage": 0, "up": False})
+                nics.append({**base, "up": False, "speed_mbit": 0, "speed_str": "down",
+                             "rx_bps": 0, "tx_bps": 0, "rx_pct": 0, "tx_pct": 0,
+                             "down_reason": "offline", "label": "Offline"})
                 continue
             up = any(self._carrier_up(m) for m in live)
             # a down port reads speed 0, so it drops out of the capacity sum
@@ -747,17 +854,345 @@ class NetCollector:
             shared_port = g["port"] is not None and len(live) > 1
             total_mbit = max(speeds) if shared_port else sum(speeds)
             if not up or total_mbit == 0:
-                nics.append({"label": "Link Down", "usage": 0, "up": False})
+                nics.append({**base, "up": False, "speed_mbit": 0, "speed_str": "down",
+                             "rx_bps": 0, "tx_bps": 0, "rx_pct": 0, "tx_pct": 0,
+                             "down_reason": "no carrier", "label": "Link Down"})
                 continue
-            group_bps = sum(bps[m] for m in live)
+            group_rx = sum(rate[m][0] for m in live)
+            group_tx = sum(rate[m][1] for m in live)
+            rx_pct = (group_rx / (total_mbit * 1_000_000)) * 100
+            tx_pct = (group_tx / (total_mbit * 1_000_000)) * 100
             if shared_port:
-                label = f"{self._driver_label(live[0])} {g['port']} {self._fmt_speed(total_mbit)}"
+                label = f"{base['hw_label']} {g['port']} {self._fmt_speed(total_mbit)}"
             else:
-                label = f"{self._driver_label(live[0])} {self._speed_label(speeds)}"
+                label = f"{base['hw_label']} {self._speed_label(speeds)}"
             nics.append({
-                "label": label, "usage": (group_bps / (total_mbit * 1_000_000)) * 100,
-                "up": up, "bps": group_bps,
+                **base, "up": True, "speed_mbit": total_mbit,
+                "speed_str": self._fmt_speed(total_mbit),
+                "rx_bps": group_rx, "tx_bps": group_tx,
+                "rx_pct": rx_pct, "tx_pct": tx_pct, "label": label,
             })
 
         self.prev_time = curr_time
         return nics
+
+
+# =========================================================================
+# Disk / storage
+# =========================================================================
+
+# Skip virtual/duplicate block devices: loop mounts, ramdisks, device-mapper
+# (LVM/crypt -- these are views over a real disk already listed on its own),
+# zram (compressed swap, not physical), and optical drives.
+_DISK_SKIP_PREFIXES = ("loop", "ram", "dm-", "zram", "sr")
+
+def _read_text(path):
+    try:
+        with open(path) as f:
+            return f.read().strip() or None
+    except Exception:
+        return None
+
+
+class DiskCollector:
+    """Physical block-device discovery (/sys/block) + throughput from
+    /proc/diskstats deltas + temp via matching hwmon + used% via statvfs of
+    the largest mounted filesystem on that disk. Every sysfs/proc read is
+    guarded; a missing sensor degrades to a hidden field (None), never a
+    crash or a fabricated number."""
+
+    def __init__(self):
+        self.disks = self._detect_disks()
+        self.caps = {"disks": len(self.disks)}
+        stats = self._read_diskstats()
+        self.prev_sectors = {name: stats[name] for name in self.disks if name in stats}
+        self.prev_time = time.time()
+
+    def _detect_disks(self):
+        try:
+            names = sorted(os.listdir("/sys/block"))
+        except Exception:
+            return []
+        return [n for n in names if not n.startswith(_DISK_SKIP_PREFIXES)]
+
+    def _model(self, name):
+        return _read_text(f"/sys/block/{name}/device/model") or "Unknown"
+
+    def _size_bytes(self, name):
+        # /sys/block/<dev>/size is always in 512-byte sectors, regardless of
+        # the device's actual logical block size.
+        sectors = _read_int(f"/sys/block/{name}/size")
+        return (sectors or 0) * 512
+
+    def _read_diskstats(self):
+        """{name: (sectors_read, sectors_written)} for every device listed in
+        /proc/diskstats -- fields 3 and 7 (1-indexed after the device name):
+        reads-completed, reads-merged, SECTORS-READ, time-reading,
+        writes-completed, writes-merged, SECTORS-WRITTEN, ..."""
+        out = {}
+        try:
+            with open("/proc/diskstats") as f:
+                lines = f.readlines()
+        except Exception:
+            return out
+        for line in lines:
+            parts = line.split()
+            if len(parts) < 10:
+                continue
+            try:
+                out[parts[2]] = (int(parts[5]), int(parts[9]))
+            except (ValueError, IndexError):
+                continue
+        return out
+
+    def _disk_temp(self, name):
+        """Walks /sys/class/hwmon for a "nvme"/"drivetemp" device whose
+        `device` symlink resolves to the same target as the disk's own
+        `device` symlink (the common case for both NVMe controllers and
+        SATA/SCSI drivetemp), falling back to an nvme-controller name-prefix
+        match (nvme0n1 -> nvme0) for topologies where that doesn't line up.
+        Returns None (hidden field) when no match is found."""
+        try:
+            hwmons = os.listdir("/sys/class/hwmon")
+        except Exception:
+            return None
+        disk_real = None
+        try:
+            disk_real = os.path.realpath(f"/sys/block/{name}/device")
+        except Exception:
+            pass
+        ctrl_match = re.match(r"(nvme\d+)", name)
+        for h in hwmons:
+            hpath = f"/sys/class/hwmon/{h}"
+            hwname = _read_text(f"{hpath}/name")
+            if hwname not in ("nvme", "drivetemp"):
+                continue
+            matched = False
+            try:
+                if disk_real and os.path.realpath(f"{hpath}/device") == disk_real:
+                    matched = True
+            except Exception:
+                pass
+            if not matched and hwname == "nvme" and ctrl_match:
+                try:
+                    matched = ctrl_match.group(1) in os.path.realpath(hpath)
+                except Exception:
+                    pass
+            if not matched:
+                continue
+            try:
+                temp_files = sorted(f for f in os.listdir(hpath) if re.fullmatch(r"temp\d+_input", f))
+            except Exception:
+                continue
+            for fn in temp_files:
+                val = _read_int(f"{hpath}/{fn}")
+                if val is not None:
+                    return val / 1000.0
+        return None
+
+    def _read_mounts(self):
+        """[(device_basename, mountpoint), ...] for every real (/dev/*) mount
+        in /proc/mounts, read once per sample."""
+        out = []
+        try:
+            with open("/proc/mounts") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[0].startswith("/dev/"):
+                        out.append((os.path.basename(parts[0]), parts[1]))
+        except Exception:
+            pass
+        return out
+
+    def _used_pct(self, name, mounts):
+        """statvfs of the LARGEST filesystem mounted from a partition of this
+        disk (partition basenames start with the disk name, e.g. nvme0n1p1,
+        sda1). None (hidden usage bar) when nothing of this disk is mounted.
+
+        Matches `df`'s percentage, NOT a naive used/total: used blocks are
+        f_blocks - f_bfree (all free blocks, including the root-reserved
+        slice), but the denominator is used + f_bavail (bavail excludes the
+        reserved slice) -- so the reserved-for-root blocks count as "used"
+        capacity-wise without being double-counted as "available" too. A
+        plain used/total under-reports vs. df whenever a filesystem carries
+        a reserved-blocks margin (ext4's default 5%, etc)."""
+        best = None
+        for base, mp in mounts:
+            if base != name and not base.startswith(name):
+                continue
+            try:
+                st = os.statvfs(mp)
+                total = st.f_blocks * st.f_frsize
+                if not total:
+                    continue
+                if best is None or total > best[0]:
+                    used = st.f_blocks - st.f_bfree
+                    denom = used + st.f_bavail
+                    # df ceils (87.76 -> 88%); match it so ours never reads
+                    # one point lower than the df the user just ran
+                    pct = math.ceil((used / denom) * 100) if denom else 0.0
+                    best = (total, pct)
+            except Exception:
+                continue
+        return best[1] if best else None
+
+    def sample(self):
+        curr_time = time.time()
+        dt = max(curr_time - self.prev_time, 0.1)
+        stats = self._read_diskstats()
+        mounts = self._read_mounts()
+        rows = []
+        for name in self.disks:
+            try:
+                cur = stats.get(name)
+                prev = self.prev_sectors.get(name, cur)
+                if cur is not None:
+                    dread = max(cur[0] - (prev[0] if prev else cur[0]), 0)
+                    dwrite = max(cur[1] - (prev[1] if prev else cur[1]), 0)
+                    read_bps = dread * 512 / dt
+                    write_bps = dwrite * 512 / dt
+                    self.prev_sectors[name] = cur
+                else:
+                    read_bps = write_bps = 0
+                rows.append({
+                    "name": name, "model": self._model(name), "size": self._size_bytes(name),
+                    "temp": self._disk_temp(name), "read_bps": read_bps, "write_bps": write_bps,
+                    "used_pct": self._used_pct(name, mounts),
+                })
+            except Exception:
+                continue
+        self.prev_time = curr_time
+        return rows
+
+
+# =========================================================================
+# Thermal zones (collector only this phase -- Phase 3 wires the THERMALS
+# page-2 panel and the power-rails display up to it)
+# =========================================================================
+
+class ThermalCollector:
+    """Every /sys/class/thermal zone plus every named /sys/class/hwmon
+    device's temp channels, as one ordered list of {"label", "temp_c",
+    "kind"} dicts. Zones sharing a generic type (e.g. several unlabeled
+    "acpitz" zones, as on GB10) are relabeled Zone-A, Zone-B... in zone-
+    number order so they're distinguishable. An hwmon named "spbm" (GB10's
+    system power/board-management rail monitor) gets its labeled channels
+    sorted first and its power rails exposed separately via sample_power()
+    for Phase 3."""
+
+    def __init__(self):
+        self.caps = {"spbm": self._probe_spbm()}
+
+    def _probe_spbm(self):
+        try:
+            for n in os.listdir("/sys/class/hwmon"):
+                if _read_text(f"/sys/class/hwmon/{n}/name") == "spbm":
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _thermal_zones(self):
+        try:
+            names = os.listdir("/sys/class/thermal")
+        except Exception:
+            return []
+        zones = []
+        for n in names:
+            if not n.startswith("thermal_zone"):
+                continue
+            zpath = f"/sys/class/thermal/{n}"
+            ztype = _read_text(f"{zpath}/type")
+            temp_raw = _read_int(f"{zpath}/temp")
+            if ztype is None or temp_raw is None:
+                continue
+            try:
+                idx = int(re.sub(r"\D", "", n) or "0")
+            except Exception:
+                idx = 0
+            zones.append({"idx": idx, "type": ztype, "temp_c": temp_raw / 1000.0})
+        zones.sort(key=lambda z: z["idx"])
+        return zones
+
+    def _relabel_zones(self, zones):
+        counts = {}
+        for z in zones:
+            counts[z["type"]] = counts.get(z["type"], 0) + 1
+        seen = {}
+        out = []
+        for z in zones:
+            if counts[z["type"]] > 1:
+                n = seen.get(z["type"], 0)
+                seen[z["type"]] = n + 1
+                label = f"Zone-{chr(ord('A') + n)}"
+            else:
+                label = z["type"]
+            out.append({"label": label, "temp_c": z["temp_c"], "kind": "thermal"})
+        return out
+
+    def _hwmon_entries(self):
+        """(entries, spbm_entries) -- temp channels from every named hwmon
+        device except "acpitz" (already covered as thermal zones), split out
+        separately when the hwmon is "spbm" so callers can list it first."""
+        try:
+            names = sorted(os.listdir("/sys/class/hwmon"))
+        except Exception:
+            return [], []
+        entries, spbm_entries = [], []
+        for n in names:
+            hpath = f"/sys/class/hwmon/{n}"
+            hwname = _read_text(f"{hpath}/name")
+            if not hwname or hwname == "acpitz":
+                continue
+            try:
+                files = os.listdir(hpath)
+            except Exception:
+                continue
+            temp_inputs = sorted(f for f in files if re.fullmatch(r"temp\d+_input", f))
+            chans = []
+            for fn in temp_inputs:
+                idx = re.sub(r"\D", "", fn)
+                val = _read_int(f"{hpath}/{fn}")
+                if val is None:
+                    continue
+                label = _read_text(f"{hpath}/temp{idx}_label")
+                if not label:
+                    label = hwname if len(temp_inputs) == 1 else f"{hwname}{idx}"
+                chans.append({"label": label, "temp_c": val / 1000.0, "kind": "hwmon"})
+            (spbm_entries if hwname == "spbm" else entries).extend(chans)
+        return entries, spbm_entries
+
+    def sample(self):
+        zones = self._relabel_zones(self._thermal_zones())
+        hwmon_entries, spbm_entries = self._hwmon_entries()
+        # Dedupe: an hwmon channel wins over a thermal zone reporting the
+        # same name (e.g. some platforms expose both).
+        hwmon_labels = {e["label"] for e in hwmon_entries + spbm_entries}
+        zones = [z for z in zones if z["label"] not in hwmon_labels]
+        return spbm_entries + zones + hwmon_entries
+
+    def sample_power(self):
+        """[{"label": rail name, "watts": float}, ...] from the "spbm" hwmon's
+        powerN_label/powerN_input channels (microwatts), for Phase 3's
+        power-rails display. Empty list when no spbm hwmon exists."""
+        out = []
+        try:
+            names = os.listdir("/sys/class/hwmon")
+        except Exception:
+            return out
+        for n in names:
+            hpath = f"/sys/class/hwmon/{n}"
+            if _read_text(f"{hpath}/name") != "spbm":
+                continue
+            try:
+                files = os.listdir(hpath)
+            except Exception:
+                continue
+            for fn in sorted(f for f in files if re.fullmatch(r"power\d+_input", f)):
+                idx = re.sub(r"\D", "", fn)
+                val = _read_int(f"{hpath}/{fn}")
+                if val is None:
+                    continue
+                label = _read_text(f"{hpath}/power{idx}_label") or f"rail{idx}"
+                out.append({"label": label, "watts": val / 1_000_000.0})
+        return out

@@ -141,20 +141,42 @@ def fmt_mem(bytes_val):
     except Exception:
         return "N/A"
 
+def fmt_disk_size(bytes_val):
+    """Compact single-letter capacity for the STORAGE panel's model column
+    ("3.73T", "465.7G") -- unlike fmt_mem's "121.7 GiB" this drops the space
+    and the "i" since STORAGE rows are tighter on width. 2 decimal places at
+    the T scale, 1 at the G scale, matching mock_page1.rendered.txt."""
+    try:
+        b = float(bytes_val)
+    except Exception:
+        return "N/A"
+    div = 1000.0 if USE_DECIMAL_UNITS else 1024.0
+    if b >= div ** 4:
+        return f"{b / (div ** 4):.2f}T"
+    return f"{b / (div ** 3):.1f}G"
+
 def fmt_rate(value, mode="bit"):
     """Formats a throughput value for the NETWORK/STORAGE panels.
-    mode="bit": value is bits/s, rendered at link-speed scale, e.g. "142.6 Gb/s".
-    mode="byte": value is bytes/s, rendered at storage-throughput scale, e.g. "1.18 GB/s".
-    Both panels use a fixed unit (Gb/s, GB/s) rather than auto-scaling through
-    k/M/G -- that matches how the mockups show even sub-1 values in-unit
-    (e.g. "0.11 Gb/s", "0.02 GB/s") instead of dropping to Mb/s or MB/s."""
+    mode="byte": value is bytes/s, rendered at storage-throughput scale, e.g.
+    "1.18 GB/s" -- fixed-unit, no auto-scaling through k/M/G, matching how
+    the mockups show even sub-1 values in-unit ("0.02 GB/s") rather than
+    dropping to MB/s.
+    mode="bit": value is bits/s (NIC rates). Idle/low-rate links spend most
+    of their life well under 1 Gb/s, where a fixed Gb/s unit prints "0.0
+    Gb/s" forever -- so this mode has one unit step: >=100 Mbit/s renders in
+    Gb/s (2dp below 1 Gb/s so "0.94 Gb/s"/"0.11 Gb/s" keep precision, 1dp at
+    or above 1 Gb/s -- "3.2 Gb/s", "142.6 Gb/s"); below 100 Mbit/s renders as
+    integer Mb/s ("12 Mb/s", "0 Mb/s")."""
     try:
         v = float(value)
     except Exception:
         return "N/A"
     if mode == "byte":
         return f"{v / 1e9:.2f} GB/s"
-    return f"{v / 1e9:.1f} Gb/s"
+    if v >= 1e8:  # >= 100 Mbit/s
+        gbps = v / 1e9
+        return f"{gbps:.1f} Gb/s" if gbps >= 1 else f"{gbps:.2f} Gb/s"
+    return f"{int(round(v / 1e6))} Mb/s"
 
 
 # --- Bars ----------------------------------------------------------------

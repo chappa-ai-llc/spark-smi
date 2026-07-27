@@ -450,12 +450,72 @@ def _build_gpu_row(y, x0, width, tier, gpus, gpu_caps, show_sparkline):
 
 
 # =========================================================================
-# NETWORK (Phase 1: existing grouped labels, one usage bar per group)
+# NETWORK + STORAGE (one compound frame, same as CPU+MEMORY)
 # =========================================================================
 
-def _build_network_panel(y, x0, width, nics, collapse):
+def _net_storage_columns(inner):
+    """Shared column widths for the joined NETWORK/STORAGE frame's first
+    three fields (netdev/device name, hardware/model, link-speed/temp) --
+    kept identical between the two panels so their columns line up
+    vertically, matching mock_page1.rendered.txt. hw_w shrinks below the
+    mock's 29 as the terminal narrows; the trailing 40 is a rough reserve
+    for whatever each panel puts in the rest of the row."""
+    name_w = 15
+    link_w = 8
+    hw_w = max(14, min(29, inner - name_w - link_w - 40))
+    return name_w, hw_w, link_w
+
+
+def _build_network_compact_rows(p, inner, nics):
+    """mock_compact NET form: two groups per cell-row. Per spec, the
+    hardware-derived short names in the mock ("cx7 p0") are NOT required --
+    the netdev name, truncated, is used instead."""
+    cell_w = max(20, inner // 2)
+    rows, cur = [[]], 0
+    for n in nics:
+        if cur + cell_w > inner and rows[-1]:
+            rows.append([])
+            cur = 0
+        f = _Flow(cell_w - 1)
+        f.add(f"{n.get('name', '?')[:8]:<9}", 8)
+        if n.get("up"):
+            f.add(f"{n.get('speed_str', '?'):<5}", 3)
+            lb, rb = term.bar_brackets()
+            pct = max(n.get("rx_pct", 0) or 0, n.get("tx_pct", 0) or 0)
+            bar, slot = term.make_bar(pct, 10)
+            f.try_add_multi([(lb, 6), (bar, slot), (rb, 6), (f" {int(pct):>2}%", 3)])
+        else:
+            f.add("down ", 4)
+            f.try_add(f"— {n.get('down_reason', 'no carrier')}", 6)
+        segs = list(f.segs)
+        if segs:
+            segs[0] = (cur + 1, segs[0][1], segs[0][2])
+        rows[-1].extend(segs)
+        cur += cell_w
+    if len(nics) % 2 == 1 and rows[-1]:
+        # Odd group count leaves one cell empty -- fill it with a summary
+        # rather than a blank gap (mock_compact: "4 PFs · all ports up").
+        # Only count PFs belonging to a MULTI-pf group -- a lone Realtek
+        # isn't a "PF" worth mentioning here, it's just "the NIC".
+        multi_pf_total = sum(n.get("pf_count", 1) for n in nics if n.get("pf_count", 1) > 1)
+        up = sum(1 for n in nics if n.get("up"))
+        down = len(nics) - up
+        if multi_pf_total:
+            status = "all ports up" if up == len(nics) else f"{up}/{len(nics)} up"
+            summary = f"{multi_pf_total} PFs · {status}"
+        else:
+            summary = "all up" if down == 0 else f"{down} down"
+        rows[-1].append((cur + 1, summary, 6))
+    for r in rows:
+        p.add_row(r)
+    return p
+
+
+def _build_network_panel(y, x0, width, nics, collapse, tier):
     inner = width - 2
-    p = panels.Panel(y, x0, width, title=[("NETWORK", 9), (" physical ports", 3)], kind="top")
+    p = panels.Panel(y, x0, width,
+                      title=[("NETWORK", 9), (" physical ports · RDMA read from HCA counters", 3)],
+                      kind="top")
     if not nics:
         p.add_row([(1, "no network interfaces detected", 6)])
         return p
@@ -463,16 +523,150 @@ def _build_network_panel(y, x0, width, nics, collapse):
         up = sum(1 for n in nics if n.get("up"))
         p.add_row([(1, f"{len(nics)} interfaces · {up} up", 3)])
         return p
-    # Phase 1: one usage bar per group (Phase 2 adds the split RX/TX rows
-    # with PCI-ID hardware naming per the spec's NETWORK data section).
-    label_w = max(14, min(24, inner // 3))
-    bar_w = max(8, inner - label_w - 10)
-    for i, n in enumerate(nics):
-        label = n.get("label", "?")[:label_w - 1]
-        pct = n.get("usage", 0) or 0
-        segs = [(1, f"{i+1:>2} {label}".ljust(label_w), 3)]
-        segs += panels.bar_segments(1 + label_w, pct, bar_w)
-        segs.append((1 + label_w + bar_w + 2, f"{int(pct):>3}%", 3))
+    if tier == "compact":
+        return _build_network_compact_rows(p, inner, nics)
+
+    name_w, hw_w, link_w = _net_storage_columns(inner)
+    rate_w = 11
+    for n in nics:
+        f = _Flow(inner - 1)
+        f.add(f"{n.get('name', '?')[:name_w - 1]:<{name_w}}", 8)
+
+        hw_text = n.get("hw_label", "?")
+        pf = n.get("pf_count", 1)
+        pf_marker = f" ×{pf} PF" if pf > 1 else ""
+        name_part = hw_text[:max(0, hw_w - len(pf_marker))]
+        pad = max(0, hw_w - len(name_part) - len(pf_marker))
+        f.add(name_part, 3)
+        if pf_marker:
+            f.add(pf_marker, 6)
+        f.add(" " * pad, 3)
+
+        up = n.get("up")
+        if not up:
+            f.add(f"{'down':<{link_w}}", 4)
+            f.try_add(f"— {n.get('down_reason', 'no carrier')}", 6)
+            segs = list(f.segs)
+            segs[0] = (1, segs[0][1], segs[0][2])
+            p.add_row(segs)
+            continue
+        f.add(f"{n.get('speed_str', '?'):<{link_w}}", 3)
+
+        # Suffix is ONE separator space + the number right-justified to 2
+        # digits (not 3) -- a stray extra `:>3` here previously reserved a
+        # column no mock row actually uses (a "reserve the right-group
+        # twice" flavor of the STORAGE bar bug fixed below).
+        lb, rb = term.bar_brackets()
+        f.add(f"{term.fmt_rate(n.get('rx_bps', 0), 'bit'):<{rate_w}}", 2)
+        rx_bar, rx_slot = term.make_bar(n.get("rx_pct", 0) or 0, 10)
+        f.try_add_multi([(lb, 6), (rx_bar, rx_slot), (rb, 6), (f" {int(n.get('rx_pct', 0) or 0):>2}% ", 3)])
+        f.add(f"{term.fmt_rate(n.get('tx_bps', 0), 'bit'):<{rate_w}}", 2)
+        tx_bar, tx_slot = term.make_bar(n.get("tx_pct", 0) or 0, 10)
+        f.try_add_multi([(lb, 6), (tx_bar, tx_slot), (rb, 6), (f" {int(n.get('tx_pct', 0) or 0):>2}%", 3)])
+
+        segs = list(f.segs)
+        segs[0] = (1, segs[0][1], segs[0][2])
+        p.add_row(segs)
+    return p
+
+
+# =========================================================================
+# STORAGE (continues the NETWORK frame, same 'mid' pattern as MEMORY/CPU)
+# =========================================================================
+
+def _build_storage_compact_rows(p, inner, disks):
+    for d in disks:
+        f = _Flow(inner - 1)
+        f.add(f"{d.get('name', '?')[:10]:<11}", 8)
+        temp = d.get("temp")
+        f.add(f"{term.fmt_temp(temp):<5}" if temp is not None else "—    ", 3 if temp is not None else 6)
+        f.add(f"R {term.fmt_rate(d.get('read_bps', 0), 'byte')} W {term.fmt_rate(d.get('write_bps', 0), 'byte')}", 2)
+        segs = list(f.segs)
+        if segs:
+            segs[0] = (1, segs[0][1], segs[0][2])
+        right = []
+        used_pct = d.get("used_pct")
+        if used_pct is not None:
+            lb, rb = term.bar_brackets()
+            bar, slot = term.make_bar(used_pct, 10)
+            right = [(lb, 6), (bar, slot), (rb, 6), (f" {int(used_pct):>2}%", 3)]
+        p.add_row(segs, right=right)
+    return p
+
+
+def _model_size_segments(model, size_str, model_w):
+    """(prefix, size, pad) segments for the STORAGE model column: model is
+    truncated to reserve >=1 separating space before size_str AND >=1
+    trailing space before whatever column follows (temp), and the three
+    pieces always sum to exactly model_w so temp has a fixed stop regardless
+    of how long/short the model string is. A bare `model[:avail]` slice got
+    this wrong twice over: a model text longer than its budget ate the
+    separating space too (running straight into size), and even once that
+    was reserved, a size_str that exactly filled the remainder left no gap
+    before temp (size ran straight into temp)."""
+    max_model_len = max(1, model_w - len(size_str) - 2)
+    model_trunc = (model or "")[:max_model_len].rstrip() or (model or "?")[:1]
+    prefix = f"{model_trunc} "
+    remaining = max(0, model_w - len(prefix) - 1)  # -1 reserves the trailing gap
+    size_shown = size_str[:remaining]
+    pad = max(0, model_w - len(prefix) - len(size_shown))
+    return prefix, size_shown, " " * pad
+
+
+def _build_storage_panel(y, x0, width, disks, tier):
+    inner = width - 2
+    p = panels.Panel(y, x0, width,
+                      title=[("STORAGE", 9), (" block devices · rates from /proc/diskstats · temps from hwmon", 3)],
+                      kind="mid")
+    if not disks:
+        p.add_row([(1, "no block devices detected", 6)])
+        return p
+    if tier == "compact":
+        return _build_storage_compact_rows(p, inner, disks)
+
+    name_w, hw_w_cap, temp_w = _net_storage_columns(inner)
+    rw_texts = [f"R {term.fmt_rate(d.get('read_bps', 0), 'byte')} · W {term.fmt_rate(d.get('write_bps', 0), 'byte')}"
+                for d in disks]
+    rate_w = max([len(t) for t in rw_texts] + [25]) + 1  # +1 gap before the bar
+    has_bar = any(d.get("used_pct") is not None for d in disks)
+    # Worst-case (3-digit pct) suffix width, so every row's bar column lands
+    # in the same place regardless of which disk happens to be near-full.
+    bar_total = (1 + 10 + 1 + len(" 100% used")) if has_bar else 0
+    # The usage bar is functional data; the model-name column is decoration.
+    # Size model_w to whatever's left AFTER reserving room for the rate text
+    # and the bar -- capped at the NETWORK-aligned width -- rather than
+    # holding model_w fixed and letting the bar silently lose the fight for
+    # space (that was the "dropped despite available room" bug: model_w was
+    # pinned to 29 even when inner - 29 - the rest genuinely had no room for
+    # the bar, while shrinking model_w by a few columns would free exactly
+    # enough).
+    model_w = max(10, min(hw_w_cap, inner - 1 - name_w - temp_w - rate_w - bar_total))
+
+    for d, rw in zip(disks, rw_texts):
+        f = _Flow(inner - 1)
+        f.add(f"{d.get('name', '?')[:name_w - 1]:<{name_w}}", 8)
+
+        model = d.get("model") or "Unknown"
+        size_str = term.fmt_disk_size(d.get("size"))
+        prefix, size_shown, pad = _model_size_segments(model, size_str, model_w)
+        f.add(prefix, 3)
+        f.add(size_shown, 6)
+        f.add(pad, 3)
+
+        temp = d.get("temp")
+        f.add(f"{term.fmt_temp(temp):<{temp_w}}" if temp is not None else f"{'—':<{temp_w}}",
+              3 if temp is not None else 6)
+
+        f.add(f"{rw:<{rate_w}}", 2)
+
+        used_pct = d.get("used_pct")
+        if used_pct is not None:
+            lb, rb = term.bar_brackets()
+            bar, slot = term.make_bar(used_pct, 10)
+            f.try_add_multi([(lb, 6), (bar, slot), (rb, 6), (f" {int(used_pct)}% used", 3)])
+
+        segs = list(f.segs)
+        segs[0] = (1, segs[0][1], segs[0][2])
         p.add_row(segs)
     return p
 
@@ -483,9 +677,9 @@ def _build_network_panel(y, x0, width, nics, collapse):
 
 def build_page1(state, tier, width, x0=0, height=None):
     """Builds page 1: header, CPU+MEMORY compound frame, GPU card(s),
-    NETWORK, footer. `height` (available screen rows), when given, drives a
-    simple degrade order: sparklines -> memory legend row -> NIC rows
-    collapse to one summary line."""
+    NETWORK+STORAGE compound frame, footer. `height` (available screen rows),
+    when given, drives a simple degrade order: sparklines -> memory legend
+    row -> NIC rows collapse to one summary line."""
     out = []
     show_sparkline = True
     show_legend = True
@@ -495,12 +689,13 @@ def build_page1(state, tier, width, x0=0, height=None):
     mem = state.get("mem") or {}
     gpus = state.get("gpus") or []
     nics = state.get("nics") or []
+    disks = state.get("disks") or []
     gpu_caps = (state.get("caps") or {}).get("gpu") or []
 
     if height:
         n_clusters = len(cpu.get("clusters") or [])
         gpu_rows = max(1, (len(gpus) + 1) // 2) if (tier == "wide" and len(gpus) > 1) else len(gpus)
-        est = 1 + 2 + n_clusters + 1 + 2 + gpu_rows * 4 + 1 + len(nics) + 1
+        est = 1 + 2 + n_clusters + 1 + 2 + gpu_rows * 4 + 1 + len(nics) + 1 + len(disks) + 1
         if est > height:
             show_sparkline = False
             est -= n_clusters
@@ -525,9 +720,13 @@ def build_page1(state, tier, width, x0=0, height=None):
     out.extend(gpu_panels)
     y += gpu_h
 
-    net_panel = _build_network_panel(y, x0, width, nics, collapse_nics)
+    net_panel = _build_network_panel(y, x0, width, nics, collapse_nics, tier)
     out.append(net_panel)
-    y += net_panel.total_height + 1
+    y += net_panel.total_height  # no +1: STORAGE continues this same frame
+
+    storage_panel = _build_storage_panel(y, x0, width, disks, tier)
+    out.append(storage_panel)
+    y += storage_panel.total_height + 1  # +1 for the compound frame's bottom border
 
     driver, cuda = state.get("driver", "Unknown"), state.get("cuda", "Unknown")
     has_nvml = (state.get("caps") or {}).get("has_nvml", False)
