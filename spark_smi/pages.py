@@ -16,7 +16,7 @@ from . import term
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "2.0.0a1"
+    VERSION = "4.0.0a1"
 
 # --- tier helpers -----------------------------------------------------
 def tier_for_width(w):
