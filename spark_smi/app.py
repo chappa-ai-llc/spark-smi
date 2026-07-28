@@ -31,7 +31,9 @@ Usage: spark-smi [options]
   -l, --loop       live mode: curses TUI, refreshed continuously
   -n <secs>        refresh rate in seconds (default: {DEFAULT_REFRESH_RATE:g})
   -p, --page <n>   which page to render in snapshot mode: 1 overview (default),
-                   2 advanced (GPU detail, NIC/thermal/SMART panels), or
+                   2 advanced (GPU detail, PCIE LINKS -- every PCIe endpoint's
+                   negotiated link state, regardless of occupant --
+                   NIC/thermal/SMART panels), or
                    4 fabric validation (--cluster with 2+ members; renders
                    the last recorded run only -- snapshot mode never starts
                    a test)
@@ -75,6 +77,30 @@ Live-mode keys: q quit  ·  t toggle C/F  ·  u toggle GiB/GB  ·  1/2 page
 
 
 _UNSET = object()  # distinguishes "--cluster not given" from "--cluster given with no value"
+
+
+def _pcie_stuck_from_history(history, gen_max):
+    """True when the TRAILING run of consecutive (util, gen_cur) samples in
+    `history` (oldest-first) is >=3 long and every sample in that run has
+    util>=20 AND gen_cur < gen_max -- i.e. the GPU has been under load while
+    stuck below its negotiated max link generation for at least 3 straight
+    ticks. A single idle-time downtrain (util<20) breaks the run rather than
+    counting toward it, so idle downtraining alone -- normal PCIe power
+    saving -- never flags; only a SUSTAINED low-gen state while genuinely
+    busy does (the DGX Spark's known GPU power-draw-safety-mode quirk: the
+    link downtrains to gen1 x4 and STAYS there under load). `gen_max` is the
+    CURRENT sample's max link generation (a static hardware ceiling, not
+    tracked historically); one sample is never enough on its own, which is
+    also why snapshot mode's single-sample stream can never flag."""
+    if gen_max is None:
+        return False
+    run = 0
+    for util, gen_cur in reversed(list(history)):
+        if util is not None and util >= 20 and gen_cur is not None and gen_cur < gen_max:
+            run += 1
+        else:
+            break
+    return run >= 3
 
 
 def _parse_args(argv):
@@ -146,9 +172,14 @@ class State:
         self.disk = collectors.DiskCollector()
         self.thermal = collectors.ThermalCollector()
         self.smart = collectors.SmartCollector()
+        self.pcie = collectors.PcieCollector()
         self.cluster_hist = [deque(maxlen=HIST_LEN) for _ in self.cpu.clusters]
         self.gpu_hist = {}
         self.nic_hist = {}
+        # Phase 8: per-GPU (util, gen_cur) history for stuck-under-load
+        # detection -- separate from gpu_hist (util-only, for sparklines)
+        # since this needs the paired gen_cur reading at the same tick.
+        self.gpu_pcie_hist = {}
 
     def sample(self):
         try:
@@ -195,6 +226,10 @@ class State:
             nic_fw = {r["rdma_dev"]: self.net.rdma_fw_ver(r["rdma_dev"]) for r in nic_pf}
         except Exception:
             nic_fw = {}
+        try:
+            pcie_links = self.pcie.sample()
+        except Exception:
+            pcie_links = []
 
         for i, cl in enumerate(cpu.get("clusters") or []):
             if i >= len(self.cluster_hist):
@@ -203,13 +238,63 @@ class State:
             hist.append(cl.get("avg", 0.0))
             cl["history"] = list(hist)
 
-        for g in gpus:
+        # Phase 8 join: PcieCollector's sysfs rows keyed by PCI address, for
+        # GPUs whose own NVML pcie_gen_cur/max fields didn't come back (the
+        # GB10 unified SoC doesn't reliably expose those via NVML the way a
+        # discrete/eGPU does -- see collectors.GpuCollector).
+        pcie_by_addr = {p["addr"]: p for p in pcie_links if p.get("addr")}
+        unified_pci_addrs = set()
+
+        for idx, g in enumerate(gpus):
             hist = self.gpu_hist.setdefault(g.get("id"), deque(maxlen=HIST_LEN))
             try:
                 hist.append(float(g.get("util", 0)))
             except Exception:
                 hist.append(0.0)
             g["history"] = list(hist)
+
+            gpu_caps = self.gpu.caps[idx] if idx < len(self.gpu.caps) else {}
+            if not gpu_caps.get("mem_local", True):
+                # Unified SoCs excluded entirely from stuck-under-load
+                # detection: GB10's gen1 link is architectural (SoC-internal
+                # fabric, not a real PCIe wire) noise, not a safety-mode
+                # symptom, and its PCIE row is already hidden on page 2.
+                addr = g.get("pci_addr")
+                if addr:
+                    unified_pci_addrs.add(addr)
+                g["pcie_stuck"] = False
+                continue
+
+            gen_cur = g.get("pcie_gen_cur")
+            addr = g.get("pci_addr")
+            link = pcie_by_addr.get(addr)
+            if gen_cur is None and link is not None:
+                gen_cur = link.get("gen_cur")
+            # gen_max: ALWAYS prefer the slot-aware EFFECTIVE ceiling
+            # (collectors.PcieCollector's parent-bridge walk) over the GPU's
+            # own raw NVML max, which only reports what the DEVICE is
+            # capable of -- not what the physical slot allows. Verified
+            # live: an M.2/OCuLink GPU pinned at its slot's narrower max
+            # generation under load is healthy, already at the best the
+            # slot offers -- comparing against the raw device max instead
+            # would flag it "stuck" forever. Falls back to the GPU's own
+            # NVML max only when no effective value is available at all
+            # (e.g. Windows/macOS with no sysfs parent-bridge walk).
+            gen_max = link.get("gen_max_eff") if link is not None else None
+            if gen_max is None:
+                gen_max = g.get("pcie_gen_max")
+            util = g.get("util", 0) or 0
+            pcie_hist = self.gpu_pcie_hist.setdefault(g.get("id"), deque(maxlen=6))
+            pcie_hist.append((util, gen_cur))
+            g["pcie_stuck"] = _pcie_stuck_from_history(pcie_hist, gen_max)
+
+        # The unified SoC's own PCI endpoint (GB10's on-die GPU) reads as a
+        # permanently narrow link vs. its declared max width -- architectural
+        # noise per the join above, not a real degraded PCIe link, so it's
+        # dropped from the PCIE LINKS panel entirely rather than showing a
+        # bogus perpetual "idle downtrain" row.
+        if unified_pci_addrs:
+            pcie_links = [p for p in pcie_links if p.get("addr") not in unified_pci_addrs]
 
         # Keyed by primary netdev name -- groups are stable frame-to-frame
         # (grouping is topology, detected once at construction), so this
@@ -229,15 +314,15 @@ class State:
         return {
             "cpu": cpu, "mem": mem, "gpus": gpus, "nics": nics, "disks": disks,
             "thermal": thermal, "power_rails": power_rails, "smart": smart, "nic_pf": nic_pf,
-            "nic_asic_temp": nic_asic_temp, "nic_fw": nic_fw,
+            "nic_asic_temp": nic_asic_temp, "nic_fw": nic_fw, "pcie_links": pcie_links,
             "driver": driver, "cuda": cuda, "rate": self.rate,
             "caps": {"gpu": self.gpu.caps, "net": self.net.caps, "has_nvml": collectors.HAS_NVML,
-                     "thermal": self.thermal.caps, "smart": self.smart.caps},
+                     "thermal": self.thermal.caps, "smart": self.smart.caps, "pcie": self.pcie.caps},
         }
 
 
 _EMPTY_SAMPLE = {"cpu": {}, "mem": {}, "gpus": [], "nics": [], "disks": [], "thermal": [],
-                  "power_rails": [], "smart": None, "nic_pf": [], "driver": "Unknown",
+                  "power_rails": [], "smart": None, "nic_pf": [], "pcie_links": [], "driver": "Unknown",
                   "cuda": "Unknown", "rate": DEFAULT_REFRESH_RATE, "caps": {}}
 
 

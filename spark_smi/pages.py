@@ -617,6 +617,15 @@ def _build_gpu_card(y, x0, w, gpu, caps, show_sparkline):
         if fan not in ("N/A", "None"):
             clk_bits.append(f"FAN {fan}")
     p.add_row([(2, "CLK", 3), (9, " · ".join(clk_bits), 2)])
+
+    # Phase 8: only appears once app.py's stuck-under-load detection has
+    # actually fired (3+ consecutive loaded samples below max link gen) --
+    # a normal idle downtrain never adds this row at all, matching the
+    # spec's "amber/red row -- only then" rule.
+    if gpu.get("pcie_stuck"):
+        w_c = gpu.get("pcie_width_cur")
+        txt = f"⚠ PCIe gen1×{w_c} under load" if w_c else "⚠ PCIe gen1 under load"
+        p.add_row([(2, txt, 4)])
     return p
 
 
@@ -1014,23 +1023,42 @@ def _row_clocks(inner, gpu, caps, reserve=0, focus_id=None, pending=None, sm_kno
 
 
 def _row_pcie(inner, gpu):
+    """Phase 8: `pcie_stuck` (set by app.py's State.sample() from a rolling
+    per-GPU (util, gen_cur) history -- see _pcie_stuck_from_history) means
+    this GPU has been observed downtrained BELOW its max link generation for
+    3+ consecutive samples while under load (util>=20%) -- the DGX Spark's
+    known power-draw-safety-mode quirk (gen1 x4 and stuck there). That's
+    loud: the gen/width value itself turns red and the throughput/replay
+    fields are replaced by the warning text outright, since a GPU stuck at
+    gen1 under load isn't moving meaningful PCIe traffic anyway. A merely
+    IDLE downtrain (degraded vs. max, but util<20, not stuck) is normal and
+    gets only a small dim annotation."""
     gen_c, w_c = gpu.get("pcie_gen_cur"), gpu.get("pcie_width_cur")
     if gen_c is None or w_c is None:
         return None
+    stuck = bool(gpu.get("pcie_stuck"))
+    gen_m, w_m = gpu.get("pcie_gen_max"), gpu.get("pcie_width_max")
+    degraded = (gen_m is not None and gen_c < gen_m) or (w_m is not None and w_c < w_m)
+    idle_downtrain = degraded and not stuck and (gpu.get("util", 0) or 0) < 20
+
     f = _Flow(inner - 1)
     f.add(f"{'PCIE':<11}", 3)
-    f.add(f"gen {gen_c} ×{w_c}", 8)
-    gen_m, w_m = gpu.get("pcie_gen_max"), gpu.get("pcie_width_max")
+    f.add(f"gen {gen_c} ×{w_c}", 4 if stuck else 8)
     if gen_m is not None and w_m is not None:
         f.try_add_multi([(" ", 3), (f"(max gen {gen_m} ×{w_m})", 6)])
-    rx, tx = _fmt_kbs(gpu.get("pcie_rx_kbs")), _fmt_kbs(gpu.get("pcie_tx_kbs"))
-    if rx is not None:
-        f.try_add_multi([("  ·  ", 6), (f"rx {rx}", 2)])
-    if tx is not None:
-        f.try_add_multi([("  ·  ", 6), (f"tx {tx}", 2)])
-    replay = gpu.get("pcie_replay")
-    if replay is not None:
-        f.try_add_multi([("  ·  ", 6), (f"replays {replay}", 3)])
+    if stuck:
+        f.try_add_multi([("  ", 3), ("⚠ gen1 under load — power safety mode?", 4)])
+    else:
+        rx, tx = _fmt_kbs(gpu.get("pcie_rx_kbs")), _fmt_kbs(gpu.get("pcie_tx_kbs"))
+        if rx is not None:
+            f.try_add_multi([("  ·  ", 6), (f"rx {rx}", 2)])
+        if tx is not None:
+            f.try_add_multi([("  ·  ", 6), (f"tx {tx}", 2)])
+        replay = gpu.get("pcie_replay")
+        if replay is not None:
+            f.try_add_multi([("  ·  ", 6), (f"replays {replay}", 3)])
+        if idle_downtrain:
+            f.try_add_multi([("  ", 3), ("(idle downtrain)", 6)])
     return f
 
 
@@ -1311,6 +1339,81 @@ def _build_nic_panel(y, x0, width, nics_pf, title_extra, asic_temp):
     return p
 
 
+# --- PCIE LINKS panel (Phase 8) ------------------------------------------
+# Every PCIe endpoint regardless of occupant -- the DGX Spark's shared M.2
+# slot can carry an NVMe drive or an eGPU depending on what's plugged in,
+# and the known GPU power-safety-mode quirk (downtrain to gen1 x4 and STAY
+# there under load) is a link-state symptom this panel exists to surface
+# loudly, while a routine idle downtrain (any device, any slot) stays quiet.
+
+def _pcie_status_cell(row, gpu_by_addr):
+    """(text, slot) for one PCIE LINKS row's status column. `gpu_by_addr` is
+    state["gpus"] keyed by pci_addr (see app.py's GPU<->slot join) -- only
+    consulted for rows whose class is "gpu", since only a GPU sample carries
+    the util/pcie_stuck context needed to tell "idle downtrain" (normal)
+    apart from a real problem."""
+    if not row.get("degraded"):
+        return "ok", 1
+    gpu = gpu_by_addr.get(row.get("addr")) if row.get("class_label") == "gpu" else None
+    if gpu is not None:
+        if gpu.get("pcie_stuck"):
+            return "⚠ gen1 under load — power safety mode?", 4
+        if (gpu.get("util", 0) or 0) < 20:
+            return "idle downtrain", 6
+    return "⚠ degraded", 5
+
+
+def _build_pcie_links_panel(y, x0, width, pcie_links, gpus):
+    """One row per PCIe endpoint (storage/NVMe, network, display/3D),
+    collectors.PcieCollector's sort order already applied (degraded first,
+    then gpu > nvme/storage > network, then address). Caller (build_page2)
+    only invokes this when `pcie_links` is non-empty -- the panel is absent
+    entirely on a platform with no /sys/bus/pci/devices tree (Windows/macOS
+    dev boxes), matching the rest of this module's "no sensor, no row" rule
+    at the whole-panel level."""
+    inner = width - 2
+    p = panels.Panel(y, x0, width,
+                      title=[("PCIE LINKS", 9),
+                             (" negotiated link state · every endpoint, regardless of occupant", 3)],
+                      kind="top")
+    if not pcie_links:
+        p.add_row([(1, "no PCIe topology detected", 6)])
+        return p
+
+    gpu_by_addr = {g.get("pci_addr"): g for g in (gpus or []) if g.get("pci_addr")}
+    for row in pcie_links:
+        status_text, status_slot = _pcie_status_cell(row, gpu_by_addr)
+        right = [(status_text, status_slot)]
+        f = _Flow(inner - 1 - _right_reserve(right))
+        name = row.get("name") or "?"
+        f.add(f"{name[:21]:<22}", 8)
+        f.try_add(f"{row.get('addr', '?'):<13}", 6)
+        gen_c, w_c = row.get("gen_cur"), row.get("width_cur")
+        cur_txt = f"gen {gen_c} ×{w_c}" if gen_c is not None and w_c is not None else "gen ? ×?"
+        f.try_add(f"{cur_txt:<11}", 8)
+        # "of gen X xY" compares against the SLOT-EFFECTIVE max
+        # (gen_max_eff/width_max_eff -- min(device, parent bridge), see
+        # collectors.PcieCollector.sample()), not the device's own raw
+        # capability -- an M.2/OCuLink GPU already at its slot's ceiling
+        # must read "of gen 4 x4", not "of gen 4 x16". When the device COULD
+        # do more than the slot allows, a dim "(dev ...)" suffix says so --
+        # informative (the slot is the limiter), not an alarm.
+        gen_eff, w_eff = row.get("gen_max_eff"), row.get("width_max_eff")
+        gen_dev, w_dev = row.get("gen_max"), row.get("width_max")
+        if gen_eff is not None and w_eff is not None:
+            dev_bits = []
+            if gen_dev is not None and gen_dev > gen_eff:
+                dev_bits.append(f"gen{gen_dev}")
+            if w_dev is not None and w_dev > w_eff:
+                dev_bits.append(f"×{w_dev}")
+            max_txt = f"of gen {gen_eff} ×{w_eff}"
+            if dev_bits:
+                max_txt += f" (dev {' '.join(dev_bits)})"
+            f.try_add(max_txt, 6)
+        p.add_row(_finish_row(f, 1), right=right)
+    return p
+
+
 # --- THERMALS / POWER RAILS / NVME SMART ---------------------------------
 
 def _build_thermals_panel(y, x0, width, entries, kind="top", paired=False, show_bars=True, has_spbm=False):
@@ -1516,6 +1619,7 @@ def build_page2(state, tier, width, x0=0, height=None, knob_ui=None, theme_toast
     driver, cuda = state.get("driver", "Unknown"), state.get("cuda", "Unknown")
     nic_asic_temp = state.get("nic_asic_temp")
     nic_fw = state.get("nic_fw") or {}
+    pcie_links = state.get("pcie_links") or []
 
     has_spbm = bool(thermal_caps.get("spbm"))
     paired = tier == "wide" and width >= 90
@@ -1565,6 +1669,18 @@ def build_page2(state, tier, width, x0=0, height=None, knob_ui=None, theme_toast
         y += nic_panel.total_height + 1
     except Exception:
         pass
+
+    # Phase 8: absent entirely (not even an empty-state row) when the
+    # collector found nothing -- e.g. Windows/macOS dev boxes with no
+    # /sys/bus/pci/devices tree at all, matching the POWER RAILS panel's
+    # "only build it when there's something to show" gating just below.
+    if pcie_links:
+        try:
+            pcie_panel = _build_pcie_links_panel(y, x0, width, pcie_links, gpus)
+            out.append(pcie_panel)
+            y += pcie_panel.total_height + 1
+        except Exception:
+            pass
 
     show_rails = has_spbm and bool(power_rails)
 
@@ -1744,9 +1860,13 @@ def _cluster_metrics(sample):
 def _cluster_alerts(view, m):
     """[(node_name, reason_text, "red"|"amber"), ...] for one node, per the
     spec's rules: unreachable is the only "red" case, everything else
-    (temp>=80, cnp rate>50/s, a port link down, a disk>=85% used) is
-    "amber" -- matches mock_cluster_fleet's ALERTS row (sparky-03 cnp+temp,
-    sparky-04 link down, both amber; sparky-07 unreachable, red)."""
+    (temp>=80, cnp rate>50/s, a port link down, a disk>=85% used, a GPU
+    stuck at gen1 under load) is "amber" -- matches mock_cluster_fleet's
+    ALERTS row (sparky-03 cnp+temp, sparky-04 link down, both amber;
+    sparky-07 unreachable, red). The pcie_stuck flag itself is computed
+    node-side by app.py's State.sample() and travels here unchanged over
+    the wire format (cluster.to_wire/from_wire pass gpu dict fields through
+    verbatim) -- this function only has to read it."""
     name = view.get("name") or "?"
     if view.get("stale") or not view.get("sample"):
         return [(name, "unreachable", "red")]
@@ -1755,6 +1875,9 @@ def _cluster_alerts(view, m):
     out = []
     if m.get("max_temp") is not None and m["max_temp"] >= 80:
         out.append((name, f"{m['max_temp']:.0f}°C", "amber"))
+    for g in m.get("gpus") or []:
+        if g.get("pcie_stuck"):
+            out.append((name, "pcie stuck gen1 under load", "amber"))
     for p in m.get("nic_pf") or []:
         if (p.get("cnp_sent") or 0) > 50:
             out.append((name, f"cnp storm {p.get('port', '?')}", "amber"))
@@ -1770,6 +1893,8 @@ def _cluster_alerts(view, m):
 def _short_health_code(reason):
     if reason == "unreachable":
         return "down"
+    if reason.startswith("pcie stuck"):
+        return "pcie⚠"
     if reason.startswith("cnp storm"):
         return "cnp"
     if reason.endswith("link down"):

@@ -53,10 +53,35 @@ system's state" page.
 
 **Page 2 — Advanced** (`2`): per-GPU detail (clocks, PCIe generation/width/
 throughput, power vs. limit, thermal trip points, throttle reasons,
-persistence/compute-mode/ECC state, running processes), per-PF NIC detail
-(RDMA counters, CNP/ECN marks, discards, ASIC temperature), every thermal
-zone and named hwmon device, and NVMe SMART health. This is also where the
-interactive power/clock knobs live (see below).
+persistence/compute-mode/ECC state, running processes), a **PCIE LINKS**
+panel covering every PCIe endpoint in the system — storage/NVMe, network,
+GPU — regardless of what's actually plugged into a given slot (see "PCIe
+link monitoring" below), per-PF NIC detail (RDMA counters, CNP/ECN marks,
+discards, ASIC temperature), every thermal zone and named hwmon device, and
+NVMe SMART health. This is also where the interactive power/clock knobs
+live (see below).
+
+### PCIe link monitoring
+
+Any PCIe slot can carry more than one kind of device over its lifetime — on
+the reference DGX Spark this project runs on, the M.2 slot currently holds an
+external RTX 3090 instead of the boot NVMe (which moved to a USB enclosure).
+SPARK-SMI doesn't care which occupant is in a slot: page 2's PCIE LINKS panel
+walks every endpoint under `/sys/bus/pci/devices` (storage, network, GPU) and
+reports its negotiated link generation/width against its own declared
+maximum, whatever the device happens to be.
+
+This matters because of a known failure mode: a GPU can enter a power-draw
+safety mode where its link downtrains to gen1 ×4 **and stays there under
+load**. A plain idle downtrain (any PCIe device dropping link speed to save
+power while idle) is completely normal and shown only as a dim
+`idle downtrain` note. SPARK-SMI only raises the loud
+`⚠ gen1 under load — power safety mode?` alert (red, on both the PCIE LINKS
+row and that GPU's page-2 detail panel, plus a page-1 GPU-card warning row)
+once the low-generation state has persisted for 3+ consecutive samples
+*while the GPU is genuinely busy* (util ≥20%) — so a routine idle dip never
+false-positives, but a GPU wedged at gen1 mid-workload gets flagged loudly
+and stays flagged until it recovers.
 
 ---
 
@@ -463,7 +488,7 @@ BIOS. This is a property of Secure Boot, not something SPARK-SMI or
 |:---|:---|
 | System | NVIDIA DGX Spark |
 | SoC | GB10 Grace Blackwell (sm_121) |
-| External GPU | RTX 3090 via M.2 OcuLink (sm_86) — mixed architecture, single dashboard |
+| External GPU | RTX 3090 (sm_86) — mixed architecture, single dashboard. Attached via the M.2 slot; the same slot can just as easily carry OCuLink or USB4 instead — however it's attached, the PCIe LINKS panel shows the negotiated truth |
 | NICs | MT2910 × 4 (200G, 100G & 40G DAC), Realtek × 1 (10G, 5G, 2.5G, 1G) |
 | OS | Linux 6.17.0-nvidia |
 | Driver | 580.126.09 |

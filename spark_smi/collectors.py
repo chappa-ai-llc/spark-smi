@@ -421,6 +421,24 @@ def _fmt_kbs(v):
         return f"{v / 1e3:.1f} MB/s"
     return f"{v:.0f} KB/s"
 
+def _normalize_pci_addr(bus_id):
+    """NVML/nvidia-smi PCI bus ids read like "00000004:01:00.0" (8-hex-digit
+    domain) -- sysfs's /sys/bus/pci/devices addresses (PcieCollector's join
+    key) use a 4-hex-digit domain, lowercase: "0004:01:00.0". Verified on
+    sparky-1: nvidia-smi's pci.bus_id for the RTX 3090 reads
+    "00000004:01:00.0" while sysfs lists the SAME device as "0004:01:00.0"
+    -- only the domain's zero-padding differs. None for anything that
+    doesn't look like a bus id at all."""
+    if not bus_id:
+        return None
+    s = str(bus_id).strip().lower()
+    parts = s.split(":")
+    if len(parts) != 3:
+        return None
+    if len(parts[0]) > 4:
+        parts[0] = parts[0][-4:]
+    return ":".join(parts)
+
 def get_driver_info_safe():
     global _CACHED_DRIVER_INFO
     if _CACHED_DRIVER_INFO is not None:
@@ -631,6 +649,17 @@ def _collect_gpus():
                     except Exception:
                         pass
                     try:
+                        # Join key for collectors.PcieCollector's sysfs-derived
+                        # rows (Phase 8) -- see _normalize_pci_addr for the
+                        # domain zero-padding difference between NVML and sysfs.
+                        pci_info = pynvml.nvmlDeviceGetPciInfo(handle)
+                        bus_id = pci_info.busId
+                        if isinstance(bus_id, bytes):
+                            bus_id = bus_id.decode()
+                        gpu["pci_addr"] = _normalize_pci_addr(bus_id)
+                    except Exception:
+                        pass
+                    try:
                         gpu["pcie_tx_kbs"] = pynvml.nvmlDeviceGetPcieThroughput(handle, pynvml.NVML_PCIE_UTIL_TX_BYTES)
                         gpu["pcie_rx_kbs"] = pynvml.nvmlDeviceGetPcieThroughput(handle, pynvml.NVML_PCIE_UTIL_RX_BYTES)
                     except Exception:
@@ -709,12 +738,14 @@ def _collect_gpus():
                     gpu["ecc"] = static["ecc"].lower()
 
             if (not nvml_success or gpu["pwr_str"] == "N/A" or gpu["fan"] in ["N/A", "0%"]
-                    or gpu["clk_sm"] in ["N/A", None]):
+                    or gpu["clk_sm"] in ["N/A", None] or gpu.get("pci_addr") is None):
                 try:
                     # clocks.sm appended last: verified on GB10 that NVML's
                     # own clock query can fail while this CLI field works.
+                    # pci.bus_id last of all -- CLI fallback for PcieCollector's
+                    # (Phase 8) join key when NVML's own PCI info call failed.
                     query = ("name,temperature.gpu,utilization.gpu,memory.used,memory.total,power.draw,"
-                             "fan.speed,clocks.sm,clocks.max.sm")
+                             "fan.speed,clocks.sm,clocks.max.sm,pci.bus_id")
                     cmd = ["nvidia-smi", f"--id={gid}", f"--query-gpu={query}", "--format=csv,noheader,nounits"]
                     res = subprocess.run(cmd, capture_output=True, text=True, timeout=1)
                     if res.returncode == 0:
@@ -739,6 +770,8 @@ def _collect_gpus():
                             gpu["clk_sm"] = int(float(r[7]))
                         if gpu.get("clk_sm_max") is None and len(r) > 8 and "N/A" not in r[8] and "[Not" not in r[8]:
                             gpu["clk_sm_max"] = int(float(r[8]))
+                        if gpu.get("pci_addr") is None and len(r) > 9 and r[9] and "N/A" not in r[9]:
+                            gpu["pci_addr"] = _normalize_pci_addr(r[9])
                 except Exception:
                     pass
 
@@ -865,9 +898,16 @@ def _pci_ids_lookup(vendor_hex, device_hex):
 def _pci_vendor_device(iface):
     """(vendor_hex, device_hex) lowercase, no "0x", for one netdev's backing
     PCI device -- or (None, None) on any non-PCI/virtual device."""
+    return _pci_vendor_device_at(f"/sys/class/net/{iface}/device")
+
+def _pci_vendor_device_at(dpath):
+    """Same as _pci_vendor_device(), but for an arbitrary sysfs PCI device
+    directory rather than a netdev's `device` symlink -- shared by NIC
+    naming above and PcieCollector's endpoint naming below, so both use one
+    vendor/device-hex reader."""
     try:
-        v = _read_text_stripped_hex(f"/sys/class/net/{iface}/device/vendor")
-        d = _read_text_stripped_hex(f"/sys/class/net/{iface}/device/device")
+        v = _read_text_stripped_hex(f"{dpath}/vendor")
+        d = _read_text_stripped_hex(f"{dpath}/device")
         if v and d:
             return v, d
     except Exception:
@@ -1316,6 +1356,250 @@ class NetCollector:
                 if val is not None:
                     return val / 1000.0
         return None
+
+
+# =========================================================================
+# PCIe link topology (Phase 8) -- ALL endpoint devices regardless of
+# occupant, not just GPUs/NICs individually. Motivating quirk: the DGX
+# Spark's shared M.2 slot can carry an NVMe drive OR an eGPU depending on
+# what's physically plugged in (verified live: an RTX 3090 sits there today,
+# boot NVMe moved to USB) -- PCIe link health has to be watched for whatever
+# occupies it, and for every other endpoint too, since the known failure
+# mode (a GPU entering a power-draw safety mode and downtraining to gen1 x4
+# UNDER LOAD, and staying there) is a link-layer symptom collectors.py has
+# no other way to see. Idle downtraining (ANY PCIe device dropping link
+# speed at idle to save power, incl. ASPM) is normal and is NOT flagged
+# here -- that judgment call needs load context this collector doesn't have
+# (see app.py's _pcie_stuck_from_history for where it happens).
+# =========================================================================
+
+# PCIe spec's fixed GT/s-per-generation table -- sysfs's current_link_speed/
+# max_link_speed strings read like "2.5 GT/s PCIe" (verified on sparky-1).
+_PCIE_GEN_BY_SPEED = {2.5: 1, 5.0: 2, 8.0: 3, 16.0: 4, 32.0: 5, 64.0: 6}
+
+# PCIE LINKS panel row order (spec): degraded rows first (handled by the
+# caller sorting on "degraded" separately), then within each degraded/ok
+# group, GPUs before storage before network.
+_PCI_CLASS_SORT = {"gpu": 0, "nvme": 1, "storage": 1, "network": 2}
+
+_PCI_ADDR_RE = re.compile(r"[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]")
+
+# pci.ids convention: a device's marketing name is often given in brackets
+# after its internal chip codename ("GA102 [GeForce RTX 3090]",
+# "MT2910 Family [ConnectX-7 ...]") -- that's the name people recognize.
+_PCI_BRACKET_RE = re.compile(r"\[([^\[\]]+)\]")
+
+# Corporate-entity noise that pci.ids' own vendor strings carry (its device
+# strings never do) -- stripped wherever it appears, not just at the end,
+# since "NVIDIA Corporation GA102 ..." has it mid-string once vendor+device
+# are joined.
+_PCI_CORP_SUFFIXES = (" Corporation", " Corp.", " Technologies", " Technology",
+                       " Semiconductor Co., Ltd.", " Co., Ltd.", " Inc.", " Ltd.")
+
+
+def _strip_corp_suffix(name):
+    if not name:
+        return name
+    for suf in _PCI_CORP_SUFFIXES:
+        name = name.replace(suf, "")
+    return name.strip()
+
+
+def _pcie_gen_from_speed_text(text):
+    """"2.5 GT/s PCIe" -> 1, "16.0 GT/s PCIe" -> 4, etc. None (hidden field)
+    for anything that doesn't parse, e.g. "Unknown speed" on a still-
+    training link -- never fabricate a generation number."""
+    if not text:
+        return None
+    m = re.match(r"([\d.]+)\s*GT/s", text)
+    if not m:
+        return None
+    try:
+        speed = float(m.group(1))
+    except ValueError:
+        return None
+    # Nearest known speed within a small tolerance -- protects against a
+    # driver reporting the same speed with different rounding/precision.
+    best = min(_PCIE_GEN_BY_SPEED, key=lambda k: abs(k - speed))
+    return _PCIE_GEN_BY_SPEED[best] if abs(best - speed) < 0.5 else None
+
+
+def _pcie_width_from_text(text):
+    try:
+        w = int(str(text).strip())
+        return w if w > 0 else None
+    except Exception:
+        return None
+
+
+def _pci_class_label(class_hex):
+    """sysfs's "class" file is a 0x-prefixed 6-hex-digit value: base class +
+    subclass + prog-if. Returns "nvme"/"storage"/"network"/"gpu" for the
+    endpoint classes this panel cares about (spec: storage incl. NVMe
+    0x0108, network 0x02xxxx, display/3D 0x0300xx/0x0302xx), or None to
+    exclude everything else (bridges, USB controllers, ...) -- PCIe link
+    training on those isn't the failure mode this collector exists to
+    catch."""
+    try:
+        v = int(class_hex, 16)
+    except Exception:
+        return None
+    base, sub = (v >> 16) & 0xFF, (v >> 8) & 0xFF
+    if base == 0x01:
+        return "nvme" if sub == 0x08 else "storage"
+    if base == 0x02:
+        return "network"
+    if base == 0x03 and sub in (0x00, 0x02):
+        return "gpu"
+    return None
+
+
+def _pci_driver_name(addr):
+    try:
+        return os.path.basename(os.readlink(f"/sys/bus/pci/devices/{addr}/driver"))
+    except Exception:
+        return None
+
+
+def _pcie_device_name(addr, vendor_hex, device_hex, class_label):
+    """Reuses the same PCI-ID naming chain built for NIC labels (built-in
+    vendor table -> pci.ids -> driver name) -- an endpoint being a GPU or an
+    NVMe drive rather than a NIC doesn't need a second lookup table. Verified
+    live on sparky-1: an unlisted device (the RTX 3090 isn't in
+    PCI_DEVICE_NAMES) fell through to the raw pci.ids string "NVIDIA
+    Corporation GA102 [GeForce RTX 3090]" -- the bracket-extraction below
+    pulls out the recognizable marketing name instead of rendering the
+    corporate-entity vendor string (and truncating it into "NVIDIA
+    Corporatio" at the panel's name-column width)."""
+    if vendor_hex:
+        vendor_name = PCI_VENDOR_NAMES.get(vendor_hex)
+        device_name = PCI_DEVICE_NAMES.get((vendor_hex, device_hex)) if vendor_name else None
+        if device_name:
+            return f"{_strip_corp_suffix(vendor_name)} {device_name}"
+        looked_up = _pci_ids_lookup(vendor_hex, device_hex)
+        if looked_up:
+            m = _PCI_BRACKET_RE.search(looked_up)
+            if m:
+                return m.group(1).strip()
+            return _strip_corp_suffix(looked_up)
+        if vendor_name:
+            return f"{_strip_corp_suffix(vendor_name)} 0x{device_hex}"
+    return _pci_driver_name(addr) or class_label or addr
+
+
+def _pci_parent_dir(dpath):
+    """Sysfs directory of the upstream bridge/root port this PCI device's
+    link is trained against -- i.e. the physical SLOT, not the device
+    itself. /sys/bus/pci/devices/<addr> is a symlink into the real device
+    tree (/sys/devices/pciXXXX:XX/.../<parent-addr>/<addr>); the directory
+    one level up from the realpath is that parent device. This is what
+    actually caps a slot-attached device's negotiable width/speed --
+    verified live: an M.2/OCuLink RTX 3090 (device max gen4 x16) sits behind
+    a parent bridge that only wires up x4, so gen4 x4 under load is the
+    slot's OWN maximum, not a degraded state (see
+    PcieCollector.sample()'s gen_max_eff/width_max_eff, which is why this
+    walk exists at all). None when the parent directory's name isn't itself
+    a PCI address (walked past the top of the PCI hierarchy, e.g. to a host
+    bridge) or the realpath lookup fails outright -- real symlinks, Linux
+    only, guarded like every other sysfs read here."""
+    try:
+        real = os.path.realpath(dpath)
+        parent = os.path.dirname(real)
+        if _PCI_ADDR_RE.fullmatch(os.path.basename(parent)):
+            return parent
+    except Exception:
+        pass
+    return None
+
+
+class PcieCollector:
+    """Every PCIe endpoint (storage/NVMe, network, display/3D) under
+    /sys/bus/pci/devices, discovered ONCE at construction (device identity
+    -- addr/name/class/parent_dir -- doesn't change mid-session; hot-
+    swapping a different card into a slot isn't a case this tool needs to
+    handle live). Link STATE (current vs. max gen/width) is read fresh
+    every sample(), since that's the whole point: the M.2 slot's occupant
+    (NVMe or eGPU) negotiates its own link, and the known GPU power-
+    safety-mode quirk shows up ONLY as a live link-state change, never at
+    startup. Empty list (caps["pcie"] False) on any non-Linux platform or a
+    kernel without this sysfs tree -- every read is individually guarded.
+
+    "degraded" compares the CURRENT link against the EFFECTIVE max --
+    min(the device's own declared max, its parent bridge/root port's max)
+    -- NOT the device's raw max alone. Verified live: an M.2/OCuLink RTX
+    3090 (device max gen4 x16) sits behind a parent that only wires up x4;
+    comparing against the device's raw x16 would read "degraded" forever
+    even while the GPU sits at the best its slot can physically offer,
+    which is exactly the noise that trains people to ignore real alerts."""
+
+    def __init__(self):
+        self.devices = self._detect_devices()
+        self.caps = {"pcie": bool(self.devices)}
+
+    def _detect_devices(self):
+        root = "/sys/bus/pci/devices"
+        try:
+            addrs = sorted(os.listdir(root))
+        except Exception:
+            return []
+        out = []
+        for addr in addrs:
+            dpath = f"{root}/{addr}"
+            label = _pci_class_label(_read_text(f"{dpath}/class"))
+            if label is None:
+                continue
+            try:
+                vendor_hex, device_hex = _pci_vendor_device_at(dpath)
+            except Exception:
+                vendor_hex = device_hex = None
+            name = _pcie_device_name(addr, vendor_hex, device_hex, label)
+            parent_dir = _pci_parent_dir(dpath)
+            out.append({"addr": addr, "class_label": label, "name": name, "parent_dir": parent_dir})
+        return out
+
+    def sample(self):
+        rows = []
+        for d in self.devices:
+            dpath = f"/sys/bus/pci/devices/{d['addr']}"
+            gen_cur = _pcie_gen_from_speed_text(_read_text(f"{dpath}/current_link_speed"))
+            width_cur = _pcie_width_from_text(_read_text(f"{dpath}/current_link_width"))
+            gen_max = _pcie_gen_from_speed_text(_read_text(f"{dpath}/max_link_speed"))
+            width_max = _pcie_width_from_text(_read_text(f"{dpath}/max_link_width"))
+
+            gen_max_parent = width_max_parent = None
+            parent_dir = d.get("parent_dir")
+            if parent_dir:
+                gen_max_parent = _pcie_gen_from_speed_text(_read_text(f"{parent_dir}/max_link_speed"))
+                width_max_parent = _pcie_width_from_text(_read_text(f"{parent_dir}/max_link_width"))
+            # Effective ceiling = min(device, parent) -- falls back to the
+            # device's own max whenever the parent side couldn't be read
+            # (no discoverable parent, or its files are absent/unreadable),
+            # so a missing parent lookup degrades to the PRE-fix behavior
+            # rather than losing the max entirely.
+            gen_max_eff = (min(gen_max, gen_max_parent) if (gen_max is not None and gen_max_parent is not None)
+                           else gen_max)
+            width_max_eff = (min(width_max, width_max_parent) if (width_max is not None and width_max_parent is not None)
+                              else width_max)
+
+            degraded = bool((gen_cur is not None and gen_max_eff is not None and gen_cur < gen_max_eff)
+                             or (width_cur is not None and width_max_eff is not None and width_cur < width_max_eff))
+            rows.append({
+                "addr": d["addr"], "class_label": d["class_label"], "name": d["name"],
+                "gen_cur": gen_cur, "width_cur": width_cur,
+                # gen_max/width_max: the DEVICE's own raw capability (kept
+                # for the "(dev x16)" informational suffix). gen_max_eff/
+                # width_max_eff: the SLOT-effective ceiling -- this is what
+                # "degraded" and app.py's stuck-under-load rule compare
+                # against.
+                "gen_max": gen_max, "width_max": width_max,
+                "gen_max_eff": gen_max_eff, "width_max_eff": width_max_eff,
+                "degraded": degraded,
+            })
+        # Degraded first (the whole point of the panel is surfacing these),
+        # then GPU > nvme/storage > network, then address (spec's sort rule).
+        rows.sort(key=lambda r: (0 if r["degraded"] else 1,
+                                  _PCI_CLASS_SORT.get(r["class_label"], 3), r["addr"]))
+        return rows
 
 
 # =========================================================================
