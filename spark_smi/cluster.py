@@ -455,6 +455,11 @@ class ClusterAggregator:
             name = m.name
             if sample and sample.get("node"):
                 name = str(sample["node"]).split(".")[0]
+            elif any(c.isalpha() for c in name):
+                # No payload node name (the local member's sample isn't wire-
+                # wrapped): still shorten an FQDN entry -- but never split a
+                # bare IP address on its dots
+                name = name.split(".")[0]
             out.append({"name": name, "sample": sample, "last_ok_ts": last_ok, "error": err,
                         "stale": stale, "is_local": m.is_local, "last_seen_summary": last_seen})
         return out

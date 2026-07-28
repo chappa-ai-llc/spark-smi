@@ -2027,11 +2027,16 @@ def _build_cluster_mem_section(y, x0, width, views, metrics, selected_idx, name_
 
 def _build_cluster_gpu_section(y, x0, width, views, metrics, selected_idx, name_w, kind):
     inner = width - 2
-    first_gpu = next((g for m in metrics if m for g in (m.get("gpus") or [])), None)
-    total_gpus = sum(len((m or {}).get("gpus") or []) for m in metrics)
-    gname = first_gpu.get("name", "GPU") if first_gpu else "GPU"
-    unified = bool(re.match(r"^GB\d+", gname or ""))
-    subtitle = f"{total_gpus}× {gname}" + (" (unified)" if unified else "") if total_gpus else "no data"
+    # Mixed fleets (eGPU on one node) need per-model counts, not
+    # "3× <first GPU's name>". Strip marketing prefixes for brevity.
+    counts = {}
+    for m in metrics:
+        for g in (m or {}).get("gpus") or []:
+            short = re.sub(r"^NVIDIA\s+(GeForce\s+)?", "", g.get("name", "GPU")) or "GPU"
+            counts[short] = counts.get(short, 0) + 1
+    total_gpus = sum(counts.values())
+    subtitle = (" · ".join(f"{n}× {name}" for name, n in counts.items())
+                if counts else "no data")
     p = panels.Panel(y, x0, width, title=[("GPU", 9), (f" {subtitle}", 3)], kind=kind)
     for i, (view, m) in enumerate(zip(views, metrics)):
         gpus = (m or {}).get("gpus") or []
