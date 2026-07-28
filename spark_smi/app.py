@@ -11,6 +11,7 @@ from collections import deque
 
 from . import cluster
 from . import collectors
+from . import fabtest
 from . import knobs
 from . import pages
 from . import panels
@@ -29,8 +30,11 @@ Usage: spark-smi [options]
 
   -l, --loop       live mode: curses TUI, refreshed continuously
   -n <secs>        refresh rate in seconds (default: {DEFAULT_REFRESH_RATE:g})
-  -p, --page <n>   which page to render in snapshot mode: 1 overview (default)
-                   or 2 advanced (GPU detail, NIC/thermal/SMART panels)
+  -p, --page <n>   which page to render in snapshot mode: 1 overview (default),
+                   2 advanced (GPU detail, NIC/thermal/SMART panels), or
+                   4 fabric validation (--cluster with 2+ members; renders
+                   the last recorded run only -- snapshot mode never starts
+                   a test)
   --theme <name>   color theme (default: spark; or $SPARK_SMI_THEME)
   --theme list     print the available theme names, one per line, and exit
   --ascii          force plain-ASCII bars/frames (no UTF-8 box drawing)
@@ -42,7 +46,9 @@ Usage: spark-smi [options]
   --cluster HOSTS  cluster mode: page 3 shows every node in HOSTS (comma-
                    separated "host"/"host:port"/"ssh:host" entries, or
                    "@file" -- one entry per line, # comments). Bare
-                   --cluster (no value) tries ~/.config/spark-smi/cluster
+                   --cluster (no value) tries ~/.config/spark-smi/cluster.
+                   With 2+ members, page 4 (fabric validation) becomes
+                   available too -- see README's "Fabric validation" section
   -h, --help       show this help and exit
 
 Themes: {", ".join(term.THEMES)}, cycled live with the 'c' key.
@@ -50,8 +56,9 @@ $SPARK_SMI_THEME sets the default when --theme isn't passed; an unknown name
 prints the valid list and exits 1.
 
 Snapshot mode (default, no -l) renders once and prints ANSI to stdout.
-`--cluster ... --page 3` does one blocking poll round (2s cap) then renders
-the cluster page once.
+`--cluster ... --page 3` (or `4`) does one blocking poll round (2s cap) then
+renders the page once. `--page 4` with no --cluster (or fewer than 2
+members) prints a short "needs --cluster" note instead of a fabric panel.
 
 Live-mode keys: q quit  ·  t toggle C/F  ·  u toggle GiB/GB  ·  1/2 page
                 n active-NICs-only  ·  s sort NICs by rate  ·  c cycle theme
@@ -59,6 +66,11 @@ Live-mode keys: q quit  ·  t toggle C/F  ·  u toggle GiB/GB  ·  1/2 page
                 page 2: tab select GPU  ·  P/C/M/R/X knobs
                 page 3 (--cluster only): up/down select · enter drill into
                 node · esc back · a alerts only (fleet) · o sort col (fleet)
+                page 4 (--cluster with 2+ members only, fabric validation):
+                space start/stop test · m mode (pair/sweep/burst) · d
+                duration · up/down select pair (pair mode) · y confirms a
+                run -- generates real RDMA/network traffic between nodes,
+                so every run is confirm-gated (see README)
 """
 
 
@@ -85,7 +97,8 @@ def _parse_args(argv):
             i += 1
             if i < len(argv):
                 try:
-                    opts["page"] = 3 if int(argv[i]) == 3 else (2 if int(argv[i]) == 2 else 1)
+                    n = int(argv[i])
+                    opts["page"] = n if n in (1, 2, 3, 4) else 1
                 except ValueError:
                     pass
         elif a == "--theme":
@@ -229,10 +242,11 @@ _EMPTY_SAMPLE = {"cpu": {}, "mem": {}, "gpus": [], "nics": [], "disks": [], "the
 
 
 def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_hint=None, page_num=1,
-                      knob_ui=None, sort_nics=False, show_help=False, theme_toast=None, cluster_ctx=None):
+                      knob_ui=None, sort_nics=False, show_help=False, theme_toast=None, cluster_ctx=None,
+                      fab_ui=None, fab_engine=None):
     """Single UI entry point for both backends. Builds the requested page
-    (1 overview, 2 advanced, 3 cluster -- Phase 6, --cluster only) and draws
-    it.
+    (1 overview, 2 advanced, 3 cluster, 4 fabric validation -- Phases 6/7,
+    both --cluster only) and draws it.
 
     `knob_ui` (Phase 4) is a knobs.KnobUI instance in live mode's page 2 only
     -- main() never constructs one for the snapshot path, so passing None
@@ -257,7 +271,17 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
     sample instead of state.sample() -- knob_ui is forced off for that case
     (registry writes stay strictly local, per spec), and pages.py's `remote`
     param adds the "· remote" header tag / page-2 "knobs are local-only"
-    footer note."""
+    footer note.
+
+    `fab_ui`/`fab_engine` (Phase 7, page 4 only) are a fabtest.FabTestUI and
+    fabtest.FabricEngine -- both None in snapshot mode (main() never
+    constructs either there, mirroring knob_ui's "write-capable object only
+    exists in live mode" guarantee), in which case page 4 shows the last
+    PERSISTED run only. This function never imports/calls into fabtest.py's
+    process layer directly; it only reads the plain dicts fab_ui.render_ctx()
+    /fab_engine.status()/fabtest.load_last_run()/fabtest.load_matrix() hand
+    back, same "pages.py only ever consumes plain data" boundary knob_ctx
+    keeps above."""
     try:
         h, w = stdscr.getmaxyx()
     except Exception:
@@ -270,6 +294,7 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
 
     has_cluster = cluster_ctx is not None
     cluster_ui = cluster_ctx.get("ui") if has_cluster else None
+    has_perf = has_cluster and len(cluster_ctx["aggregator"].members) >= 2
 
     if page_num == 3 and has_cluster:
         try:
@@ -279,9 +304,50 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
         ctx = {"name": cluster_ctx.get("name", "cluster"), "views": views,
                "rate": state.rate, "ui": cluster_ui}
         try:
-            built = pages.build_page3(ctx, tier, draw_w, x0, height=height_hint or h)
+            built = pages.build_page3(ctx, tier, draw_w, x0, height=height_hint or h, has_perf=has_perf)
         except Exception:
             built = []
+        try:
+            panels.render(stdscr, built, colors_map)
+        except Exception:
+            pass
+        return
+
+    if page_num == 4:
+        try:
+            views = cluster_ctx["aggregator"].get_views() if has_cluster else []
+        except Exception:
+            views = []
+        try:
+            last_run = fabtest.load_last_run()
+        except Exception:
+            last_run = None
+        try:
+            matrix = fabtest.load_matrix()
+        except Exception:
+            matrix = {}
+        engine_status = None
+        if fab_engine is not None:
+            try:
+                engine_status = fab_engine.status()
+            except Exception:
+                engine_status = None
+        fab_render_ctx = None
+        if fab_ui is not None:
+            fab_ui.tick()
+            fab_render_ctx = fab_ui.render_ctx()
+        ctx = {"name": cluster_ctx.get("name", "cluster") if has_cluster else "cluster",
+               "views": views, "rate": state.rate, "fab": fab_render_ctx,
+               "engine_status": engine_status, "last_run": last_run, "matrix": matrix}
+        try:
+            built = pages.build_page4(ctx, tier, draw_w, x0, height=height_hint or h)
+        except Exception:
+            built = []
+        if show_help:
+            try:
+                built = built + pages.build_help_overlay(w, h)
+            except Exception:
+                pass
         try:
             panels.render(stdscr, built, colors_map)
         except Exception:
@@ -319,10 +385,12 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
     try:
         if page_num == 2:
             built = pages.build_page2(sample, tier, draw_w, x0, height=height_hint or h, knob_ui=knob_ctx,
-                                       theme_toast=theme_toast, remote=remote_name, cluster_tabs=has_cluster)
+                                       theme_toast=theme_toast, remote=remote_name, cluster_tabs=has_cluster,
+                                       has_perf=has_perf)
         else:
             built = pages.build_page1(sample, tier, draw_w, x0, height=height_hint or h, sort_nics=sort_nics,
-                                       theme_toast=theme_toast, remote=remote_name, cluster_tabs=has_cluster)
+                                       theme_toast=theme_toast, remote=remote_name, cluster_tabs=has_cluster,
+                                       has_perf=has_perf)
     except Exception:
         built = []
 
@@ -385,7 +453,20 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
     # only exists at all in live mode -- see render_dashboard's docstring.
     knob_ui = knobs.KnobUI()
     cluster_ui = cluster_ctx["ui"] if cluster_ctx else None
+    # Phase 7: page 4's fabric-test session state + the engine that actually
+    # runs one. Both None whenever cluster_ctx is (matches knob_ui's "only
+    # exists in live mode, and only where it makes sense" convention) -- the
+    # key handling above is guarded on `cluster_ctx` for the same reason
+    # page 3's own keys are, so a None fab_ui/fab_engine is never touched.
+    fab_ui = fabtest.FabTestUI() if cluster_ctx else None
+    fab_engine = fabtest.FabricEngine(cluster_ctx["aggregator"]) if cluster_ctx else None
     while True:
+        if fab_ui is not None:
+            try:
+                names = [v.get("name") for v in cluster_ctx["aggregator"].get_views() if v.get("name")]
+                fab_ui.set_nodes(names)
+            except Exception:
+                pass
         if theme_toast_ticks > 0:
             theme_toast_ticks -= 1
             if theme_toast_ticks <= 0:
@@ -404,7 +485,8 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
             h, _ = stdscr.getmaxyx()
             render_dashboard(stdscr, colors, state, active_nics_only, height_hint=h, page_num=state.page,
                               knob_ui=knob_ui, sort_nics=sort_nics, show_help=show_help,
-                              theme_toast=theme_toast, cluster_ctx=cluster_ctx)
+                              theme_toast=theme_toast, cluster_ctx=cluster_ctx,
+                              fab_ui=fab_ui, fab_engine=fab_engine)
             stdscr.refresh()
         except Exception:
             pass
@@ -437,6 +519,15 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
                 state.page = 3
                 stdscr.clear()
                 break
+            # Phase 7 (--cluster only, same "inert without --cluster"
+            # pattern as '3' above -- fab_ui/fab_engine are None whenever
+            # cluster_ctx is, so every branch below is a no-op then too).
+            if ch == ord('4') and cluster_ctx:
+                if cluster_ui.drilldown:
+                    cluster_ui.exit_drilldown()
+                state.page = 4
+                stdscr.clear()
+                break
             if ch == 27 and cluster_ui and cluster_ui.drilldown:  # Esc: drilldown -> back to page 3
                 cluster_ui.exit_drilldown()
                 state.page = 3
@@ -463,6 +554,48 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
                         state.page = 1
                         stdscr.clear()
                     break
+            # Phase 7 (--cluster with 2+ members only): page 4's own key
+            # bindings. Mirrors knobs.KnobUI's "confirming swallows every
+            # key -- 'y' applies, anything else cancels" convention: the
+            # confirming check comes FIRST so a stray keypress while a
+            # confirm prompt is up can never fall through to (say) 'm'
+            # silently changing the mode out from under an armed prompt.
+            if state.page == 4 and cluster_ctx and fab_ui.confirming:
+                if ch != -1:
+                    if ch in (ord('y'), ord('Y')):
+                        spec = fab_ui.confirm_yes()
+                        if spec:
+                            fab_engine.start(spec["mode"], spec["duration"], fab_ui.nodes,
+                                              src=spec["src"], dst=spec["dst"],
+                                              progress_cb=fab_ui.on_progress, done_cb=fab_ui.finish)
+                    else:
+                        fab_ui.cancel()
+                    break
+            elif state.page == 4 and cluster_ctx and ch == ord(' '):
+                # space: running -> stop immediately (no confirm -- abort is
+                # always one keypress); idle -> arm a y/N confirm, warning
+                # about any node with an active GPU job.
+                try:
+                    gpu_active = fabtest.gpu_active_nodes(cluster_ctx["aggregator"].get_views())
+                except Exception:
+                    gpu_active = []
+                action = fab_ui.toggle_start_stop(gpu_active)
+                if action == "stop":
+                    fab_engine.stop(fab_ui.nodes)
+                    fab_ui.finish(None, stopped=True)
+                break
+            elif state.page == 4 and cluster_ctx and ch == ord('m'):
+                fab_ui.cycle_mode()
+                break
+            elif state.page == 4 and cluster_ctx and ch == ord('d'):
+                fab_ui.cycle_duration()
+                break
+            elif state.page == 4 and cluster_ctx and ch == curses.KEY_UP:
+                fab_ui.move_pair(-1)
+                break
+            elif state.page == 4 and cluster_ctx and ch == curses.KEY_DOWN:
+                fab_ui.move_pair(1)
+                break
             if ch == ord('s'):
                 sort_nics = not sort_nics
                 stdscr.clear()
@@ -648,10 +781,12 @@ def main():
             if cluster_ctx:
                 cluster_ctx["aggregator"].stop()
     else:
-        if cluster_ctx and state.page == 3:
+        if cluster_ctx and state.page in (3, 4):
             # Snapshot mode has no background thread ticking -- one blocking
             # poll round (2s cap, spec) gets every member's freshest sample
-            # before the single render.
+            # before the single render. Page 4 in snapshot mode still only
+            # ever DISPLAYS results (fab_ui/fab_engine are never constructed
+            # below) -- this poll is just for the header/MATRIX node list.
             cluster_ctx["aggregator"].poll_once_sync(budget=2.0)
         v = term.VirtualCurses()
         colors = {i: i for i in term.PALETTE_256}

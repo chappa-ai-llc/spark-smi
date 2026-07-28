@@ -8,6 +8,7 @@ import math
 import os
 import re
 import shutil
+import socket
 import subprocess
 import time
 
@@ -877,6 +878,22 @@ def _read_text_stripped_hex(path):
     with open(path) as f:
         return f.read().strip().lower().replace("0x", "")
 
+def _first_ipv4(iface, addrs):
+    """First IPv4 address configured on this netdev (psutil.net_if_addrs()
+    -- passed in, not re-fetched per-iface, since sample_pf_detail() calls
+    this once per PF and the syscall is the same for all of them), or None
+    when the interface has none (down, or v6-only). Phase 7: this is what
+    fabtest.py joins against nic_pf's rdma_dev/port to build a fabric rail's
+    dial-able target -- never fabricated, absent means "no IP, skip this
+    rail" to the caller."""
+    try:
+        for snic in addrs.get(iface, []):
+            if snic.family == socket.AF_INET:
+                return snic.address
+    except Exception:
+        pass
+    return None
+
 class NetCollector:
     """Physical-NIC discovery + RDMA-aware, physical-port-grouped throughput.
     Moved verbatim from the pre-2.0 NetMonitor -- rename only, plus a .caps
@@ -1171,14 +1188,53 @@ class NetCollector:
         return {k: _read_int(f"{hw_dir}/{k}") for k in
                 ("np_cnp_sent", "rp_cnp_handled", "np_ecn_marked_roce_packets", "out_of_buffer")}
 
+    def _rail_asic_temp(self, ib):
+        """Per-rail 'asic' temp channel from the hwmon device backing THIS
+        specific HCA (ib device name, e.g. "mlx5_0"), resolved via
+        /sys/class/infiniband/<ib>/device/hwmon/hwmonN -- unlike
+        mlx5_asic_temp() (page 1/2's single "first mlx5 hwmon found"
+        NIC-panel-title figure), this ties the reading to the exact ASIC
+        behind one rail, so DGX Spark's 4 independent ConnectX-7 instances
+        (verified real topology: one mlx5 device per rail) don't get
+        conflated. None (hidden -- "asic n/a") when that path can't be
+        resolved, e.g. non-Mellanox HCAs or a driver that doesn't expose a
+        per-device hwmon symlink there."""
+        try:
+            hwmon_root = f"/sys/class/infiniband/{ib}/device/hwmon"
+            names = sorted(os.listdir(hwmon_root))
+        except Exception:
+            return None
+        for n in names:
+            hpath = f"{hwmon_root}/{n}"
+            try:
+                files = os.listdir(hpath)
+            except Exception:
+                continue
+            for fn in sorted(f for f in files if re.fullmatch(r"temp\d+_input", f)):
+                idx = re.sub(r"\D", "", fn)
+                label = (_read_text(f"{hpath}/temp{idx}_label") or "").lower()
+                if label and "asic" not in label:
+                    continue
+                val = _read_int(f"{hpath}/{fn}")
+                if val is not None:
+                    return val / 1000.0
+        return None
+
     def sample_pf_detail(self):
         """One row per netdev with an RDMA device behind it (ungrouped,
         unlike sample()'s physical-port grouping) -- port name, RDMA device,
-        state/speed, RX/TX rates, and the hw_counters CNP/ECN/discard
-        figures as PER-SECOND deltas (a counter reset from a driver reload
-        clamps to 0 rather than showing a negative spike)."""
+        state/speed, RX/TX rates, the hw_counters CNP/ECN/discard figures as
+        PER-SECOND deltas (a counter reset from a driver reload clamps to 0
+        rather than showing a negative spike), the netdev's first IPv4 (Phase
+        7: fabtest.py's rail dial target), and this rail's OWN asic temp
+        (Phase 7: RAILS panel's per-rail thermal correlation -- see
+        _rail_asic_temp)."""
         curr_time = time.time()
         dt = max(curr_time - self.prev_time_pf, 0.1)
+        try:
+            addrs = psutil.net_if_addrs()
+        except Exception:
+            addrs = {}
         rows = []
         for iface in sorted(self._rdma_dev_map):
             ib = self._rdma_dev_map[iface][0]
@@ -1219,6 +1275,8 @@ class NetCollector:
                 "cnp_sent": rates["np_cnp_sent"], "cnp_handled": rates["rp_cnp_handled"],
                 "ecn_marked": rates["np_ecn_marked_roce_packets"],
                 "discard": rates["out_of_buffer"],
+                "ip": _first_ipv4(iface, addrs),
+                "asic_temp": self._rail_asic_temp(ib),
             })
         # Sort by (port, rdma dev) rather than the netdev iteration order
         # above: sorting by netdev name alone put both P2-domain PFs

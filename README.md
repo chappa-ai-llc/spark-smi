@@ -172,6 +172,7 @@ directory, plus ASIC temperature from the NIC's own hwmon device.
 | `q` | all | Quit |
 | `1` / `2` | all | Switch page (overview / advanced) |
 | `3` | all | Cluster page (only live with `--cluster`; inert otherwise) |
+| `4` | all | Fabric validation page (only live with `--cluster` and 2+ members; inert otherwise) |
 | `t` | all | Toggle temperature units (°C / °F) |
 | `u` | all | Toggle memory units (GiB / GB, decimal) |
 | `c` | all | Cycle color theme (see "Themes" above; capital `T` is an undocumented alias) |
@@ -190,6 +191,14 @@ directory, plus ASIC temperature from the NIC's own hwmon device.
 | `a` | 3 | Fleet matrix (>8 nodes) only: show alerting nodes only |
 | `o` | 3 | Fleet matrix only: cycle sort column (name / GPU / power / alerts-first) |
 | `Esc` | 2 / 3 | Cancel the pending step or confirm (page 2) / back out of a node drilldown to the cluster page |
+| `space` | 4 | Start a fabric test (raises a `y`/`N` confirm) / stop one immediately, no confirm needed to abort |
+| `m` | 4 | Cycle test mode: one pair / all-pairs sweep / all-nodes burst |
+| `d` | 4 | Cycle test duration: 10s / 30s / 60s per pair |
+| `↑` / `↓` | 4 | Select which pair to run (pair mode only) |
+
+Page 4 (fabric validation) is confirm-gated for a reason: it drives real RDMA
+traffic between nodes and can saturate the fabric. See "Fabric validation"
+below before running one on a shared cluster.
 
 Knobs only ever appear when they're actually writable for the hardware in
 front of you (see "Power tuning notes"), and applying one always goes through
@@ -234,8 +243,10 @@ spark-smi [options]
   -l, --loop       live mode: curses TUI, refreshed continuously
   -n <secs>        refresh rate in seconds (default: 1)
   -p, --page <n>   which page to render in snapshot mode: 1 overview (default),
-                   2 advanced (GPU detail, NIC/thermal/SMART panels), or
-                   3 cluster (requires --cluster)
+                   2 advanced (GPU detail, NIC/thermal/SMART panels),
+                   3 cluster (requires --cluster), or 4 fabric validation
+                   (requires --cluster with 2+ members; snapshot mode only
+                   ever shows the last recorded run -- it never starts one)
   --theme <name>   color theme (default: spark; or $SPARK_SMI_THEME)
   --theme list     print the available theme names, one per line, and exit
   --ascii          force plain-ASCII bars/frames (no UTF-8 box drawing)
@@ -287,6 +298,59 @@ spark-smi --cluster sparky-1,sparky-2 --page 3         # one-shot snapshot (2s p
 - `$SPARK_SMI_TOKEN`, if set, is sent as the `X-Spark-Token` header on every
   poll and required by `--serve` on the polled side (both ends read the same
   variable).
+
+---
+
+## Fabric validation
+
+Page 4 (`4`, live mode, `--cluster` with 2+ members) drives real RDMA/network
+stress tests between cluster nodes and shows the results live: a per-rail
+bandwidth chart, HCA ASIC temperature correlated against sustained load, and
+an all-pairs latency/bandwidth matrix with an anomaly callout for a cable or
+transceiver that's dragging the fleet down.
+
+**This page ACTUATES.** Unlike every other page in spark-smi, opening it
+doesn't just read sensors — pressing `space` and confirming with `y` starts a
+test that saturates the fabric between the nodes involved. Nothing runs on
+its own:
+
+- Snapshot mode (no `-l`) only ever shows the **last recorded run** — there
+  is no code path from `--page 4` to starting a test.
+- Live mode requires the explicit `space` → `y`/`N` confirm sequence (same
+  ethos as the page-2 power/clock knobs). The confirm prompt warns when any
+  cluster member's GPU looks busy (>10% util or a running compute process),
+  so you don't accidentally flood the fabric under someone else's job.
+- `space` again while a test is running stops it immediately — no confirm
+  needed to abort — and tears down every server/client process it started,
+  on every node involved.
+
+**Requirements**: `perftest` (`ib_write_bw`/`ib_write_lat`) on every node for
+RDMA rails — falls back to `iperf3` for a rail with no RDMA device. The
+*viewing* node also needs passwordless (`BatchMode=yes`) SSH to every other
+member; a node testing against itself, or the local node acting as one side
+of a pair, runs the command locally instead of over SSH.
+
+**Modes** (`m` cycles): `pair` (one src→dst, all its rails in parallel),
+`sweep` (every ordered pair, sequentially — the default), `burst` (every node
+pushes to its ring successor simultaneously; the aggregate is the sum of
+everything observed at once). Duration (`d` cycles): 10s / 30s / 60s per
+pair.
+
+Results are appended to `~/.local/share/spark-smi/fabric-tests.jsonl` (one
+JSON line per completed pair) so the MATRIX panel and page-4's idle state
+survive a restart — the bandwidth/temperature numbers come from the same
+RDMA HCA counters and per-rail ASIC temp page 2 already reads, sampled once a
+second during the run; perftest's own summary line is parsed only as a
+secondary cross-check, never the primary source.
+
+```bash
+# on the node you'll drive tests FROM, in addition to the cluster-mode setup above:
+ssh-copy-id sparky-2   # and every other member -- BatchMode=yes SSH must work unattended
+sudo apt install perftest   # or iperf3, for rails with no RDMA device
+
+spark-smi -l --cluster sparky-1,sparky-2,sparky-3,sparky-4
+# press 4, then space, then y to run the default all-pairs sweep
+```
 
 ---
 

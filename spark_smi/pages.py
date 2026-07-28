@@ -178,16 +178,19 @@ def _short_mem(bytes_val):
 # Header / footer (plain, borderless panels)
 # =========================================================================
 
-def _cluster_tabs_text(page):
+def _cluster_tabs_text(page, has_perf=False):
     order = [(1, "NODE"), (2, "ADV"), (3, "CLUSTER")]
+    if has_perf:
+        order.append((4, "PERF"))
     return " ".join(f"▌{n} {t}▐" if n == page else f"{n} {t}" for n, t in order) + " "
 
 
-def _cluster_tabs_compact(page):
-    return "".join(f"▌{n}▐" if n == page else str(n) for n in (1, 2, 3)) + "  "
+def _cluster_tabs_compact(page, has_perf=False):
+    nums = (1, 2, 3, 4) if has_perf else (1, 2, 3)
+    return "".join(f"▌{n}▐" if n == page else str(n) for n in nums) + "  "
 
 
-def _build_header(x0, width, tier, page=1, cluster_tabs=False, cluster_summary=None, remote=None):
+def _build_header(x0, width, tier, page=1, cluster_tabs=False, cluster_summary=None, remote=None, has_perf=False):
     """`cluster_tabs` (Phase 6, --cluster only) swaps the 2-tab
     "OVERVIEW/ADVANCED" bar for the 3-tab "NODE/ADV/CLUSTER" one shown in
     mock_cluster_sections/fleet -- pages 1/2 use it too whenever --cluster
@@ -218,13 +221,13 @@ def _build_header(x0, width, tier, page=1, cluster_tabs=False, cluster_summary=N
         else:
             chip = model or arch
             core = f" │ {host}" + (f" · {chip}" if chip else "")
-        tabs = _cluster_tabs_compact(page) if cluster_tabs else ("1 ▌2▐  " if page == 2 else "▌1▐ 2  ")
+        tabs = _cluster_tabs_compact(page, has_perf) if cluster_tabs else ("1 ▌2▐  " if page == 2 else "▌1▐ 2  ")
         right = [(tabs, 9), (clock, 3)]
         p = panels.Panel(0, x0, width, kind="plain")
         p.rows.append(([(" SPARK-SMI 2.0", 9), (core, 3)] + remote_tag, right))
         return p
 
-    tabs = _cluster_tabs_text(page) if cluster_tabs else \
+    tabs = _cluster_tabs_text(page, has_perf) if cluster_tabs else \
         ("1 OVERVIEW  ▌2▐ ADVANCED  " if page == 2 else "▌1▐ OVERVIEW  2 ADVANCED  ")
     right = [(tabs, 9), (clock, 3)]
     right_len = sum(len(t) for t, _ in right)
@@ -367,6 +370,12 @@ def build_help_overlay(term_w, term_h):
         (f"  {la} / {ra}          adjust focused knob", 3),
         ("  Enter        apply focused knob (confirm)", 3),
         ("  Esc          cancel / dismiss confirm", 3),
+        ("", 3),
+        ("Page 4 -- fabric validation (--cluster, 2+ members)", 9),
+        ("  space        start test (confirm) / stop immediately (no confirm)", 3),
+        ("  m            cycle mode: pair / sweep / burst", 3),
+        ("  d            cycle duration: 10s / 30s / 60s", 3),
+        ("  up / down    select pair (pair mode)", 3),
         ("", 3),
         ("press any key to close", 6),
     ]
@@ -865,7 +874,7 @@ def _build_storage_panel(y, x0, width, disks, tier):
 # =========================================================================
 
 def build_page1(state, tier, width, x0=0, height=None, sort_nics=False, theme_toast=None,
-                 remote=None, cluster_tabs=False):
+                 remote=None, cluster_tabs=False, has_perf=False):
     """Builds page 1: header, CPU+MEMORY compound frame, GPU card(s),
     NETWORK+STORAGE compound frame, footer. `height` (available screen rows),
     when given, drives a simple degrade order: sparklines -> memory legend
@@ -907,7 +916,7 @@ def build_page1(state, tier, width, x0=0, height=None, sort_nics=False, theme_to
         if est > height and len(nics) > 1:
             collapse_nics = True
 
-    out.append(_build_header(x0, width, tier, cluster_tabs=cluster_tabs, remote=remote))
+    out.append(_build_header(x0, width, tier, cluster_tabs=cluster_tabs, remote=remote, has_perf=has_perf))
     y = 1
 
     cpu_panel = _build_cpu_panel(y, x0, width, cpu, tier, show_sparkline)
@@ -1475,7 +1484,7 @@ def _build_nvme_smart_panel(y, x0, width, smart, kind="top"):
 
 
 def build_page2(state, tier, width, x0=0, height=None, knob_ui=None, theme_toast=None,
-                 remote=None, cluster_tabs=False):
+                 remote=None, cluster_tabs=False, has_perf=False):
     """Builds page 2: header (ADVANCED tab active), one full-width detail
     panel per GPU, the NIC advanced panel (ungrouped per-PF rows), and
     THERMALS / POWER RAILS / NVME SMART. Every panel build is wrapped
@@ -1535,7 +1544,7 @@ def build_page2(state, tier, width, x0=0, height=None, knob_ui=None, theme_toast
     if drop_zones:
         thermal_entries = [e for e in thermal_entries if e.get("kind") != "thermal"]
 
-    out.append(_build_header(x0, width, tier, page=2, cluster_tabs=cluster_tabs, remote=remote))
+    out.append(_build_header(x0, width, tier, page=2, cluster_tabs=cluster_tabs, remote=remote, has_perf=has_perf))
     y = 1
 
     for idx, gpu in enumerate(gpus):
@@ -2114,12 +2123,14 @@ def _build_alerts_panel(y, x0, width, views, metrics, kind):
 
 # --- Assembly --------------------------------------------------------
 
-def build_page3(cluster_ctx, tier, width, x0=0, height=None):
+def build_page3(cluster_ctx, tier, width, x0=0, height=None, has_perf=False):
     """Builds page 3 (--cluster only): header (3-tab, cluster summary),
     then either the SECTIONS compound frame (<=8 nodes, one row per node
     per CPU/MEMORY/GPU/FABRIC/STORAGE panel) or the FLEET matrix + ALERTS
     (>8 nodes), then the footer. `cluster_ctx` = {"name", "views", "rate",
-    "ui"} -- see the module-level comment above this section."""
+    "ui"} -- see the module-level comment above this section. `has_perf`
+    (Phase 7) is True once the cluster has >=2 members, adding the 4th
+    "PERF" tab to the header (page 4 itself is only reachable that way)."""
     out = []
     name = cluster_ctx.get("name", "cluster")
     views = list(cluster_ctx.get("views") or [])
@@ -2157,7 +2168,7 @@ def build_page3(cluster_ctx, tier, width, x0=0, height=None):
         summary += f"  │  Σ wall {wall_w / 1000:.2f} kW" if wall_w >= 1000 else f"  │  Σ wall {wall_w:.0f} W"
     summary = f"{name} — {summary}"
 
-    out.append(_build_header(x0, width, tier, page=3, cluster_tabs=True, cluster_summary=summary))
+    out.append(_build_header(x0, width, tier, page=3, cluster_tabs=True, cluster_summary=summary, has_perf=has_perf))
     y = 1
 
     if ui:
@@ -2195,12 +2206,429 @@ def build_page3(cluster_ctx, tier, width, x0=0, height=None):
         alerts_p = _build_alerts_panel(y, x0, width, views, metrics, kind="mid")
         out.append(alerts_p); y += alerts_p.total_height + 1
 
+    page_nums = "1 2 3 4" if has_perf else "1 2 3"
     if fleet_mode:
         keys = " q quit · ↑↓ select · enter node detail · a alerts only · o sort col · c colors"
     else:
-        keys = " q quit · ↑↓ select · enter drill into node · 1 2 3 page · c colors"
+        keys = f" q quit · ↑↓ select · enter drill into node · {page_nums} page · c colors"
     info = f"agents {up}/{total_nodes} · poll {rate:g} s" + ("" if fleet_mode else " · spark-smi --serve")
     p = panels.Panel(y, x0, width, kind="plain")
     p.rows.append(([(keys, 9)], [(info, 6)]))
     out.append(p)
+    return out
+
+
+# =========================================================================
+# Page 4 (Phase 7, --cluster with >=2 members only): FABRIC TEST control +
+# BANDWIDTH chart + RAILS results + all-pairs MATRIX.
+# =========================================================================
+# `fab_ctx` = {"name", "views" (cluster.ClusterAggregator.get_views(), same
+# shape build_page3 reads), "rate", "fab" (fabtest.FabTestUI.render_ctx(),
+# or None in snapshot mode -- no live session at all), "engine_status"
+# (fabtest.FabricEngine.status(), or None), "last_run"
+# (fabtest.load_last_run(), or None), "matrix" (fabtest.load_matrix(),
+# {(src, dst): {"gbps", "lat_us"}})}. Exactly like build_page3's
+# cluster_ctx, pages.py never imports fabtest.py itself -- app.py gathers
+# everything into plain dicts first (the same boundary knobs.py/cluster.py
+# already keep with this module).
+
+_RAIL_SLOTS = (1, 2, 8, 5)   # per-rail chart/legend color, in rail order
+_RAIL_LINK_GBPS = 200.0      # per-rail link speed used for the RAILS bar/chart y-scale
+
+
+def _chart_y_labels(height_cells, y_max):
+    """{row_index: 'NNN'} for a handful of evenly-spaced rows (top = y_max,
+    bottom = 0) -- the sparse "200 ┤ / │ / 100 ┤ / │ / 0 ┤" tick look from
+    mock_page4.txt's chart block, generalized to any height/y_max rather
+    than the mock's hardcoded 10-row/200 case."""
+    if height_cells <= 1:
+        return {0: f"{int(y_max):>3}"}
+    steps = min(5, height_cells)
+    labels = {}
+    for k in range(steps):
+        row = round(k * (height_cells - 1) / (steps - 1)) if steps > 1 else 0
+        # label value from the STEP fraction, not the row position: rows
+        # quantize (10 rows -> 156/111/44-style junk); quarters of y_max
+        # give the mock's clean 200/150/100/50/0 ladder
+        val = y_max * (1 - (k / (steps - 1) if steps > 1 else 0))
+        labels[row] = f"{int(round(val)):>3}"
+    return labels
+
+
+def _active_pair_series(fab_ctx):
+    """(src, dst, {rail_idx: [gbps, ...]}) for whatever's live right now (a
+    running pair/sweep), else the last completed mode=="pair" run, else
+    (None, None, {}) when there's neither -- this is what feeds the
+    BANDWIDTH chart. Burst mode has no single "current pair" (all ring
+    pairs run concurrently -- see _build_bandwidth_panel), so a running
+    burst also falls through to the last completed pair here."""
+    status = fab_ctx.get("engine_status") or {}
+    if status.get("running") and status.get("series"):
+        prog = status.get("progress") or {}
+        if prog.get("mode") != "burst":
+            return prog.get("src"), prog.get("dst"), status.get("series")
+    last = fab_ctx.get("last_run")
+    if last and last.get("mode") == "pair" and last.get("rails"):
+        series = {i: (r.get("series") or []) for i, r in enumerate(last.get("rails") or [])}
+        return last.get("src"), last.get("dst"), series
+    return None, None, {}
+
+
+def _build_fabtest_panel(y, x0, width, fab_ctx):
+    fab = fab_ctx.get("fab")
+    status = fab_ctx.get("engine_status") or {}
+    la, ra = term.knob_arrows()
+    mode = fab.get("mode") if fab else (fab_ctx.get("last_run") or {}).get("mode", "sweep")
+    duration = fab.get("duration") if fab else (fab_ctx.get("last_run") or {}).get("duration", 30)
+    mode_label = {"pair": "one pair", "sweep": "all-pairs sweep", "burst": "all-nodes burst"}.get(mode, mode)
+    title = [("FABRIC TEST", 9), ("   ", 3), ("mode", 3), (" ", 3),
+             (f"[{la} {mode_label} {ra}]", 9), (f"  · {duration} s/pair", 3)]
+
+    if fab and fab.get("confirming"):
+        right = [((fab.get("confirm_text") or "run? y/N")[:width - 30], 5)]
+    elif status.get("running"):
+        prog = status.get("progress") or {}
+        n, i = prog.get("n") or 0, prog.get("i") or 0
+        if mode == "sweep" and n:
+            right = [(f"RUNNING · pair {i + 1} of {n}", 5)]
+        else:
+            right = [(f"RUNNING · {status.get('elapsed', 0):.0f} s elapsed", 5)]
+    elif fab is None:
+        right = [("snapshot: last results only", 6)]
+    else:
+        right = [("idle · press space to arm a test", 6)]
+
+    p = panels.Panel(y, x0, width, title=title, title_right=right, kind="top")
+    inner = width - 2
+
+    f = _Flow(inner - 1)
+    if status.get("running"):
+        prog = status.get("progress") or {}
+        src, dst = prog.get("src"), prog.get("dst")
+        if src and dst:
+            f.try_add_multi([("now testing", 3), (f" {src} → {dst}", 8)])
+        elif prog.get("mode") == "burst":
+            f.try_add_multi([("now testing", 3), ("  every node → its ring successor", 8)])
+        n_rails = len(status.get("series") or {}) or 4
+        f.try_add_multi([(f"  · {n_rails} rails in parallel · {status.get('elapsed', 0):.0f} s elapsed", 6)])
+    else:
+        last = fab_ctx.get("last_run")
+        if last:
+            lm = last.get("mode", "?")
+            bits = f"last run: {lm}"
+            if last.get("src") and last.get("dst"):
+                bits += f" {last['src']} → {last['dst']}"
+            if last.get("notes"):
+                bits += f" — {last['notes']}"
+            f.try_add_multi([(bits, 3)])
+        else:
+            f.try_add_multi([("no fabric test results recorded yet — press space to arm one", 6)])
+
+    right2 = []
+    last = fab_ctx.get("last_run")
+    if last and last.get("mode") == "burst" and last.get("aggregate_gbps") is not None:
+        gbps = last["aggregate_gbps"]
+        txt = f"{gbps / 1000.0:.2f} Tb/s" if gbps >= 1000 else f"{gbps:.0f} Gb/s"
+        right2 = [(f"last full burst: Σ {txt}", 6)]
+    segs = list(f.segs)
+    if segs:
+        segs[0] = (2, segs[0][1], segs[0][2])
+    p.add_row(segs, right=right2)
+    return p
+
+
+def _build_bandwidth_panel(y, x0, width, fab_ctx, chart_h, show_legend):
+    inner = width - 2
+    src, dst, series = _active_pair_series(fab_ctx)
+    last = fab_ctx.get("last_run")
+    rails = (last.get("rails") if last and last.get("mode") == "pair" else None) or []
+    # r["dev"] is already the final short label fabtest.run_pair resolved
+    # (assign_rail_labels) when it recorded this result -- nothing left to
+    # derive here.
+    labels = [r.get("dev", "?") for r in rails] if rails else [f"rail{i}" for i in sorted(series)]
+
+    mid = f"{src} → {dst} · per rail" if src else "no active/recent pair · per rail"
+    cur_vals = [vals[-1] for vals in series.values() if vals]
+    total = sum(cur_vals) if cur_vals else None
+    cap = _RAIL_LINK_GBPS * max(1, len(series) or len(rails) or 1)
+    right = []
+    if total is not None:
+        right = [(f"Σ {total:.0f} Gb/s", 8), (f" of {cap:.0f}", 6)]
+
+    p = panels.Panel(y, x0, width, title=[("BANDWIDTH", 9)],
+                      title_right=[(mid, 3)] + ([(" — ", 6)] + right if right else []), kind="mid")
+
+    if not series or chart_h <= 0:
+        p.add_row([(2, "no bandwidth samples for this pair yet", 6)])
+        return p
+
+    chart_w = max(10, inner - 8)
+    chart_series = [(series[i], _RAIL_SLOTS[idx % len(_RAIL_SLOTS)]) for idx, i in enumerate(sorted(series))]
+    rows = term.braille_chart(chart_series, chart_w, chart_h, _RAIL_LINK_GBPS)
+
+    if rows is None:
+        # blocks/ascii tier: no braille glyphs in that console font -- fall
+        # back to one bar row per rail instead of a chart.
+        for idx, i in enumerate(sorted(series)):
+            cur = series[i][-1] if series[i] else 0.0
+            lb, rb = term.bar_brackets()
+            bar, _slot = term.make_bar(min(100.0, cur / _RAIL_LINK_GBPS * 100.0), min(30, chart_w))
+            slot = _RAIL_SLOTS[idx % len(_RAIL_SLOTS)]
+            label = labels[idx] if idx < len(labels) else f"rail{i}"
+            p.add_row([(2, f"{label:<6}", slot), (9, lb, 6), (None, bar, slot), (None, rb, 6),
+                       (None, f" {cur:.0f} Gb/s", 3)])
+        return p
+
+    y_labels = _chart_y_labels(chart_h, _RAIL_LINK_GBPS)
+    for row_idx, run in enumerate(rows):
+        lbl = y_labels.get(row_idx)
+        prefix = f"{lbl} ┤" if lbl else "    │"
+        segs = [(2, prefix, 6)]
+        col = 2 + len(prefix)
+        for text, slot in run:
+            segs.append((col, text, slot))
+            col += len(text)
+        p.add_row(segs)
+
+    p.add_row([(2, "    └" + "─" * chart_w, 6)])
+
+    dur = (last or {}).get("duration") or (fab_ctx.get("fab") or {}).get("duration") or 30
+    tick_row = [(2, "     0s", 6)]
+    for frac in (1 / 3, 2 / 3, 1.0):
+        text = f"{int(round(frac * dur))}s"
+        tcol = 2 + 5 + int(frac * chart_w)
+        # keep the last tick fully inside the frame instead of clipping it
+        tcol = min(tcol, inner - len(text) - 1)
+        tick_row.append((tcol, text, 6))
+    p.add_row(tick_row)
+
+    if show_legend:
+        best = max(cur_vals) if cur_vals else None
+        legend = _Flow(inner - 1)
+        for idx, i in enumerate(sorted(series)):
+            cur = series[i][-1] if series[i] else 0.0
+            slot = _RAIL_SLOTS[idx % len(_RAIL_SLOTS)]
+            label = labels[idx] if idx < len(labels) else f"rail{i}"
+            sagging = best is not None and best > 0 and cur < 0.85 * best
+            val_slot = 5 if sagging else 8
+            suffix = " ▼" if sagging else ""
+            lead = "█ " if idx == 0 else "   █ "
+            legend.try_add_multi([(lead, slot), (f"{label} ", 3), (f"{cur:.0f}{suffix}", val_slot)])
+        lsegs = list(legend.segs)
+        if lsegs:
+            lsegs[0] = (2, lsegs[0][1], lsegs[0][2])
+        p.add_row(lsegs)
+    return p
+
+
+def _build_rails_panel(y, x0, width, fab_ctx):
+    inner = width - 2
+    last = fab_ctx.get("last_run")
+    rails = (last.get("rails") if last and last.get("mode") == "pair" else None) or []
+    p = panels.Panel(y, x0, width, title=[("RAILS", 9)],
+                      title_right=[("result · HCA asic temp during run (start → now)", 3)], kind="mid")
+    if not rails:
+        p.add_row([(2, "no completed rail results yet", 6)])
+        return p
+
+    valid = [r.get("gbps") for r in rails if r.get("gbps") is not None]
+    best = max(valid) if valid else None
+    for idx, r in enumerate(rails):
+        label = r.get("dev") or f"rail{idx}"
+        gbps, notes = r.get("gbps"), r.get("notes")
+        if notes or gbps is None:
+            p.add_row([(2, f"{label:<6}", 3), (10, notes or "no data", 6)])
+            continue
+        asic_s, asic_m = r.get("asic_start"), r.get("asic_max")
+        delta = (asic_m - asic_s) if (asic_s is not None and asic_m is not None) else None
+        throttling = bool(delta is not None and delta >= 20 and best and gbps < 0.85 * best)
+        pct = max(0.0, min(100.0, (gbps / _RAIL_LINK_GBPS) * 100.0))
+        lb, rb = term.bar_brackets()
+        bar, bar_slot = term.make_bar(pct, 20)
+        if throttling:
+            bar_slot = 5
+        f = _Flow(inner - 1)
+        f.add(f"{label:<6}", 3)
+        f.add(lb, 6); f.add(bar, bar_slot); f.add(rb, 6)
+        f.add(f" {gbps:.0f} Gb/s", 8)
+        if asic_s is not None and asic_m is not None:
+            f.try_add_multi([(f"   asic {term.fmt_temp(asic_s)}→{term.fmt_temp(asic_m)}", 5 if throttling else 3)])
+            if delta is not None:
+                f.try_add_multi([(f"  Δ+{delta:.0f}", 6)])
+        status_txt, status_slot = ("⚠ throttling — check airflow", 5) if throttling else ("ok", 1)
+        f.try_add_multi([("   ", 3), (status_txt, status_slot)])
+        segs = list(f.segs)
+        segs[0] = (2, segs[0][1], segs[0][2])
+        p.add_row(segs)
+    return p
+
+
+def _build_matrix_panel(y, x0, width, fab_ctx, worst_only=False):
+    inner = width - 2
+    views = fab_ctx.get("views") or []
+    names = [v.get("name") for v in views if v.get("name")]
+    matrix = fab_ctx.get("matrix") or {}
+    status = fab_ctx.get("engine_status") or {}
+
+    running_pairs = set()
+    if status.get("running"):
+        prog = status.get("progress") or {}
+        if prog.get("mode") == "burst" and names:
+            n = len(names)
+            running_pairs = {(names[i], names[(i + 1) % n]) for i in range(n)}
+        elif prog.get("src") and prog.get("dst"):
+            running_pairs = {(prog["src"], prog["dst"])}
+
+    gbps_vals = sorted(m["gbps"] for m in matrix.values() if m.get("gbps") is not None)
+    lat_vals = sorted(m["lat_us"] for m in matrix.values() if m.get("lat_us") is not None)
+    med_gbps = gbps_vals[len(gbps_vals) // 2] if gbps_vals else None
+    med_lat = lat_vals[len(lat_vals) // 2] if lat_vals else None
+
+    last = fab_ctx.get("last_run")
+    right = []
+    if last and last.get("mode") == "burst" and last.get("aggregate_gbps") is not None:
+        gbps = last["aggregate_gbps"]
+        txt = f"{gbps / 1000.0:.2f} Tb/s" if gbps >= 1000 else f"{gbps:.0f} Gb/s"
+        right = [(f"burst aggregate Σ {txt}", 3)]
+    p = panels.Panel(y, x0, width, title=[("MATRIX", 9)],
+                      title_right=[("all-pairs · best rail Gb/s / RTT µs", 3)] + ([(" — ", 6)] + right if right else []),
+                      kind="mid")
+
+    if len(names) < 2:
+        p.add_row([(2, "needs 2+ cluster members", 6)])
+        return p
+
+    anomalies = []
+
+    def _cell(s, d):
+        if s == d:
+            return "—", 6
+        if (s, d) in running_pairs:
+            return "▶ running…", 9
+        m = matrix.get((s, d))
+        if not m or m.get("gbps") is None:
+            return "no data", 6
+        gbps, lat = m["gbps"], m.get("lat_us")
+        txt = f"{gbps:.0f} / {lat:.1f}" if lat is not None else f"{gbps:.0f}"
+        anomaly = bool((med_gbps and gbps < 0.8 * med_gbps) or (med_lat and lat is not None and lat > 1.5 * med_lat))
+        if anomaly:
+            anomalies.append((s, d, gbps, lat))
+            return txt + " ⚠", 5
+        return txt, 3
+
+    if worst_only:
+        pairs = [(s, d) for s in names for d in names if s != d and matrix.get((s, d))]
+        pairs.sort(key=lambda sd: matrix[sd].get("gbps") if matrix[sd].get("gbps") is not None else 1e18)
+        if not pairs:
+            p.add_row([(2, "no pairwise results recorded yet", 6)])
+            return p
+        for s, d in pairs[:max(3, width // 30)]:
+            txt, slot = _cell(s, d)
+            f = _Flow(inner - 1)
+            f.add(f"{s} → {d}", 8)
+            f.try_add_multi([("   ", 3), (txt, slot)])
+            segs = list(f.segs)
+            segs[0] = (2, segs[0][1], segs[0][2])
+            p.add_row(segs)
+        return p
+
+    name_w = 10
+    col_w = max(10, min(20, (inner - name_w) // max(1, len(names))))
+    header = _Flow(inner - 1 - name_w)
+    for n in names:
+        header.try_add(f"→ {n[:col_w - 3]:<{col_w - 3}} ", 6)
+    hsegs = list(header.segs)
+    if hsegs:
+        hsegs[0] = (name_w + 2, hsegs[0][1], hsegs[0][2])
+    p.add_row(hsegs)
+
+    for s in names:
+        segs = [(2, f"{s[:name_w - 1]:<{name_w}}", 8)]
+        col = name_w + 2
+        for d in names:
+            txt, slot = _cell(s, d)
+            segs.append((col, f"{txt:<{col_w - 3}}", slot))
+            col += col_w
+        p.add_row(segs)
+
+    if anomalies:
+        s, d, gbps, lat = anomalies[0]
+        pct_below = int(round((1 - gbps / med_gbps) * 100)) if med_gbps else 0
+        excess = (lat - med_lat) if (lat is not None and med_lat is not None) else None
+        note = f"⚠ {s} ↔ {d}: {pct_below}% below fleet median"
+        if excess and excess > 0:
+            note += f" + {excess:.1f} µs excess RTT"
+        note += " — inspect cable/transceiver"
+        p.add_row([(2, note, 5)])
+    return p
+
+
+def build_page4(fab_ctx, tier, width, x0=0, height=None):
+    """Builds page 4: header (4-tab), FABRIC TEST control panel, BANDWIDTH
+    chart, RAILS results, all-pairs MATRIX, footer. Requires >=2 cluster
+    members to do anything useful (a single node has no peer to test
+    against) -- with fewer than that, renders just the header + a short
+    explanatory panel instead, which is what makes BOTH `--page 4` with no
+    --cluster at all AND `--cluster` with only one host degrade to a
+    message rather than a crash or a blank page.
+
+    Height degrade order (spec): chart shrinks 10 rows -> 6, then the
+    BANDWIDTH legend row drops, then MATRIX collapses to a worst-pairs-only
+    list instead of the full grid."""
+    out = []
+    name = fab_ctx.get("name", "cluster")
+    views = fab_ctx.get("views") or []
+    n_members = len(views)
+
+    out.append(_build_header(x0, width, tier, page=4, cluster_tabs=True,
+                              cluster_summary=f"{name} — fabric validation", has_perf=True))
+    y = 1
+
+    if n_members < 2:
+        p = panels.Panel(y, x0, width, title=[("FABRIC TEST", 9)], kind="top")
+        p.add_row([(2, "page 4 needs --cluster with 2 or more members to run RDMA stress tests.", 6)])
+        p.add_row([(2, "reachable members right now: " + (", ".join(v.get("name", "?") for v in views) or "none"), 6)])
+        out.append(p)
+        y += p.total_height + 1
+        fp = panels.Panel(y, x0, width, kind="plain")
+        fp.rows.append(([(" q quit · 1 2 3 4 page", 9)], []))
+        out.append(fp)
+        return out
+
+    chart_h = 10
+    show_legend = True
+    matrix_worst_only = False
+    if height:
+        est = 1 + 3 + 2 + chart_h + 3 + (2 + len(views)) + 4
+        if est > height:
+            chart_h = 6
+            est -= 4
+        if est > height:
+            show_legend = False
+            est -= 1
+        if est > height:
+            matrix_worst_only = True
+
+    ft_panel = _build_fabtest_panel(y, x0, width, fab_ctx)
+    out.append(ft_panel); y += ft_panel.total_height
+
+    bw_panel = _build_bandwidth_panel(y, x0, width, fab_ctx, chart_h, show_legend)
+    out.append(bw_panel); y += bw_panel.total_height
+
+    rails_panel = _build_rails_panel(y, x0, width, fab_ctx)
+    out.append(rails_panel); y += rails_panel.total_height
+
+    matrix_panel = _build_matrix_panel(y, x0, width, fab_ctx, worst_only=matrix_worst_only)
+    out.append(matrix_panel); y += matrix_panel.total_height + 1
+
+    keys = " space start/stop · m mode · d duration · ↑↓ pair · 1-4 page"
+    fab = fab_ctx.get("fab")
+    if fab and fab.get("toast"):
+        text, slot = fab["toast"]
+        fp = panels.Panel(y, x0, width, kind="plain")
+        fp.rows.append(([(f" {text}", slot)], []))
+    else:
+        fp = panels.Panel(y, x0, width, kind="plain")
+        fp.rows.append(([(keys, 9)], [("saturates the fabric — confirm-gated", 6)]))
+    out.append(fp)
     return out

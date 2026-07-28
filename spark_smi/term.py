@@ -375,3 +375,83 @@ def sparkline(history, width):
             bits |= _BRAILLE_R[k]
         chars.append(chr(0x2800 + bits))
     return "".join(chars)
+
+
+# --- Multi-series braille chart (Phase 7: page 4's BANDWIDTH panel) -------
+# Full 2x4-dot-per-cell braille plotting -- unlike sparkline() above (one
+# series, 2 vertical levels per column, no line segments between samples),
+# this connects consecutive points with a vertical dot run (so a fast ramp
+# reads as a solid line, not a scatter of dots) and draws several series into
+# the SAME cell grid with a deterministic "last drawn wins" color rule per
+# cell. Ported verbatim from scratchpad/gen_chart.py's plotting approach
+# (the script that generated mock_page4.txt's chart block) -- same BITS
+# table, same divmod-into-cell-and-sub-cell-position math, same
+# per-row same-color-run grouping on the way out.
+_CHART_BITS = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]]  # [dot_row][dot_col]
+
+def braille_chart(series, width_cells, height_cells, y_max):
+    """series = [(values, slot), ...] -- `values` is a list of y-values (any
+    length; resampled to the dot grid, so callers don't need to pre-align to
+    width_cells*2 points), drawn in list order so a later series' dots win
+    any cell its line shares with an earlier one (mirrors gen_chart.py's
+    "sagging amber rail drawn last so it wins contested cells" trick --
+    callers control draw-order priority simply by list order).
+
+    Returns a list of `height_cells` rows, each a list of (text, slot) runs
+    (grouped by consecutive same-color cells, same shape term.sparkline's
+    callers already expect from a rendered row) -- concatenating one row's
+    run texts reconstructs exactly `width_cells` characters. Empty (no
+    series drew into it) cells render as a blank braille cell (U+2800) in
+    slot 7 (bar-track/empty), matching the mock's "e" (dim track) class.
+
+    Only meaningful in the "eighths" glyph tier -- the "blocks"/"ascii"
+    tiers have no braille glyphs in their console font, so this returns None
+    there and the caller (pages.py) falls back to a plain per-series table."""
+    if BAR_STYLE != "eighths" or width_cells < 1 or height_cells < 1:
+        return None
+    w_dots, h_dots = width_cells * 2, height_cells * 4
+    y_max = float(y_max) if y_max else 1.0
+    dots = [[0] * width_cells for _ in range(height_cells)]
+    cell_slot = [[None] * width_cells for _ in range(height_cells)]
+
+    for values, slot in series:
+        if not values:
+            continue
+        n = len(values)
+        prev_dy = None
+        for dx in range(w_dots):
+            idx = int(round(dx / (w_dots - 1) * (n - 1))) if (n > 1 and w_dots > 1) else 0
+            v = values[min(idx, n - 1)]
+            if v is None:
+                prev_dy = None
+                continue
+            try:
+                v = min(max(float(v), 0.0), y_max)
+            except Exception:
+                prev_dy = None
+                continue
+            dy = int(round((1 - v / y_max) * (h_dots - 1)))
+            dy = max(0, min(h_dots - 1, dy))
+            ys = [dy] if prev_dy is None else range(min(prev_dy, dy), max(prev_dy, dy) + 1)
+            for y in ys:
+                cy, ry = divmod(y, 4)
+                cx, rx = divmod(dx, 2)
+                dots[cy][cx] |= _CHART_BITS[ry][rx]
+                cell_slot[cy][cx] = slot
+            prev_dy = dy
+
+    rows = []
+    for cy in range(height_cells):
+        runs, cur_slot, buf = [], None, []
+        for cx in range(width_cells):
+            ch = chr(0x2800 + dots[cy][cx]) if dots[cy][cx] else "⠀"
+            slot = cell_slot[cy][cx] if cell_slot[cy][cx] is not None else 7
+            if slot != cur_slot and buf:
+                runs.append((cur_slot, "".join(buf)))
+                buf = []
+            cur_slot = slot
+            buf.append(ch)
+        if buf:
+            runs.append((cur_slot, "".join(buf)))
+        rows.append([(text, slot) for slot, text in runs])
+    return rows

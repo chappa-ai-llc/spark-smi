@@ -332,10 +332,13 @@ def _summarize(sample):
         gpus = sample.get("gpus") or []
         bits = []
         if gpus:
-            util = gpus[0].get("util")
+            # busiest GPU, not gpus[0]: eGPUs enumerate as index 0 on the DGX
+            # Spark, which would make a stale-node summary quote the wrong chip
+            g = max(gpus, key=lambda g: g.get("util") or 0)
+            util = g.get("util")
             if util is not None:
                 bits.append(f"gpu {int(util)}%")
-            pwr = gpus[0].get("pwr_str")
+            pwr = g.get("pwr_str")
             if pwr and pwr != "N/A":
                 bits.append(pwr)
         asic = sample.get("nic_asic_temp")
