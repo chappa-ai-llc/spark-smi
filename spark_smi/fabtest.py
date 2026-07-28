@@ -474,7 +474,9 @@ def _member_host(aggregator, name):
             sample, _, _, _ = m.snapshot()
             payload = str(sample.get("node", "")).split(".")[0] if sample else None
             if name in (m.name, payload):
-                return m.name
+                # prefer the aggregator's DNS-resolved host (handles short
+                # names auto-suffixed with the local domain)
+                return getattr(m, "resolved_host", None) or m.name
     except Exception:
         pass
     return name

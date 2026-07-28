@@ -14,6 +14,8 @@ shape it would have gotten from a local State.sample() call.
 """
 import hmac
 import http.server
+import re
+import socket
 import json
 import os
 import platform
@@ -349,9 +351,102 @@ def _summarize(sample):
         return None
 
 
+_LOCAL_DOMAINS_CACHE = None
+
+
+def _local_domains():
+    """Candidate DNS suffixes for short-name entries, best source first:
+    reverse-PTR of our own primary IP (the only source that told the truth
+    on the reference network — getfqdn() said 'localhost' and the DHCP
+    search domain pointed at an AD zone that doesn't hold these hosts),
+    then getfqdn, then resolv.conf search domains. Cached — three probes
+    per process is enough."""
+    global _LOCAL_DOMAINS_CACHE
+    if _LOCAL_DOMAINS_CACHE is not None:
+        return _LOCAL_DOMAINS_CACHE
+    domains = []
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(1.0)
+        s.connect(("8.8.8.8", 80))
+        own_ip = s.getsockname()[0]
+        s.close()
+        ptr = socket.gethostbyaddr(own_ip)[0]
+        if "." in ptr:
+            domains.append(ptr.split(".", 1)[1])
+    except Exception:
+        pass
+    try:
+        fqdn = socket.getfqdn()
+        if "." in fqdn and fqdn != "localhost.localdomain":
+            domains.append(fqdn.split(".", 1)[1])
+    except Exception:
+        pass
+    try:
+        with open("/etc/resolv.conf") as f:
+            for line in f:
+                parts = line.split()
+                if parts and parts[0] in ("search", "domain"):
+                    domains.extend(p for p in parts[1:] if "." in p or p.isalpha())
+    except Exception:
+        pass
+    seen, out = set(), []
+    for d in domains:
+        if d and d not in seen:
+            seen.add(d)
+            out.append(d)
+    _LOCAL_DOMAINS_CACHE = out
+    return out
+
+
+def _resolve_host(member):
+    """The host to actually connect to. On the first DNS failure of a
+    dot-less entry, tries entry+local-domain candidates once and caches
+    whichever resolves (member.resolved_host)."""
+    cached = getattr(member, "resolved_host", None)
+    if cached:
+        return cached
+    host = member.entry["host"]
+    try:
+        socket.getaddrinfo(host, None)
+        member.resolved_host = host
+        return host
+    except Exception:
+        pass
+    if "." not in host:
+        for dom in _local_domains():
+            cand = f"{host}.{dom}"
+            try:
+                socket.getaddrinfo(cand, None)
+                member.resolved_host = cand
+                return cand
+            except Exception:
+                continue
+    return host  # let the poll fail and report DNS
+
+
+def _short_error(e):
+    """Compress an exception into the word a human debugging 'offline'
+    actually needs: dns / refused / timeout / http NNN / ..."""
+    s = str(e)
+    if isinstance(e, OSError) and isinstance(getattr(e, "reason", None), Exception):
+        s = str(e.reason)
+    low = s.lower()
+    if "name resolution" in low or "getaddrinfo" in low or "name or service" in low:
+        return "dns"
+    if "refused" in low:
+        return "refused"
+    if "timed out" in low or "timeout" in low:
+        return "timeout"
+    m = re.search(r"HTTP Error (\d+)", s)
+    if m:
+        return f"http {m.group(1)}"
+    return s[:40]
+
+
 def _poll_http(member, token):
     entry = member.entry
-    url = f"http://{entry['host']}:{entry['port']}/sample"
+    url = f"http://{_resolve_host(member)}:{entry['port']}/sample"
     req = urllib.request.Request(url)
     if token:
         req.add_header("X-Spark-Token", token)
@@ -361,11 +456,12 @@ def _poll_http(member, token):
         payload = json.loads(body.decode("utf-8"))
         member.set_ok(from_wire(payload))
     except Exception as e:
-        member.set_err(str(e))
+        member.set_err(_short_error(e))
 
 
 def _poll_ssh(member):
-    entry = member.entry
+    entry = dict(member.entry)
+    entry["host"] = _resolve_host(member)
     try:
         res = subprocess.run(
             ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={int(SSH_CONNECT_TIMEOUT)}",

@@ -1972,7 +1972,8 @@ def _build_cluster_cpu_section(y, x0, width, views, metrics, selected_idx, name_
         f = _Flow(inner - 2)
         _cluster_row_prefix(f, view, i == selected_idx, name_w)
         if view.get("stale") or m is None:
-            f.add("— unreachable", 6)
+            why = (view.get("error") or "").strip()
+            f.add("— unreachable" + (f" ({why})" if why else ""), 6)
             p.add_row(_finish_row(f, 1))
             continue
         _cluster_pct_bar(f, m["cpu_pct"], 11)
@@ -2082,7 +2083,8 @@ def _build_cluster_fabric_section(y, x0, width, views, metrics, selected_idx, na
         f = _Flow(inner - 2)
         _cluster_row_prefix(f, view, i == selected_idx, name_w)
         if view.get("stale") or m is None:
-            f.add("— unreachable", 6)
+            why = (view.get("error") or "").strip()
+            f.add("— unreachable" + (f" ({why})" if why else ""), 6)
             p.add_row(_finish_row(f, 1))
             continue
         nics = m.get("nics") or []
@@ -2127,7 +2129,8 @@ def _build_cluster_storage_section(y, x0, width, views, metrics, selected_idx, n
         f = _Flow(inner - 2)
         _cluster_row_prefix(f, view, i == selected_idx, name_w)
         if view.get("stale") or m is None:
-            f.add("— unreachable", 6)
+            why = (view.get("error") or "").strip()
+            f.add("— unreachable" + (f" ({why})" if why else ""), 6)
             p.add_row(_finish_row(f, 1))
             continue
         hd = m.get("hottest_disk")
