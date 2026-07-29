@@ -2482,6 +2482,7 @@ def _build_bandwidth_panel(y, x0, width, fab_ctx, chart_h, show_legend):
 
     mid = f"{src} → {dst} · per rail" if src else "no active/recent pair · per rail"
     cur_vals = [vals[-1] for vals in series.values() if vals]
+    cur_vals = [v for v in cur_vals if isinstance(v, (int, float))]
     total = sum(cur_vals) if cur_vals else None
     cap = _RAIL_LINK_GBPS * max(1, len(series) or len(rails) or 1)
     right = []

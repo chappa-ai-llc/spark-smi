@@ -899,7 +899,13 @@ class FabricEngine:
         return {
             "running": self.is_running(),
             "progress": dict(self._progress) if self._progress else None,
-            "series": {k: list(v) for k, v in self._active_series.items()},
+            # live series entries are raw (ts, tx_bps, asic) sampler tuples;
+            # normalize to the same plain Gb/s floats a recorded run's series
+            # uses so the chart consumes one shape (live-mode black screen bug)
+            "series": {k: [x if isinstance(x, (int, float))
+                           else max(0.0, (x[1] or 0)) / 1e9
+                           for x in list(v)]
+                       for k, v in self._active_series.items()},
             "elapsed": (time.time() - self._start_ts) if self._start_ts else 0.0,
         }
 

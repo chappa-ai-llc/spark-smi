@@ -426,8 +426,12 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
                "engine_status": engine_status, "last_run": last_run, "matrix": matrix}
         try:
             built = pages.build_page4(ctx, tier, draw_w, x0, height=height_hint or h)
-        except Exception:
-            built = []
+        except Exception as e:
+            # never a black screen: a build crash renders as one visible line
+            # (the live-series shape bug hid behind a bare `built = []` here)
+            err = panels.Panel(0, x0, draw_w, kind="plain")
+            err.rows.append(([(f" page 4 render error: {type(e).__name__}: {str(e)[:80]}", 4)], []))
+            built = [err]
         if show_help:
             try:
                 built = built + pages.build_help_overlay(w, h)
