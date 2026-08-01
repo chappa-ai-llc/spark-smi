@@ -395,9 +395,33 @@ spark-smi -l --cluster sparky-1,sparky-2,sparky-3,sparky-4
 
 ## Screenshots
 
-| Full Dashboard | Resize-Safe |
-|:---:|:---:|
-| ![Main View](screenshots/spark-smi.png) | Scales cleanly from narrow to full-width |
+All four captured on a DGX Spark with an RTX 3090 attached, mid-workload —
+and each in a different color theme, since that's a `c` keypress away.
+
+**Page 1 — Overview.** Hybrid Cortex-X925/A725 clusters, unified memory split
+into process/GPU/cache segments, both GPUs side by side, RDMA-aware NIC
+rates, storage.
+
+![Page 1 overview](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page1-overview.png)
+
+**Page 2 — Advanced.** Per-GPU clocks/PCIe/throttle/process detail, every
+PCIe endpoint's negotiated link state, per-PF RDMA and congestion counters,
+every thermal zone, NVMe SMART, and the `spbm` power rails with their knobs.
+
+![Page 2 advanced](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page2-advanced.png)
+
+**Page 3 — Cluster.** Two nodes compared down each column, with a mixed-GPU
+fleet summary and per-node totals in the section headers.
+
+![Page 3 cluster](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page3-cluster.png)
+
+**Page 4 — Fabric validation.** Four rails driven concurrently, charted live,
+with ASIC temperature tracked across the run and an all-pairs
+bandwidth/latency matrix. The 53 Gb/s-per-rail figure here is real: four
+rails sharing one PCIe gen5 ×4 uplink, which is exactly the kind of ceiling
+this page exists to expose.
+
+![Page 4 fabric validation](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page4-fabric.png)
 
 ---
 
@@ -552,15 +576,36 @@ BIOS. This is a property of Secure Boot, not something SPARK-SMI or
 
 ## Tested Hardware
 
+4.0 was developed against the first machine below and deliberately validated
+against the second — a box with a different CPU vendor, different NIC
+generations, and no working NVIDIA driver at all — because "universal
+detection" is a claim worth testing rather than asserting.
+
+**Primary — NVIDIA DGX Spark (×2, clustered)**
+
 | Component | Details |
 |:---|:---|
-| System | NVIDIA DGX Spark |
-| SoC | GB10 Grace Blackwell (sm_121) |
-| External GPU | RTX 3090 (sm_86) — mixed architecture, single dashboard. Attached via the M.2 slot; the same slot can just as easily carry OCuLink or USB4 instead — however it's attached, the PCIe LINKS panel shows the negotiated truth |
-| NICs | MT2910 × 4 (200G, 100G & 40G DAC), Realtek × 1 (10G, 5G, 2.5G, 1G) |
-| OS | Linux 6.17.0-nvidia |
-| Driver | 580.126.09 |
-| CUDA | 13.0 |
+| SoC | GB10 Grace Blackwell (sm_121), Cortex-X925 ×10 + Cortex-A725 ×10 |
+| Memory | 121.7 GiB unified CPU+GPU |
+| External GPU | RTX 3090 (sm_86) — mixed architecture, one dashboard. Attached via the M.2 slot; the same slot could carry OCuLink or USB4 instead. However it's attached, the PCIE LINKS panel reports the negotiated truth |
+| NICs | ConnectX-7 ×4 PFs (200G, socket-direct across 2 QSFP ports), Realtek RTL8127 (10G) |
+| OS / Driver / CUDA | Linux 6.17.0-1021-nvidia · 580.159.03 · 13.0 |
+
+**Validation — AMD EPYC server, no NVIDIA driver**
+
+| Component | Details |
+|:---|:---|
+| CPU | AMD EPYC 9135 16-Core (32 threads), x86_64 |
+| Memory | 755.1 GiB |
+| GPU | None usable — `nvidia-smi` present but unable to reach a driver |
+| NICs | ConnectX-4 ×2, ConnectX-6 Dx ×2 (100G), Realtek USB 1G |
+| Storage | KIOXIA NVMe ×2 + md RAID |
+| OS | Ubuntu 24.04.4, Linux 6.8.0 |
+
+Every GPU panel drops out on the EPYC box, `k10temp` and the KIOXIA SMART
+data appear in their place, and the ConnectX-4/6 cards are named from the
+same PCI-ID path the ConnectX-7s use. That round-trip found four real bugs,
+all fixed in 4.0 — see the [changelog](CHANGELOG.md).
 
 ---
 

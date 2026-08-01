@@ -365,7 +365,8 @@ def build_help_overlay(term_w, term_h):
     lines = [
         ("Global", 9),
         ("  q            quit", 3),
-        ("  1 / 2        switch page: overview / advanced", 3),
+        ("  1 - 4        switch page: overview / advanced /", 3),
+        ("               cluster / fabric (3-4 need --cluster)", 3),
         ("  t            toggle °C / °F", 3),
         ("  u            toggle GiB / GB (decimal units)", 3),
         (f"  c            cycle color theme  (now: {term.ACTIVE_THEME})", 3),
@@ -385,6 +386,13 @@ def build_help_overlay(term_w, term_h):
         ("  Enter        apply focused knob (confirm)", 3),
         ("  Esc          cancel / dismiss confirm", 3),
         ("", 3),
+        ("Page 3 -- cluster (--cluster)", 9),
+        ("  up / down    select node", 3),
+        ("  Enter        drill into node (knobs stay local-only)", 3),
+        ("  Esc          back out of a drilldown", 3),
+        ("  a            fleet matrix: alerting nodes only", 3),
+        ("  o            fleet matrix: cycle sort column", 3),
+        ("", 3),
         ("Page 4 -- fabric validation (--cluster, 2+ members)", 9),
         ("  space        start test (confirm) / stop immediately (no confirm)", 3),
         ("  m            cycle mode: pair / sweep / burst", 3),
@@ -393,15 +401,48 @@ def build_help_overlay(term_w, term_h):
         ("", 3),
         ("press any key to close", 6),
     ]
-    width = min(58, max(40, term_w - 4))
+    # One column when it fits. When it doesn't -- a 30-row terminal can't
+    # show all of this -- spill into two columns rather than silently
+    # truncating the list, which used to drop whole pages' bindings off the
+    # bottom with nothing to indicate they existed.
+    col_w = 56
+    max_rows = max(4, min(len(lines), max(6, term_h - 2) - 2))
+    two_col = len(lines) > max_rows and term_w >= (col_w * 2 + 6)
+
+    if two_col:
+        rows_per_col = min(max_rows, (len(lines) + 1) // 2)
+        left, right = lines[:rows_per_col], lines[rows_per_col:rows_per_col * 2]
+        width = min(term_w - 4, col_w * 2 + 3)
+        n_rows = rows_per_col
+    else:
+        left, right = lines[:max_rows], []
+        width = min(58, max(40, term_w - 4))
+        n_rows = len(left)
+
     inner = width - 2
-    height = min(len(lines) + 2, max(6, term_h - 2))
+    height = n_rows + 2
     x0 = max(0, (term_w - width) // 2)
     y0 = max(0, (term_h - height) // 2)
 
     p = panels.Panel(y0, x0, width, title=[("HELP", 9), (f" spark-smi {VERSION}", 3)], kind="top")
-    for text, slot in lines[:max(0, height - 2)]:
-        p.add_row([(1, text[:inner].ljust(inner), slot)])
+    # Rows start at inner column 0 and are padded to exactly `inner` chars, so
+    # they blank out the page underneath edge to edge. Starting at column 1
+    # (as this did) left the first inner column showing through the overlay
+    # and pushed the last char past the right border.
+    if two_col:
+        half = inner // 2
+        for i in range(n_rows):
+            ltext, lslot = left[i]
+            segs = [(0, (" " + ltext)[:half].ljust(half), lslot)]
+            if i < len(right):
+                rtext, rslot = right[i]
+                segs.append((half, (" " + rtext)[:inner - half].ljust(inner - half), rslot))
+            else:
+                segs.append((half, " " * (inner - half), 3))
+            p.add_row(segs)
+    else:
+        for text, slot in left:
+            p.add_row([(0, (" " + text)[:inner].ljust(inner), slot)])
     return [p]
 
 
