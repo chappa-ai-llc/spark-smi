@@ -468,6 +468,21 @@ passwordless SSH between nodes (cluster/fabric modes).
 
 [pep668]: https://peps.python.org/pep-0668/
 
+There is a third option you'll find by searching the error message:
+
+```bash
+pip install -U spark-smi --break-system-packages
+```
+
+It works, and it's a reasonable choice on a machine you fully control. It
+also does what it says — the package lands in the system Python that `apt`
+manages, so a future `apt` upgrade of `python3-psutil` and this install can
+disagree about who owns that package. Nothing here needs system-wide
+installation, so `pipx` gets you the same `spark-smi` command with none of
+that exposure. If you've already used the flag and something later conflicts,
+`pip uninstall spark-smi --break-system-packages` followed by
+`pipx install spark-smi` is the clean way back.
+
 ### pipx — recommended
 
 Installs into its own isolated environment and puts `spark-smi` on your
