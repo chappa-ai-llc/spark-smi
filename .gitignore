@@ -12,3 +12,11 @@ env/
 # OS specific
 .DS_Store
 Thumbs.db
+
+# Session working files (never committed)
+scratchpad/
+
+# Packaging output
+dist/
+build/
+*.egg-info/

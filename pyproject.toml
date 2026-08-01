@@ -4,21 +4,32 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spark-smi"
-version = "3.6.0"
+version = "4.0.0"
 description = "A terminal-based system monitor (TUI) for NVIDIA Grace Blackwell (GB10) and hybrid CPU architectures"
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.6"
+requires-python = ">=3.8"
 authors = [
     { name = "chappa-ai-llc", email = "james@chappa.ai" }
 ]
 keywords = ["nvidia", "dgx", "spark", "gb10", "grace-blackwell", "monitoring", "tui", "gpu"]
 classifiers = [
+    "Development Status :: 5 - Production/Stable",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Environment :: Console :: Curses",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Developers",
     "Topic :: System :: Monitoring",
+    "Topic :: System :: Hardware",
+    "Topic :: System :: Systems Administration",
 ]
 dependencies = [
     "psutil",
