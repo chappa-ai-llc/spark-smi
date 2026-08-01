@@ -41,7 +41,13 @@ from . import cluster
 # --- perftest port ranges -------------------------------------------------
 BW_BASE_PORT = 18515      # rail i's bandwidth test uses BW_BASE_PORT + i
 LAT_PORT = 18525          # one shared port for the post-bandwidth latency probe
-MAX_RAILS = 4             # verified real topology: 4 rails/node (CLAUDE.md)
+
+# Rails per node are DISCOVERED, never assumed -- this is only the bound the
+# port layout imposes: rail i binds BW_BASE_PORT + i and that run of ports has
+# to stop before LAT_PORT. Nodes with more rails than this test the first
+# MAX_RAILS of them. (This was pinned at 4 to match one specific ConnectX-7
+# cluster, which silently ignored hardware on any wider node.)
+MAX_RAILS = LAT_PORT - BW_BASE_PORT
 
 # --- timings ---------------------------------------------------------------
 SERVER_START_DELAY = 1.0   # server needs a moment to bind before the client dials

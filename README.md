@@ -14,11 +14,12 @@
 
 ## Demo
 
-![spark-smi live demo](screenshots/spark-smi-demo.gif)
+![spark-smi live demo](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/spark-smi-demo.gif)
 
-The screenshots and GIF above were captured on the 1.x/3.x single-page dashboard;
-2.0 keeps the same terminal-native philosophy but reorganizes the UI into the
-two pages described below. Fresh captures are pending a DGX Spark session.
+Live mode on a DGX Spark with an RTX 3090 attached — paging through the
+overview, the advanced panels, the cluster fleet view, and a fabric
+bandwidth test, then cycling color themes. Everything on screen is real
+hardware telemetry; nothing in this project is mocked or simulated.
 
 ---
 
@@ -43,7 +44,7 @@ plain x86 desktop with one consumer GPU.
 
 ---
 
-## Two pages
+## Four pages
 
 **Page 1 — Overview** (`1`): CPU clusters with per-core load, MEMORY with a
 segmented used/cache/free bar, one card per GPU (utilization, memory, clocks,
@@ -60,6 +61,19 @@ link monitoring" below), per-PF NIC detail (RDMA counters, CNP/ECN marks,
 discards, ASIC temperature), every thermal zone and named hwmon device, and
 NVMe SMART health. This is also where the interactive power/clock knobs
 live (see below).
+
+**Page 3 — Cluster** (`3`, needs `--cluster`): every node in the cluster on
+one screen, each section (CPU / MEMORY / GPU / FABRIC / STORAGE) stacking one
+row per node so you compare members down a column instead of tabbing between
+hosts. Up to 8 nodes it's a sections view; beyond that it becomes a compact
+fleet matrix plus an alerts panel. `↑`/`↓` selects a node and `Enter` drills
+into that node's page 1. See "Cluster mode" below.
+
+**Page 4 — Fabric validation** (`4`, needs `--cluster` with 2+ members): the
+one page that *actuates*. It runs real RDMA bandwidth and latency tests
+between nodes — per rail, node-to-node, or all nodes at once — and charts the
+result live while correlating each NIC's ASIC temperature against sustained
+load. Every run is behind an explicit confirm. See "Fabric validation" below.
 
 ### PCIe link monitoring
 

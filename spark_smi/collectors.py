@@ -209,14 +209,23 @@ class CpuCollector:
 # =========================================================================
 
 def _nvml_gpu_alloc_sum():
-    """Sum of per-process GPU memory allocation across all GPUs, via NVML
-    ONLY (nvmlDeviceGetComputeRunningProcesses / GraphicsRunningProcesses'
-    usedGpuMemory, skipping None/NVML_VALUE_NOT_AVAILABLE) -- never derived
-    from psutil/system-RAM arithmetic, which would just be inventing a
-    number. Typically 0 on GB10 (no compute contexts tracked that way for
-    the integrated GPU); callers must hide the gpu-alloc segment when this
-    is 0. A pid can appear in both the compute and graphics process lists on
-    some drivers -- dedupe per (gpu, pid) so it isn't double-counted."""
+    """Sum of per-process GPU memory allocation on UNIFIED-MEMORY GPUs only,
+    via NVML ONLY (nvmlDeviceGetComputeRunningProcesses / GraphicsRunning-
+    Processes' usedGpuMemory, skipping None/NVML_VALUE_NOT_AVAILABLE) --
+    never derived from psutil/system-RAM arithmetic, which would just be
+    inventing a number.
+
+    This figure exists to carve a gpu-alloc segment out of the SYSTEM RAM
+    bar, so only GPUs that actually allocate from system RAM may contribute.
+    A discrete card allocates from its own VRAM: counting it here inflates
+    gpu-alloc past total RAM the moment a dGPU and a unified SoC share one
+    box (an RTX 3090's 21.9 GiB of VRAM was being added to a GB10's system
+    RAM, reporting 122.1 GiB allocated on a 121.7 GiB machine).
+
+    Typically 0 on GB10 (no compute contexts tracked that way for the
+    integrated GPU); callers must hide the gpu-alloc segment when this is 0.
+    A pid can appear in both the compute and graphics process lists on some
+    drivers -- dedupe per (gpu, pid) so it isn't double-counted."""
     if not HAS_NVML:
         return 0
     total = 0
@@ -228,6 +237,15 @@ def _nvml_gpu_alloc_sum():
         try:
             h = pynvml.nvmlDeviceGetHandleByIndex(i)
         except Exception:
+            continue
+        try:
+            name = pynvml.nvmlDeviceGetName(h)
+            if isinstance(name, bytes):
+                name = name.decode("utf-8", "replace")
+        except Exception:
+            name = ""
+        # Discrete GPU -> its allocations live in VRAM, not system RAM.
+        if not _is_unified_soc(name):
             continue
         seen = {}
         for getter in (getattr(pynvml, "nvmlDeviceGetComputeRunningProcesses", None),
@@ -1311,6 +1329,9 @@ class NetCollector:
             rows.append({
                 "port": port_name, "rdma_dev": ib, "netdev": iface,
                 "up": up, "speed_str": self._fmt_speed(speed_mbit) if speed_mbit else "down",
+                # raw negotiated speed too: page 4 scales its bandwidth chart
+                # off real link capacity instead of assuming one NIC model
+                "speed_mbit": speed_mbit,
                 "rx_bps": rx_bps, "tx_bps": tx_bps,
                 "cnp_sent": rates["np_cnp_sent"], "cnp_handled": rates["rp_cnp_handled"],
                 "ecn_marked": rates["np_ecn_marked_roce_packets"],

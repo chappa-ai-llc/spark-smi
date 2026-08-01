@@ -18,6 +18,11 @@ try:
 except ImportError:
     VERSION = "4.0.0"
 
+# The header shows the major.minor series ("4.0"). Derived from VERSION rather
+# than written out, because a hardcoded literal here silently drifted a whole
+# major version behind the footer once already.
+SERIES = ".".join(VERSION.split(".")[:2])
+
 # --- tier helpers -----------------------------------------------------
 def tier_for_width(w):
     if w < 84:
@@ -224,7 +229,7 @@ def _build_header(x0, width, tier, page=1, cluster_tabs=False, cluster_summary=N
         tabs = _cluster_tabs_compact(page, has_perf) if cluster_tabs else ("1 ▌2▐  " if page == 2 else "▌1▐ 2  ")
         right = [(tabs, 9), (clock, 3)]
         p = panels.Panel(0, x0, width, kind="plain")
-        p.rows.append(([(" SPARK-SMI 2.0", 9), (core, 3)] + remote_tag, right))
+        p.rows.append(([(f" SPARK-SMI {SERIES}", 9), (core, 3)] + remote_tag, right))
         return p
 
     tabs = _cluster_tabs_text(page, has_perf) if cluster_tabs else \
@@ -233,7 +238,7 @@ def _build_header(x0, width, tier, page=1, cluster_tabs=False, cluster_summary=N
     right_len = sum(len(t) for t, _ in right)
     remote_len = sum(len(t) for t, _ in remote_tag)
 
-    prefix = " SPARK-SMI 2.0"
+    prefix = f" SPARK-SMI {SERIES}"
 
     if cluster_summary is not None:
         core = f" │ {cluster_summary}"
@@ -2366,7 +2371,31 @@ def build_page3(cluster_ctx, tier, width, x0=0, height=None, has_perf=False):
 # already keep with this module).
 
 _RAIL_SLOTS = (1, 2, 8, 5)   # per-rail chart/legend color, in rail order
-_RAIL_LINK_GBPS = 200.0      # per-rail link speed used for the RAILS bar/chart y-scale
+_RAIL_LINK_GBPS_FALLBACK = 200.0   # only when no rail reports a link speed
+
+
+def _rail_link_gbps(fab_ctx):
+    """Per-rail link speed (Gb/s) for the bandwidth chart's y-scale and the
+    'of {cap}' figures, taken from the fastest rail any member actually
+    reports (nic_pf rows' speed_mbit, straight from sysfs). This used to be
+    a hardcoded 200.0 -- correct for ConnectX-7 and wrong for every other
+    NIC, which silently mis-scaled the chart on 100G or 400G fabric.
+
+    Falls back to 200.0 only when nothing reports a speed at all (every rail
+    down, or a remote node old enough not to send the field)."""
+    best = 0.0
+    try:
+        for view in (fab_ctx.get("views") or []):
+            sample = (view or {}).get("sample") or {}
+            for row in (sample.get("nic_pf") or []):
+                try:
+                    mbit = float(row.get("speed_mbit") or 0)
+                except (TypeError, ValueError):
+                    continue
+                best = max(best, mbit / 1000.0)
+    except Exception:
+        pass
+    return best if best > 0 else _RAIL_LINK_GBPS_FALLBACK
 
 
 def _chart_y_labels(height_cells, y_max):
@@ -2484,7 +2513,8 @@ def _build_bandwidth_panel(y, x0, width, fab_ctx, chart_h, show_legend):
     cur_vals = [vals[-1] for vals in series.values() if vals]
     cur_vals = [v for v in cur_vals if isinstance(v, (int, float))]
     total = sum(cur_vals) if cur_vals else None
-    cap = _RAIL_LINK_GBPS * max(1, len(series) or len(rails) or 1)
+    link_gbps = _rail_link_gbps(fab_ctx)
+    cap = link_gbps * max(1, len(series) or len(rails) or 1)
     right = []
     if total is not None:
         right = [(f"Σ {total:.0f} Gb/s", 8), (f" of {cap:.0f}", 6)]
@@ -2498,7 +2528,7 @@ def _build_bandwidth_panel(y, x0, width, fab_ctx, chart_h, show_legend):
 
     chart_w = max(10, inner - 8)
     chart_series = [(series[i], _RAIL_SLOTS[idx % len(_RAIL_SLOTS)]) for idx, i in enumerate(sorted(series))]
-    rows = term.braille_chart(chart_series, chart_w, chart_h, _RAIL_LINK_GBPS)
+    rows = term.braille_chart(chart_series, chart_w, chart_h, link_gbps)
 
     if rows is None:
         # blocks/ascii tier: no braille glyphs in that console font -- fall
@@ -2506,14 +2536,14 @@ def _build_bandwidth_panel(y, x0, width, fab_ctx, chart_h, show_legend):
         for idx, i in enumerate(sorted(series)):
             cur = series[i][-1] if series[i] else 0.0
             lb, rb = term.bar_brackets()
-            bar, _slot = term.make_bar(min(100.0, cur / _RAIL_LINK_GBPS * 100.0), min(30, chart_w))
+            bar, _slot = term.make_bar(min(100.0, cur / link_gbps * 100.0), min(30, chart_w))
             slot = _RAIL_SLOTS[idx % len(_RAIL_SLOTS)]
             label = labels[idx] if idx < len(labels) else f"rail{i}"
             p.add_row([(2, f"{label:<6}", slot), (9, lb, 6), (None, bar, slot), (None, rb, 6),
                        (None, f" {cur:.0f} Gb/s", 3)])
         return p
 
-    y_labels = _chart_y_labels(chart_h, _RAIL_LINK_GBPS)
+    y_labels = _chart_y_labels(chart_h, link_gbps)
     for row_idx, run in enumerate(rows):
         lbl = y_labels.get(row_idx)
         prefix = f"{lbl} ┤" if lbl else "    │"
@@ -2557,6 +2587,7 @@ def _build_bandwidth_panel(y, x0, width, fab_ctx, chart_h, show_legend):
 
 def _build_rails_panel(y, x0, width, fab_ctx):
     inner = width - 2
+    link_gbps = _rail_link_gbps(fab_ctx)
     last = fab_ctx.get("last_run")
     rails = (last.get("rails") if last and last.get("mode") == "pair" else None) or []
     p = panels.Panel(y, x0, width, title=[("RAILS", 9)],
@@ -2576,7 +2607,7 @@ def _build_rails_panel(y, x0, width, fab_ctx):
         asic_s, asic_m = r.get("asic_start"), r.get("asic_max")
         delta = (asic_m - asic_s) if (asic_s is not None and asic_m is not None) else None
         throttling = bool(delta is not None and delta >= 20 and best and gbps < 0.85 * best)
-        pct = max(0.0, min(100.0, (gbps / _RAIL_LINK_GBPS) * 100.0))
+        pct = max(0.0, min(100.0, (gbps / link_gbps) * 100.0))
         lb, rb = term.bar_brackets()
         bar, bar_slot = term.make_bar(pct, 20)
         if throttling:
