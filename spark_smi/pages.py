@@ -290,8 +290,18 @@ def _build_footer(x0, width, y, driver, cuda, rate, has_nvml, extra_keys=None, k
     if knob_ui and (knob_ui.get("confirming") or knob_ui.get("toast")):
         if knob_ui.get("confirming"):
             text, slot = (knob_ui.get("confirm_text") or "apply? y/N"), 5
-        else:
-            text, slot = knob_ui["toast"]
+            # The warning rides in the critical slot ahead of the prompt, so
+            # the last thing between a keystroke and a hardware write always
+            # says so. Dropped only when the terminal is too narrow to hold
+            # both -- the prompt itself must never be the thing that's cut.
+            warn = knob_ui.get("confirm_warn")
+            p = panels.Panel(y, x0, width, kind="plain")
+            if warn and len(warn) + len(text) + 4 <= width:
+                p.rows.append(([(f" {warn}", 4), (f"  {text}", slot)], []))
+            else:
+                p.rows.append(([(f" {text}", slot)], []))
+            return p
+        text, slot = knob_ui["toast"]
         p = panels.Panel(y, x0, width, kind="plain")
         p.rows.append(([(f" {text}", slot)], []))
         return p
@@ -385,6 +395,8 @@ def build_help_overlay(term_w, term_h):
         (f"  {la} / {ra}          adjust focused knob", 3),
         ("  Enter        apply focused knob (confirm)", 3),
         ("  Esc          cancel / dismiss confirm", 3),
+        ("  ! knobs write real hardware -- no warranty,", 4),
+        ("    entirely at your own risk", 4),
         ("", 3),
         ("Page 3 -- cluster (--cluster)", 9),
         ("  up / down    select node", 3),

@@ -468,6 +468,19 @@ class KnobUI:
         if self._by_id(registry, kid) is not None:
             self._focus(registry, kid)
 
+    @staticmethod
+    def write_warning():
+        """Banner shown on EVERY confirm prompt that would write hardware.
+
+        Power limits and clock locks change the operating point of real
+        silicon: they can destabilise a running workload, and sustained
+        operation outside the vendor's defaults is squarely the operator's
+        responsibility. The project ships under the MIT licence's "AS IS,
+        without warranty of any kind" terms -- this makes that concrete at
+        the moment of the write rather than only in a licence file nobody
+        reads mid-session."""
+        return "! WARNING: writes hardware - no warranty, at your own risk"
+
     def _confirm_text_for(self, knob, pending):
         kind = knob.get("kind")
         if kind == "reset_clocks":
@@ -584,5 +597,6 @@ class KnobUI:
             "registry": self.last_registry, "selected_gpu": self.selected_gpu,
             "focus_id": self.focus_id, "pending": self.pending,
             "confirming": self.confirming, "confirm_text": self.confirm_text,
+            "confirm_warn": self.write_warning() if self.confirming else None,
             "toast": self.toast,
         }

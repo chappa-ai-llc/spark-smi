@@ -552,6 +552,46 @@ BIOS. This is a property of Secure Boot, not something SPARK-SMI or
 
 ---
 
+## ⚠ Disclaimer — the knobs write real hardware
+
+Most of SPARK-SMI only reads sensors. Two features do not:
+
+- **Page 2's power and clock knobs** change the operating point of real
+  silicon — GPU power limits, SM/memory clock locks, board power rails
+  (`PL1`/`PL2`/`SYSPL1`/`SYSPL2`), persistence mode.
+- **Page 4's fabric tests** drive real RDMA traffic that can saturate the
+  network between nodes.
+
+Raising a power limit or locking clocks can destabilise a running workload,
+increase temperatures and power draw, and — sustained, outside the vendor's
+defaults — stress hardware in ways its warranty may not cover. Lowering a
+limit can silently slow a job you didn't know was running. Nothing here
+overrides your hardware vendor's own limits, and nothing here can protect
+you from a setting your machine can't sustain.
+
+**Use these features entirely at your own risk.** SPARK-SMI is provided
+under the MIT License, **"AS IS", without warranty of any kind** — see
+[LICENSE](LICENSE). The authors and contributors accept no liability for
+damage to hardware, lost work, corrupted data, or downtime arising from use
+of these features. If you are not comfortable with that, simply don't use
+them: every read-only panel works exactly the same without ever touching a
+knob.
+
+What the tool does on your behalf to keep this honest:
+
+- Nothing is ever written without an explicit `y`/`N` confirm — arrow keys
+  only ever edit an in-memory pending value.
+- The confirm prompt itself carries a `! WARNING: writes hardware` banner,
+  so the warning appears at the moment of the write, not just here.
+- A knob that isn't writable on your system is shown greyed out with the
+  reason, rather than silently failing.
+- Snapshot mode never constructs the knob UI at all, so a scripted
+  `spark-smi` run cannot write anything.
+- Knobs are always local-only — drilling into a remote node in cluster mode
+  gives you that node's data read-only.
+
+---
+
 ## Power tuning notes
 
 - **Wi-Fi/BT radio (BIOS):** the DGX Spark's onboard Wi-Fi/Bluetooth radio
