@@ -426,11 +426,24 @@ def _nvml_field_temp(handle, field_names):
     return None
 
 def _proc_name(pid):
+    """Process name for a pid, or "" when it can't be resolved.
+
+    /proc/<pid>/comm first (cheapest, and the canonical short name), then
+    psutil, which works on the platforms that have no /proc. Returning the
+    bare pid as a "name" -- as this used to -- rendered every Windows GPU
+    process as "2224 2224" on page 2, since the caller prints pid and name
+    side by side."""
     try:
         with open(f"/proc/{pid}/comm") as f:
-            return f.read().strip() or str(pid)
+            name = f.read().strip()
+            if name:
+                return name
     except Exception:
-        return str(pid)
+        pass
+    try:
+        return psutil.Process(pid).name() or ""
+    except Exception:
+        return ""
 
 def _gpu_processes(handle):
     """Compute+graphics processes on this GPU, deduped by pid (a pid can
@@ -1143,11 +1156,18 @@ class NetCollector:
         return groups
 
     def _driver_label(self, iface):
+        """Kernel driver name as a last-resort hardware label, or "" when
+        even that is unavailable.
+
+        This used to fall back to the interface name itself, which on a
+        platform with no driver symlink (Windows) rendered the name twice
+        per row, the second copy sliced to 7 chars: "Ethernet 2 | Etherne".
+        An empty label lets the panel omit the column instead."""
         try:
             drv = os.path.basename(os.readlink(f"/sys/class/net/{iface}/device/driver"))
             return NIC_DRIVER_NAMES.get(drv, drv[:7])
         except Exception:
-            return iface[:7]
+            return ""
 
     def _nic_hw_label(self, iface):
         """"Vendor Model" hardware label from PCI IDs (spec's NETWORK data

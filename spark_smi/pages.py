@@ -467,9 +467,12 @@ def _build_cpu_panel(y, x0, width, cpu_state, tier, show_sparkline):
     summary = " + ".join(f"{c['label']} ×{len(c['cores'])}" for c in clusters) or "CPU"
     temp = term.fmt_temp(cpu_state.get("temp"))
     loadavg = cpu_state.get("loadavg")
-    right = [(f"{temp}", 2)]
-    if loadavg:
-        right = [(f"{temp} · load {loadavg[0]:.2f} {loadavg[1]:.2f} {loadavg[2]:.2f}", 2)]
+    # No temp sensor and no loadavg (Windows) -> no title_right at all,
+    # rather than a bare "N/A" sitting where a live number should be.
+    load_txt = (f"load {loadavg[0]:.2f} {loadavg[1]:.2f} {loadavg[2]:.2f}"
+                if loadavg else "")
+    temp_txt = temp if temp and temp != "N/A" else ""
+    right = [(" · ".join(t for t in (temp_txt, load_txt) if t), 2)] if (temp_txt or load_txt) else []
 
     p = panels.Panel(y, x0, width, title=[("CPU", 9), (f" {summary}", 3)],
                       title_right=right, kind="top")
@@ -788,10 +791,15 @@ def _build_network_compact_rows(p, inner, nics):
     return p
 
 
-def _build_network_panel(y, x0, width, nics, collapse, tier):
+def _build_network_panel(y, x0, width, nics, collapse, tier, has_rdma=True):
     inner = width - 2
+    # Only advertise the HCA-counter path when there's actually an RDMA
+    # device behind one of these NICs; on a plain box the rates come from
+    # netdev counters and saying otherwise is just wrong.
+    caption = (" physical ports · RDMA read from HCA counters" if has_rdma
+               else " physical ports")
     p = panels.Panel(y, x0, width,
-                      title=[("NETWORK", 9), (" physical ports · RDMA read from HCA counters", 3)],
+                      title=[("NETWORK", 9), (caption, 3)],
                       kind="top")
     if not nics:
         p.add_row([(1, "no network interfaces detected", 6)])
@@ -1010,13 +1018,19 @@ def build_page1(state, tier, width, x0=0, height=None, sort_nics=False, theme_to
     out.extend(gpu_panels)
     y += gpu_h
 
-    net_panel = _build_network_panel(y, x0, width, nics, collapse_nics, tier)
+    has_rdma = bool(((state.get("caps") or {}).get("net") or {}).get("rdma"))
+    net_panel = _build_network_panel(y, x0, width, nics, collapse_nics, tier, has_rdma)
     out.append(net_panel)
-    y += net_panel.total_height  # no +1: STORAGE continues this same frame
-
-    storage_panel = _build_storage_panel(y, x0, width, disks, tier)
-    out.append(storage_panel)
-    y += storage_panel.total_height + 1  # +1 for the compound frame's bottom border
+    if disks:
+        y += net_panel.total_height  # no +1: STORAGE continues this same frame
+        storage_panel = _build_storage_panel(y, x0, width, disks, tier)
+        out.append(storage_panel)
+        y += storage_panel.total_height + 1  # +1 for the frame's bottom border
+    else:
+        # No block devices enumerable at all (Windows, or a container with no
+        # /sys/block): drop the panel entirely rather than draw an empty box
+        # captioned with Linux sysfs paths that don't exist here.
+        y += net_panel.total_height + 1
 
     driver, cuda = state.get("driver", "Unknown"), state.get("cuda", "Unknown")
     has_nvml = (state.get("caps") or {}).get("has_nvml", False)
@@ -1264,7 +1278,9 @@ def _row_procs(inner, gpu):
         return f
     started = False
     for p in procs:
-        txt = f"{p.get('pid', '?')} {p.get('name', '?')}"
+        pid, pname = p.get("pid", "?"), (p.get("name") or "").strip()
+        # Unresolvable name -> show the pid alone, never "2224 2224".
+        txt = f"{pid} {pname}" if pname and pname != str(pid) else str(pid)
         mem = p.get("mem")
         if mem is not None:
             txt += f" {term.fmt_mem(mem)}"
