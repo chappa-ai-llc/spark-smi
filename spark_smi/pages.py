@@ -325,7 +325,16 @@ def _build_footer(x0, width, y, driver, cuda, rate, has_nvml, extra_keys=None, k
             " q quit · 1 2 page · t temp · u units",
         ]
     src = "NVML" if has_nvml else "CLI"
-    info = f"v{VERSION} · {src} · driver {driver} · CUDA {cuda} · {rate:g}s"
+    # Same no-sensor-no-row rule the panels follow: on a box with no NVIDIA
+    # driver these read "driver Unknown · CUDA Unknown", which is exactly the
+    # misleading placeholder this project sets out not to print.
+    info_parts = [f"v{VERSION}", src]
+    if driver and str(driver) != "Unknown":
+        info_parts.append(f"driver {driver}")
+    if cuda and str(cuda) != "Unknown":
+        info_parts.append(f"CUDA {cuda}")
+    info_parts.append(f"{rate:g}s")
+    info = " · ".join(info_parts)
 
     keys, show_info = variants[-1], False
     for v in variants:
@@ -451,7 +460,10 @@ def _build_cpu_panel(y, x0, width, cpu_state, tier, show_sparkline):
         avg = cl.get("avg", 0.0)
         f = _Flow(inner - 1)
         f.add(f"{cl.get('label', ''):<12}", 3)
-        f.add(f"{cl.get('ghz', 0):>5.2f} GHz  ", 8)
+        # No frequency reported by the platform -> omit the field entirely
+        # (no-sensor-no-row), rather than printing a bogus "0.00 GHz".
+        ghz = cl.get("ghz", 0) or 0
+        f.add(f"{ghz:>5.2f} GHz  " if ghz > 0 else " " * 11, 8)
         bar_w = 20 if tier == "wide" else 16
         lb, rb = term.bar_brackets()
         bar, slot = term.make_bar(avg, bar_w)
@@ -1042,7 +1054,17 @@ def _row_pcie(inner, gpu):
     if gen_c is None or w_c is None:
         return None
     stuck = bool(gpu.get("pcie_stuck"))
-    gen_m, w_m = gpu.get("pcie_gen_max"), gpu.get("pcie_width_max")
+    # Slot-effective ceiling (min of device and parent bridge, set in app.py)
+    # with the device's own max as fallback -- judging against the raw device
+    # max would call an M.2-fed card degraded forever, contradicting the
+    # PCIE LINKS panel's verdict on the same link.
+    gen_dev, w_dev = gpu.get("pcie_gen_max"), gpu.get("pcie_width_max")
+    gen_m = gpu.get("pcie_gen_max_eff")
+    w_m = gpu.get("pcie_width_max_eff")
+    if gen_m is None:
+        gen_m = gen_dev
+    if w_m is None:
+        w_m = w_dev
     degraded = (gen_m is not None and gen_c < gen_m) or (w_m is not None and w_c < w_m)
     idle_downtrain = degraded and not stuck and (gpu.get("util", 0) or 0) < 20
 
@@ -1051,6 +1073,10 @@ def _row_pcie(inner, gpu):
     f.add(f"gen {gen_c} ×{w_c}", 4 if stuck else 8)
     if gen_m is not None and w_m is not None:
         f.try_add_multi([(" ", 3), (f"(max gen {gen_m} ×{w_m})", 6)])
+        # The card can be wider than the slot feeding it -- say so, same as
+        # the PCIE LINKS panel's "(dev ×16)" suffix.
+        if w_dev is not None and w_m is not None and w_dev > w_m:
+            f.try_add_multi([(" ", 3), (f"(dev ×{w_dev})", 6)])
     if stuck:
         f.try_add_multi([("  ", 3), ("⚠ gen1 under load — power safety mode?", 4)])
     else:

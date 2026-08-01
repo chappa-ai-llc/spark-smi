@@ -287,6 +287,14 @@ class State:
             pcie_hist = self.gpu_pcie_hist.setdefault(g.get("id"), deque(maxlen=6))
             pcie_hist.append((util, gen_cur))
             g["pcie_stuck"] = _pcie_stuck_from_history(pcie_hist, gen_max)
+            # Carry the same slot-effective ceiling onto the GPU so page 2's
+            # PCIE row judges "degraded" against the slot too. Without this
+            # the per-GPU row compares against the device's raw capability
+            # and labels an M.2-fed card "(idle downtrain)" while the PCIE
+            # LINKS panel calls that identical link "ok" one panel below.
+            g["pcie_gen_max_eff"] = gen_max
+            width_max_eff = link.get("width_max_eff") if link is not None else None
+            g["pcie_width_max_eff"] = width_max_eff if width_max_eff is not None else g.get("pcie_width_max")
 
         # The unified SoC's own PCI endpoint (GB10's on-die GPU) reads as a
         # permanently narrow link vs. its declared max width -- architectural

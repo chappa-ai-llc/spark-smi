@@ -147,14 +147,45 @@ def _core_range_str(cores):
     parts = [f"{a:02}-{b:02}" if a != b else f"{a:02}" for a, b in runs]
     return " · ".join(parts)
 
+def _proc_cpuinfo_mhz(cores):
+    """Max "cpu MHz" from /proc/cpuinfo across `cores`, in GHz, or 0.0.
+
+    Fallback for machines with no cpufreq sysfs tree at all -- plenty of
+    server platforms (an EPYC 9135 under Ubuntu 24.04, for one) never expose
+    /sys/.../cpufreq, and reading only that reported a flat "0.00 GHz"."""
+    try:
+        want = set(cores)
+        best = 0.0
+        idx = -1
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if line.startswith("processor"):
+                    try:
+                        idx = int(line.split(":", 1)[1])
+                    except (ValueError, IndexError):
+                        idx = -1
+                elif line.startswith("cpu MHz") and idx in want:
+                    try:
+                        best = max(best, float(line.split(":", 1)[1]))
+                    except (ValueError, IndexError):
+                        pass
+        return best / 1000.0
+    except Exception:
+        return 0.0
+
+
 def _cluster_max_freq_ghz(cores):
-    """Max cpufreq across the cluster's cores, in GHz. Read once at
-    collector construction and cached on the cluster dict -- unlike
-    per-tick load, this doesn't change at runtime."""
+    """Max cpufreq across the cluster's cores, in GHz, or 0.0 when the
+    platform reports no frequency at all (callers hide the field rather than
+    printing a fake 0.00 GHz). Read once at collector construction and cached
+    on the cluster dict -- unlike per-tick load, this doesn't change at
+    runtime."""
     freq = 0
     for i in cores:
         freq = max(freq, _read_int(f"/sys/devices/system/cpu/cpu{i}/cpufreq/cpuinfo_max_freq") or 0)
-    return freq / 1_000_000.0 if freq else 0.0
+    if freq:
+        return freq / 1_000_000.0
+    return _proc_cpuinfo_mhz(cores)
 
 def _get_cpu_temp():
     try:
@@ -1120,19 +1151,34 @@ class NetCollector:
 
     def _nic_hw_label(self, iface):
         """"Vendor Model" hardware label from PCI IDs (spec's NETWORK data
-        section), e.g. "Mellanox ConnectX-7". Fallback chain: built-in vendor
-        table with unknown device -> "Vendor 0xdead"; unknown vendor -> the
-        system's pci.ids database; nothing resolvable at all (non-PCI device,
-        or pci.ids absent) -> the pre-existing driver-name label."""
+        section), e.g. "Mellanox ConnectX-7".
+
+        Fallback chain, in order: the built-in device table -> the system's
+        pci.ids database -> "Vendor 0xdead" -> the driver-name label (non-PCI
+        device, or no pci.ids installed).
+
+        The pci.ids step used to be reachable ONLY for unrecognized vendors,
+        so a KNOWN vendor with an unlisted device short-circuited to raw hex:
+        a ConnectX-4 rendered as "Mellanox 0x1013" in NETWORK while the PCIE
+        LINKS panel -- which tries the lookups in this order -- resolved the
+        very same card to "ConnectX-4"."""
         vendor_hex, device_hex = _pci_vendor_device(iface)
         if vendor_hex:
             vendor_name = PCI_VENDOR_NAMES.get(vendor_hex)
-            if vendor_name:
-                device_name = PCI_DEVICE_NAMES.get((vendor_hex, device_hex))
-                return f"{vendor_name} {device_name}" if device_name else f"{vendor_name} 0x{device_hex}"
+            device_name = PCI_DEVICE_NAMES.get((vendor_hex, device_hex))
+            if vendor_name and device_name:
+                return f"{vendor_name} {device_name}"
             looked_up = _pci_ids_lookup(vendor_hex, device_hex)
             if looked_up:
-                return looked_up
+                # pci.ids spells models out as "MT27700 Family [ConnectX-4]";
+                # the bracketed marketing name is what fits the label cell.
+                m = _PCI_BRACKET_RE.search(looked_up)
+                if m:
+                    name = m.group(1).strip()
+                    return f"{vendor_name} {name}" if vendor_name else name
+                return _strip_corp_suffix(looked_up)
+            if vendor_name:
+                return f"{vendor_name} 0x{device_hex}"
         return self._driver_label(iface)
 
     def _carrier_up(self, iface):
@@ -1876,9 +1922,34 @@ class ThermalCollector:
             out.append({"label": label, "temp_c": z["temp_c"], "kind": "thermal"})
         return out
 
-    # Vendor short-names for THERMALS collapse labels -- purely cosmetic
-    # (mock's "cx7 asic ×4" vs. the raw kernel hwmon name "mlx5").
-    _HWMON_SHORT_NAMES = {"mlx5": "cx7"}
+    # Kernel hwmon names that identify a DRIVER rather than a model, so the
+    # real card has to be resolved through PCI IDs to label the row.
+    _HWMON_DRIVER_NAMES = ("mlx5",)
+
+    @staticmethod
+    def _hwmon_short_name(hpath, hwname):
+        """Short THERMALS label for an hwmon device -- purely cosmetic
+        ("cx7 asic ×4" rather than the raw kernel name "mlx5").
+
+        Every Mellanox card reports hwmon name "mlx5" whatever the model, so
+        this was a flat {"mlx5": "cx7"} mapping -- which cheerfully labeled a
+        ConnectX-4 box's sensors "cx7 asic ×2". Resolve the actual device
+        through its PCI IDs and compress "ConnectX-6 Dx" -> "cx6" instead,
+        falling back to the kernel name when nothing resolves."""
+        if hwname not in ThermalCollector._HWMON_DRIVER_NAMES:
+            return hwname
+        try:
+            vendor_hex, device_hex = _pci_vendor_device_at(f"{hpath}/device")
+            if not vendor_hex:
+                return hwname
+            looked_up = (PCI_DEVICE_NAMES.get((vendor_hex, device_hex))
+                         or _pci_ids_lookup(vendor_hex, device_hex) or "")
+            m = re.search(r"ConnectX-(\d+)", looked_up)
+            if m:
+                return f"cx{m.group(1)}"
+        except Exception:
+            pass
+        return hwname
 
     def _hwmon_entries(self):
         """(entries, spbm_entries) -- temp channels from every named hwmon
@@ -1898,7 +1969,7 @@ class ThermalCollector:
             hwname = _read_text(f"{hpath}/name")
             if not hwname or hwname == "acpitz":
                 continue
-            short = self._HWMON_SHORT_NAMES.get(hwname, hwname)
+            short = self._hwmon_short_name(hpath, hwname)
             try:
                 files = os.listdir(hpath)
             except Exception:

@@ -403,48 +403,102 @@ spark-smi -l --cluster sparky-1,sparky-2,sparky-3,sparky-4
 
 ## Prerequisites
 
-- Linux (aarch64 recommended — built and tested on DGX Spark)
-- Python 3.6+
-- NVIDIA drivers installed, `nvidia-smi` in `PATH` (used as a fallback and by
-  the page-2 clock/persistence knobs)
+- **Linux** for full fidelity — the collectors read `sysfs`, `hwmon`,
+  `/proc`, and `/sys/class/infiniband`. aarch64 and x86_64 both work.
+- **Python 3.8+** (developed and tested on 3.12, the DGX Spark's system
+  Python).
+- **NVIDIA driver** with `nvidia-smi` on `PATH` — used as a per-field
+  fallback when NVML is unavailable, and by the page-2 clock/persistence
+  knobs. GPU panels simply don't appear if there's no NVIDIA GPU; everything
+  else still renders.
+
+Optional, each unlocking a specific feature: `perftest` (page-4 fabric
+tests), the `spbm` driver (power rails + PL knobs on DGX Spark), and
+passwordless SSH between nodes (cluster/fabric modes).
 
 ---
 
-## Quick Install
+## Install
+
+> **Heads up for DGX Spark / Ubuntu 24.04 users:** the system Python is
+> marked *externally managed* ([PEP 668][pep668]), so a bare
+> `pip install spark-smi` is refused with
+> `error: externally-managed-environment`. That's the OS protecting itself,
+> not a problem with this package. Use `pipx` or a venv below.
+
+[pep668]: https://peps.python.org/pep-0668/
+
+### pipx — recommended
+
+Installs into its own isolated environment and puts `spark-smi` on your
+`PATH`, without touching system packages:
+
+```bash
+sudo apt install pipx          # once
+pipx install spark-smi
+pipx ensurepath                # once; then re-open the shell
+spark-smi -l
+```
+
+### venv
+
+If you'd rather not install pipx:
+
+```bash
+python3 -m venv ~/.venvs/spark-smi
+~/.venvs/spark-smi/bin/pip install spark-smi
+~/.venvs/spark-smi/bin/spark-smi -l
+
+# optional: make it a one-word command
+echo "alias spark-smi='~/.venvs/spark-smi/bin/spark-smi'" >> ~/.bashrc
+source ~/.bashrc
+```
+
+### pip
+
+On distros that don't mark their Python externally managed (and inside any
+activated venv or conda env), the plain install works as expected:
 
 ```bash
 pip install spark-smi
-spark-smi        # snapshot
+spark-smi        # snapshot: render once, print, exit
 spark-smi -l     # live mode
 ```
 
-## Installation
-
-### Option 1: Quick Run (Virtual Environment)
-The safest method on DGX appliances — no system libraries touched.
+### From source
 
 ```bash
 git clone https://github.com/chappa-ai-llc/spark-smi.git
 cd spark-smi
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
-```
-
-```bash
-# Snapshot (single output)
-./venv/bin/python3 spark-smi.py
-
-# Live mode
 ./venv/bin/python3 spark-smi.py -l
 ```
 
-### Option 2: System Alias (Recommended)
-Type `spark-smi` from anywhere.
+### Upgrading
 
 ```bash
-echo "alias spark-smi='~/spark-smi/venv/bin/python3 ~/spark-smi/spark-smi.py'" >> ~/.bashrc
-source ~/.bashrc
+pipx upgrade spark-smi                      # pipx
+~/.venvs/spark-smi/bin/pip install -U spark-smi   # venv
 ```
+
+4.0 is a drop-in upgrade from 3.x: same package name, same command, no
+config files to migrate. The dashboard is reorganized into pages — what 3.x
+showed on one screen is now page 1, and `2`/`3`/`4` reach the new ones.
+
+### Windows / macOS
+
+Not the target platform, but useful for working on the UI: snapshot mode
+renders a degraded `psutil` + `nvidia-smi` view, and live mode needs a curses
+implementation. On Windows:
+
+```bash
+pip install spark-smi windows-curses
+```
+
+Linux-only panels (thermal zones, RDMA counters, SMART, power rails) are
+absent there because the sysfs paths they read don't exist — the same
+capability model that hides a missing fan sensor hides them.
 
 ---
 
