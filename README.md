@@ -35,12 +35,29 @@ plain x86 desktop with one consumer GPU.
 
 | What it handles correctly | Standard tools |
 |:---|:---:|
-| Hybrid P-core / E-core CPU clusters (ARM or Intel) | ❌ |
-| GB10 unified memory (CPU+GPU shared) | ❌ |
+| Hybrid P-core / E-core CPU clusters grouped by actual silicon type | ❌ |
+| GB10 unified memory (CPU+GPU shared) shown as real numbers, not `N/A` | ❌ |
 | RDMA/RoCE-aware NIC bandwidth (bypasses the kernel netdev counters) | ❌ |
-| Mixed GPU architectures in one system | ❌ |
-| NVML with graceful CLI fallback | ✅ |
-| Zero system dependencies beyond `psutil` + `pynvml` | ✅ |
+| A unified-memory SoC and a discrete card side by side, each accounted correctly | ❌ |
+| Negotiated PCIe link state for every endpoint, flagged only when it's a fault | ❌ |
+| A whole cluster on one screen | ❌ |
+| NVML with graceful `nvidia-smi` fallback | ✅ |
+
+**Dependencies, honestly.** The dashboard itself needs two Python packages —
+`psutil` and `nvidia-ml-py` — and nothing else; that covers CPU, memory, GPU,
+network, storage, thermals, and PCIe on a stock Linux install.
+
+Individual features do reach outside that, and each is capability-gated —
+the tool isn't there, the feature isn't shown, nothing crashes:
+
+| Feature | Needs |
+|:---|:---|
+| Per-field GPU fallback, clock/persistence knobs | `nvidia-smi` (ships with the driver) |
+| Power rails + `PL1`/`PL2` knobs (page 2) | the out-of-tree [`spark_hwmon`](https://github.com/antheas/spark_hwmon) `spbm` module |
+| Fabric bandwidth/latency tests (page 4) | `perftest` (`ib_write_bw`/`ib_write_lat`), or `iperf3` for non-RDMA rails |
+| Cluster and fabric modes | passwordless (`BatchMode=yes`) SSH between nodes |
+| Fuller NIC model names | `/usr/share/hwdata/pci.ids`, if installed |
+| Live mode on Windows | `windows-curses` |
 
 ---
 
