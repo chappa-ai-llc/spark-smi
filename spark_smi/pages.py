@@ -2141,9 +2141,17 @@ def _build_cluster_gpu_section(y, x0, width, views, metrics, selected_idx, name_
             util = g.get("util", 0) or 0
             _cluster_pct_bar(f, util, 11)
             f.add("  ", 3)
-            gpu_alloc = m.get("gpu_alloc") or 0
-            if gpu_alloc:
-                f.try_add(f"alloc {gpu_alloc / (1024 ** 3):.1f}G  ", 3)
+            # A discrete card allocates from its own VRAM; only a unified SoC
+            # draws on the node's system RAM. Printing the node-level figure
+            # on every row put an RTX 3090 at "alloc 101.7G" -- a GB10's
+            # unified allocation, on a 24 GB card.
+            if "(Unified)" in (g.get("name") or ""):
+                shown = m.get("gpu_alloc") or 0
+            else:
+                own = g.get("mem_used")
+                shown = own if isinstance(own, (int, float)) and own > 0 else 0
+            if shown:
+                f.try_add(f"alloc {shown / (1024 ** 3):.1f}G  ", 3)
             else:
                 f.try_add("alloc —  ", 6)
             f.try_add(f"{term.fmt_temp(g.get('temp')):<5} ", 3)
@@ -2159,8 +2167,26 @@ def _build_cluster_fabric_section(y, x0, width, views, metrics, selected_idx, na
     inner = width - 2
     rx_sum = sum((m or {}).get("rx_sum", 0) for m in metrics)
     tx_sum = sum((m or {}).get("tx_sum", 0) for m in metrics)
-    hw = next((m["nics"][0].get("hw_label") for m in metrics if m and m.get("nics")), None)
-    subtitle = (f"{hw or 'NIC'} · RoCEv2 · Σ ▼ {term.fmt_rate(rx_sum, 'bit')} "
+    # Count models across the fleet rather than naming the first node's card:
+    # a mixed cluster (ConnectX-4 here, ConnectX-7 there) was labelled with
+    # whichever NIC happened to sort first, same trap the GPU title had.
+    hw_counts = {}
+    for m in metrics:
+        # Only the NICs the rows below actually show (nics[:2] per node) --
+        # counting every netdev dragged USB and management ports into what is
+        # meant to name the fabric.
+        for n in ((m or {}).get("nics") or [])[:2]:
+            lbl = (n.get("hw_label") or "").strip()
+            if lbl:
+                hw_counts[lbl] = hw_counts.get(lbl, 0) + 1
+    if len(hw_counts) == 1:
+        hw = next(iter(hw_counts))
+    elif not hw_counts:
+        hw = "NIC"
+    else:
+        short = sorted({re.sub(r"^Mellanox\s+", "", k) for k in hw_counts})
+        hw = " + ".join(short) if len(short) <= 3 else f"{len(short)} NIC models"
+    subtitle = (f"{hw} · RoCEv2 · Σ ▼ {term.fmt_rate(rx_sum, 'bit')} "
                 f"· Σ ▲ {term.fmt_rate(tx_sum, 'bit')}")
     p = panels.Panel(y, x0, width, title=[("FABRIC", 9), (f" {subtitle}", 3)], kind=kind)
     for i, (view, m) in enumerate(zip(views, metrics)):
@@ -2394,7 +2420,10 @@ def build_page3(cluster_ctx, tier, width, x0=0, height=None, has_perf=False):
         ui.selected_name = views[ui.selected].get("name") if n else None
     selected_idx = ui.selected if ui else -1
 
-    name_w = 8 if tier == "compact" else 10
+    # Size the node column to the longest name actually present rather than a
+    # flat 10, which sliced a 14-char hostname down to "resa-ai-no".
+    _longest = max((len(v.get("name") or "?") for v in views), default=0)
+    name_w = max(8, min(_longest, 10 if tier == "compact" else 18))
     fleet_mode = n > 8
     avail_rows = max(4, (height or 30) - y - 3)
 
