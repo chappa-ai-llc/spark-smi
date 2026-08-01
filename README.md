@@ -168,6 +168,13 @@ resize the window and it adapts live, no restart needed:
 | `standard` | 84–110 cols | Full field set, but GPU cards and THERMALS/SMART stack full-width instead of side-by-side. |
 | `wide` | > 110 cols | The full multi-column layout; content is capped at 160 columns and centered on wider terminals. |
 
+Resizing is live — the same running process, no restart, reflowing between
+wide, standard, and compact as the window changes. Every width below shows a
+*complete* page; the layout condenses (two NICs per row, CPU clusters onto
+one line) rather than clipping anything away:
+
+![Live terminal resize across density tiers](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/spark-smi-resize.gif)
+
 If a tier's content still doesn't fit the available height, things degrade
 further in this order: sparklines drop first, then the memory legend row,
 then NIC rows collapse into a single summary line.
@@ -414,6 +421,15 @@ every thermal zone, NVMe SMART, and the `spbm` power rails with their knobs.
 fleet summary and per-node totals in the section headers.
 
 ![Page 3 cluster](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page3-cluster.png)
+
+Nothing about that view is DGX-specific. Here is the same page across a
+deliberately mismatched fleet — an x86_64 AMD EPYC server with no usable
+NVIDIA driver alongside two aarch64 Sparks — 72 cores and 998 GiB summed
+across three machines, ConnectX-4 and ConnectX-7 on the same fabric row, and
+a GPU section that counts `1× RTX 3090 · 2× GB10` rather than assuming
+they're all alike:
+
+![Heterogeneous 3-node cluster](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/cluster-3node-heterogeneous.png)
 
 **Page 4 — Fabric validation.** Four rails driven concurrently, charted live,
 with ASIC temperature tracked across the run and an all-pairs
@@ -663,6 +679,9 @@ all fixed in 4.0 — see the [changelog](CHANGELOG.md).
 ## About
 
 Built by [chappa-ai-llc](https://github.com/chappa-ai-llc) — a solo homelab project born out of frustration with existing tools on novel hardware.
+
+Full release history in the [changelog](CHANGELOG.md). Bugs and feature
+requests go to [GitHub Issues](https://github.com/chappa-ai-llc/spark-smi/issues).
 
 If this saved you time, a ⭐ on the repo is appreciated.
 
