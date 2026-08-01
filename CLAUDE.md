@@ -15,9 +15,20 @@ python spark-smi.py -l            # live mode: curses TUI, 1s refresh (q=quit, t
 python spark-smi.py -n 2 -l       # live mode at a 2s refresh rate instead of the 1s default
 python spark-smi.py --page 2      # snapshot the advanced page instead of the overview
 python spark-smi.py --ascii       # force plain-ASCII bars/frames regardless of terminal detection
+python spark-smi.py --theme nord  # one of 10 themes; `c` cycles them in live mode
+python spark-smi.py --serve       # read-only sample agent on :8817 (GET /sample, /healthz)
+python spark-smi.py -l --cluster a,b,c   # pages 3 (fleet) and 4 (fabric tests) need this
+python spark-smi.py --json        # one sample as JSON to stdout, then exit
 ```
 
-There are no tests and no linter configured. Packaging is setuptools via `pyproject.toml`; the pip entry point is `spark-smi = spark_smi.__main__:main`.
+There are no tests and no linter configured — verification is by rendering
+against real hardware over ssh (see `scratchpad/`, gitignored, for the
+deploy/record helpers). Packaging is setuptools via `pyproject.toml`; the pip
+entry point is `spark-smi = spark_smi.__main__:main`.
+
+Note for anything user-facing: the DGX Spark's own Ubuntu 24.04 marks system
+Python externally managed (PEP 668), so a bare `pip install spark-smi` is
+REFUSED there. pipx or a venv is the documented path.
 
 ## Architecture
 
@@ -50,6 +61,21 @@ spark_smi/
                   GPU/knob, pending value, confirm arm, toast) and its methods
                   are pure state transitions; apply_knob() is the only thing
                   that ever writes hardware, and only after KnobUI.confirm_yes().
+  cluster.py      Cluster mode: the to_wire/from_wire sample codec (psutil
+                  named tuples don't survive JSON), the read-only --serve
+                  HTTP agent (GET /sample, GET /healthz, optional
+                  $SPARK_SMI_TOKEN), and ClusterAggregator — a background
+                  poller the render loop never blocks on. Also local-domain
+                  inference (reverse-PTR first) so short cluster hostnames
+                  resolve. Has NO code path that writes anything.
+  fabtest.py      Page-4 fabric validation: rail discovery + subnet-matched
+                  src<->dst pairing, FabricEngine (drives ib_write_bw/-lat
+                  over BatchMode ssh, or iperf3 where there's no RDMA
+                  device), FabTestUI (the same pure-state-transition +
+                  confirm-arm shape knobs.py uses), and results persisted to
+                  ~/.local/share/spark-smi/fabric-tests.jsonl. Measurements
+                  come from HCA counters sampled during the run (median of
+                  steady state), never from perftest's own summary line.
   app.py          main(), hand-rolled CLI parsing, the State class (owns the
                   long-lived collectors + history ring buffers), the snapshot
                   render path, and the curses main_loop/key handling. The
