@@ -30,6 +30,16 @@ Note for anything user-facing: the DGX Spark's own Ubuntu 24.04 marks system
 Python externally managed (PEP 668), so a bare `pip install spark-smi` is
 REFUSED there. pipx or a venv is the documented path.
 
+## BUILD board
+
+The board lives in the BUILD office (`https://build.chappa.ai/p/spark-smi`).
+This repo is public and the board is owner-only, with lab hostnames in its
+cards, so `.build-board.json` points the client at a gitignored source,
+`scratchpad/board.json`. Never commit that file. A fresh clone won't have it:
+`build_board.py push` then stops with an error instead of emptying the board.
+Rebuild it from the office's copy first, because a push replaces the phases and
+retires any file card the source leaves out.
+
 ## Architecture
 
 2.0 replaced the original single-file `_core.py` with a small package. Each
