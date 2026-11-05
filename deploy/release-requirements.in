@@ -1,0 +1,6 @@
+# What deploy/release.py installs to build and publish a release.
+# Regenerate the hashes after changing this file (see CLAUDE.md, "Releasing").
+build
+setuptools
+twine
+wheel
