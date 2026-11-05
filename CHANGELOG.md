@@ -4,6 +4,17 @@ All notable changes to SPARK-SMI are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `deploy/release.sh`: publishes a tagged release to PyPI and GitHub, with its
+  build tools pinned by hash. Its BUILD office recipe is still being set up (#6).
+
+### Fixed
+
+- README: the Python badge said 3.6+; the package requires 3.8+.
+
 ## [4.0.0] — 2026-08-01
 
 A ground-up rebuild. 3.x was a single-file dashboard written against one

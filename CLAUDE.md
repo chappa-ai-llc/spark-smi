@@ -21,14 +21,45 @@ python spark-smi.py -l --cluster a,b,c   # pages 3 (fleet) and 4 (fabric tests) 
 python spark-smi.py --json        # one sample as JSON to stdout, then exit
 ```
 
-There are no tests and no linter configured — verification is by rendering
-against real hardware over ssh (see `scratchpad/`, gitignored, for the
-deploy/record helpers). Packaging is setuptools via `pyproject.toml`; the pip
-entry point is `spark-smi = spark_smi.__main__:main`.
+The monitor has no tests and no linter is configured — verification is by
+rendering against real hardware over ssh (see `scratchpad/`, gitignored, for
+the deploy/record helpers). Only the release script has unit tests:
+`python3 -m unittest discover -s deploy`. Packaging is setuptools via
+`pyproject.toml`; the pip entry point is `spark-smi = spark_smi.__main__:main`.
 
 Note for anything user-facing: the DGX Spark's own Ubuntu 24.04 marks system
 Python externally managed (PEP 668), so a bare `pip install spark-smi` is
 REFUSED there. pipx or a venv is the documented path.
+
+## Releasing
+
+A `vX.Y.Z` tag on `main` is the release: the BUILD office runs
+`deploy/release.sh X.Y.Z` once per tag. The recipe and PyPI token are still
+being set up (#6), so until that closes a tag publishes nothing.
+
+1. Bump `VERSION` in `spark_smi/__init__.py`, `version` in `pyproject.toml` and
+   the README badge. Add `## [X.Y.Z]` and its link line to `CHANGELOG.md`.
+   The script stops before the upload if any of these disagree with the tag.
+2. Merge to `main`, because the README's images load from `main`.
+3. Check it, tag it, push the tag:
+
+   ```bash
+   TMPDIR=/scratch/tmp deploy/release.sh X.Y.Z --dry-run
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   ```
+
+The run builds in a throwaway venv, uploads with `twine`, publishes the GitHub
+release, then confirms PyPI holds the same bytes. PyPI versions are immutable:
+after a failed run, fix it and tag a newer version, never re-tag.
+
+`deploy/release-requirements.txt` pins the build tools by hash. After changing
+the `.in` file, regenerate it from `deploy/` with pip-tools, on the same Python
+minor version as the releaser:
+
+```bash
+pip-compile --generate-hashes --allow-unsafe --strip-extras --no-emit-index-url --output-file release-requirements.txt release-requirements.in
+```
 
 ## BUILD board
 
