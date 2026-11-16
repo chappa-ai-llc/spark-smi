@@ -15,6 +15,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `requirements.txt` pins psutil 7.2.2 and nvidia-ml-py 13.615.71 by hash,
+  generated from the new `requirements.in`, so advisory scanners can check
+  them (#5). `pip install spark-smi` still takes the newest versions.
 - Package metadata declares the license as the SPDX expression `MIT` with
   `license-files`, replacing the license table and classifier that setuptools
   stops accepting in February 2027. Building from source now needs

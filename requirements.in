@@ -1,0 +1,5 @@
+# What a from-source install needs (README, "From source"). requirements.txt
+# pins these by hash so advisory scanners can check them; pyproject.toml keeps
+# open ranges for pip users. Regenerate after changing this file (CLAUDE.md).
+psutil>=5.9.0
+nvidia-ml-py>=11.515.0

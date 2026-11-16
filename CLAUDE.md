@@ -9,7 +9,7 @@ SPARK-SMI is a terminal system monitor (TUI) born on the NVIDIA DGX Spark (GB10 
 ## Commands
 
 ```bash
-pip install -r requirements.txt   # deps: psutil, nvidia-ml-py
+pip install -r requirements.txt   # deps: psutil, nvidia-ml-py, pinned by hash
 python spark-smi.py               # snapshot mode: render once, print ANSI to stdout
 python spark-smi.py -l            # live mode: curses TUI, 1s refresh (q=quit, t=°C/°F, u=GiB/GB, ?=help)
 python spark-smi.py -n 2 -l       # live mode at a 2s refresh rate instead of the 1s default
@@ -65,6 +65,11 @@ minor version as the releaser (3.13):
 ```bash
 pip-compile --generate-hashes --allow-unsafe --strip-extras --no-emit-index-url --output-file release-requirements.txt release-requirements.in
 ```
+
+`requirements.txt` pins the runtime dependencies by hash for from-source
+installs and for advisory scanners; `pyproject.toml` keeps them open for pip
+users. After changing `requirements.in`, regenerate it the same way from the
+repo root (drop `--allow-unsafe`, and use `requirements.in`/`requirements.txt`).
 
 ## BUILD board
 
