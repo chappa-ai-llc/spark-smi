@@ -34,8 +34,9 @@ REFUSED there. pipx or a venv is the documented path.
 ## Releasing
 
 A `vX.Y.Z` tag on `main` is the release: the BUILD office runs
-`deploy/release.sh X.Y.Z` once per tag. The recipe and PyPI token are still
-being set up (#6), so until that closes a tag publishes nothing.
+`deploy/release.sh X.Y.Z` once per tag (recipe `spark-smi`, live since office
+0.138.4). The run fails before uploading until the owner enters the PyPI token
+on the office's Secrets page (family `rs_spark_smi_pypi_token_v1`, issue #6).
 
 1. Bump `VERSION` in `spark_smi/__init__.py`, `version` in `pyproject.toml` and
    the README badge. Add `## [X.Y.Z]` and its link line to `CHANGELOG.md`.
@@ -49,13 +50,17 @@ being set up (#6), so until that closes a tag publishes nothing.
    git push origin vX.Y.Z
    ```
 
-The run builds in a throwaway venv, uploads with `twine`, publishes the GitHub
-release, then confirms PyPI holds the same bytes. PyPI versions are immutable:
-after a failed run, fix it and tag a newer version, never re-tag.
+The run builds in a throwaway venv, checks the metadata, uploads over PyPI's
+upload API with the standard library, publishes the GitHub release, then
+confirms PyPI holds the same bytes. It does not use `twine`: the releaser's
+temp directory cannot execute files, so twine's native dependencies (`nh3`,
+`cryptography`) cannot load there. Keep the lock pure Python for the same
+reason. PyPI versions are immutable: after a failed run, fix it and tag a
+newer version, never re-tag.
 
 `deploy/release-requirements.txt` pins the build tools by hash. After changing
 the `.in` file, regenerate it from `deploy/` with pip-tools, on the same Python
-minor version as the releaser:
+minor version as the releaser (3.13):
 
 ```bash
 pip-compile --generate-hashes --allow-unsafe --strip-extras --no-emit-index-url --output-file release-requirements.txt release-requirements.in
