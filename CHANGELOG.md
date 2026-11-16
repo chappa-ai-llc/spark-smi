@@ -26,6 +26,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - README: the Python badge said 3.6+; the package requires 3.8+.
+- `LICENSE` names its copyright holder, chappa-ai-llc, in place of a
+  leftover placeholder (#7).
 
 ## [4.0.0] — 2026-08-01
 
