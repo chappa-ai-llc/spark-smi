@@ -9,7 +9,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - `deploy/release.sh`: publishes a tagged release to PyPI and GitHub, with its
-  build tools pinned by hash. Its BUILD office recipe is still being set up (#6).
+  build tools pinned by hash. The BUILD office runs it on each `vX.Y.Z` tag.
+  It uploads with the standard library rather than `twine`, so it runs where
+  native extensions cannot load (#6).
+
+### Changed
+
+- Package metadata declares the license as the SPDX expression `MIT` with
+  `license-files`, replacing the license table and classifier that setuptools
+  stops accepting in February 2027. Building from source now needs
+  setuptools 77 or newer (pip fetches it on its own).
 
 ### Fixed
 
