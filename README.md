@@ -547,6 +547,10 @@ python3 -m venv venv
 ./venv/bin/python3 spark-smi.py -l
 ```
 
+`requirements.txt` pins exact versions with their hashes, and pip refuses any
+download that doesn't match. A `pip install spark-smi` from PyPI takes the
+newest versions instead.
+
 ### Upgrading
 
 ```bash
