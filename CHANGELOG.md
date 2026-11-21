@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.0.1] — 2026-11-21
+
+A maintenance release: releases now publish from the BUILD office, and the
+license and dependency metadata are corrected.
+
 ### Added
 
 - `deploy/release.sh`: publishes a tagged release to PyPI and GitHub, with its
@@ -28,6 +33,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - README: the Python badge said 3.6+; the package requires 3.8+.
 - `LICENSE` names its copyright holder, chappa-ai-llc, in place of a
   leftover placeholder (#7).
+
+### Security
+
+- Security pass: no known advisory affects any pinned package, checked
+  against OSV.dev on 2026-11-21. That covers the runtime dependencies
+  (psutil 7.2.2, nvidia-ml-py 13.615.71) and the release tools (build 1.6.1,
+  setuptools 84.2.1, wheel 0.48.0, packaging 26.3, pyproject-hooks 1.3.3).
+  No Java anywhere in the package (CVE-2026-114938 does not apply).
+- The release tools' lock is renamed `deploy/requirements-release.txt`
+  (was `release-requirements.txt`), so the office's nightly dependency
+  scan, which reads `requirements*.txt`, now covers it too.
 
 ## [4.0.0] — 2026-08-01
 
@@ -162,5 +178,6 @@ is still there, on page 1.
 
 - Initial public release.
 
+[4.0.1]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.0.1
 [4.0.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.0.0
 [3.6.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v3.6.0

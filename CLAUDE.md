@@ -35,10 +35,12 @@ REFUSED there. pipx or a venv is the documented path.
 
 A `vX.Y.Z` tag on `main` is the release: the BUILD office runs
 `deploy/release.sh X.Y.Z` once per tag (recipe `spark-smi`, live since office
-0.138.4). The run fails before uploading until the owner enters the PyPI token
-on the office's Secrets page (family `rs_spark_smi_pypi_token_v1`, issue #6).
+0.138.4). The run reads the PyPI token from the office's Secrets page
+(family `rs_spark_smi_pypi_token`, stored 2026-11-21, issue #6) through
+`PYPI_TOKEN_FILE`.
 
-1. Bump `VERSION` in `spark_smi/__init__.py`, `version` in `pyproject.toml` and
+1. Bump `VERSION` in `spark_smi/__init__.py` (and the fallback literals in
+   `app.py`, `pages.py` and `cluster.py`), `version` in `pyproject.toml` and
    the README badge. Add `## [X.Y.Z]` and its link line to `CHANGELOG.md`.
    The script stops before the upload if any of these disagree with the tag.
 2. Merge to `main`, because the README's images load from `main`.
@@ -58,12 +60,12 @@ temp directory cannot execute files, so twine's native dependencies (`nh3`,
 reason. PyPI versions are immutable: after a failed run, fix it and tag a
 newer version, never re-tag.
 
-`deploy/release-requirements.txt` pins the build tools by hash. After changing
+`deploy/requirements-release.txt` pins the build tools by hash. After changing
 the `.in` file, regenerate it from `deploy/` with pip-tools, on the same Python
 minor version as the releaser (3.13):
 
 ```bash
-pip-compile --generate-hashes --allow-unsafe --strip-extras --no-emit-index-url --output-file release-requirements.txt release-requirements.in
+pip-compile --generate-hashes --allow-unsafe --strip-extras --no-emit-index-url --output-file requirements-release.txt requirements-release.in
 ```
 
 `requirements.txt` pins the runtime dependencies by hash for from-source
