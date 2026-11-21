@@ -41,7 +41,7 @@ import zipfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-LOCK = REPO / "deploy" / "release-requirements.txt"
+LOCK = REPO / "deploy" / "requirements-release.txt"
 PROJECT = "spark-smi"
 GITHUB_REPO = os.environ.get("RELEASE_GITHUB_REPO", "chappa-ai-llc/spark-smi")
 PYPI_UPLOAD_URL = os.environ.get("RELEASE_PYPI_UPLOAD_URL",
