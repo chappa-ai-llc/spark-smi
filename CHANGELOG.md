@@ -4,6 +4,15 @@ All notable changes to SPARK-SMI are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- README images re-captured with spark-smi 4.2.0 (mirrored history, graded
+  graphs, measured nord theme): the demo and resize GIFs and the page 1, 2
+  and 3 screenshots, pages 1 and 2 written by `--shot`, page 3 by the `S`
+  key.
+
 ## [4.2.0] — 2026-11-24
 
 A visual upgrade: mirrored traffic history, graded graphs, themes measured
