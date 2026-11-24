@@ -252,8 +252,9 @@ info is cached after first fetch to avoid shelling out every tick.
     **4-byte-word units** (IB spec, so ×4) and, unlike kernel netdev stats,
     they count RoCE/RDMA traffic (NCCL, GPUDirect) that bypasses the CPU —
     and the netdev counters; `NetCollector._rates()` takes the larger delta
-    per direction, because some driver/firmware builds leave every HCA
-    counter at 0 (issue #10). `caps["net"]["rdma_counting"]` turns True once
+    per direction, because some driver/firmware builds count only RDMA in
+    the HCA counters, never kernel traffic (issues #10, #11; mixed traffic
+    on one port then reads as the larger, not the sum). `caps["net"]["rdma_counting"]` turns True once
     any HCA counter reads non-zero; until then page 1's caption says only
     kernel traffic is counted. Everything else uses psutil netdev counters.
     Negative deltas (counter reset on driver reload) clamp to 0. Rate math uses its own

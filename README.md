@@ -217,19 +217,23 @@ RDMA device is present: `/sys/class/infiniband/<hca>/ports/<n>/counters/`
 exposes `port_rcv_data`/`port_xmit_data` in **4-byte-word units** (per the
 InfiniBand spec — multiplied by 4 to get bytes), and these count RoCE traffic
 that the kernel netdev stats miss. Every tick, each direction takes the
-larger of the HCA delta and the netdev delta: a working HCA counter also
-counts kernel traffic, so it wins, and a stuck one cannot hide it. Every
+larger of the HCA delta and the netdev delta, so traffic shows whichever
+counter sees it. Every
 other NIC uses the normal psutil netdev counters. RX and TX are kept as
 separate rates throughout (never summed into one "throughput" number), and
 a counter reset from a driver reload is clamped to zero instead of showing a
 giant negative-delta spike.
 
-Some driver and firmware builds leave every HCA counter at 0 (seen on a DGX
-Spark with kernel `7.0.0-1025-nvidia` and ConnectX-7 firmware 28.50). Until
-one of them moves, the NETWORK panel's caption reads **HCA counters read 0,
-kernel traffic only**: TCP traffic (iperf3, ssh, NFS) still shows, but RDMA
-traffic that bypasses the kernel cannot be counted, so an NCCL or
-`ib_write_bw` run will read low or zero there and on page 4.
+On some driver and firmware builds the HCA counters count only RDMA traffic,
+never traffic sent through the kernel. On a DGX Spark with kernel
+`7.0.0-1025-nvidia` and ConnectX-7 firmware 28.50, a 109 Gb/s iperf3 run
+left them at 0, while a 109 Gb/s `ib_write_bw` run raised them by the same
+byte count as the NIC's physical-port counter. There, TCP traffic (iperf3,
+ssh, NFS) shows through the netdev counter and RDMA traffic through the HCA
+counter, and page 4's RDMA tests measure correctly. TCP and RDMA on one port
+in the same second read as the larger of the two, not the sum (#11). Until
+an HCA counter has moved since boot, the NETWORK panel's caption reads
+**HCA counters read 0, kernel traffic only**.
 
 Page 2's NIC panel goes further: per-PF congestion/ECN counters (CNP sent/
 handled, ECN marks, buffer discards) straight from the same `hw_counters`
