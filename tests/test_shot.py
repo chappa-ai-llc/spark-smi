@@ -71,6 +71,11 @@ class SvgTest(unittest.TestCase):
         d = [p.get("d") for p in root.iter(NS + "path")][0]
         self.assertEqual(d.count("h0"), 9)  # 8 dots + 1 dot, blank cell adds none
 
+    def test_tree_markers_are_drawn_not_typed(self):
+        # page 5: picture fonts may lack these, so they are shapes
+        root = parse(shot.grid_to_svg(grid_of(["▾▶"])))
+        self.assertEqual(len(list(root.iter(NS + "text"))), 0)
+
     def test_empty_grid(self):
         root = parse(shot.grid_to_svg(term.VirtualCurses(size=(40, 8)).grid))
         self.assertEqual(root.get("width"), str(shot.PAD * 2))

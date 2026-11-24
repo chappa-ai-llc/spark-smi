@@ -642,6 +642,14 @@ bandwidth/latency matrix. Between two Sparks it measured about 53 Gb/s per
 rail: four rails sharing one PCIe gen5 ×4 uplink, which is exactly the kind
 of ceiling this page exists to expose.
 
+**Page 5 — GPU tasks.** Every GPU process under its GPU, grouped by where it
+runs: a tmux server, a docker container, the desktop's terminal. The eGPU
+and the GB10 each get their own tree. Captured with 4.3 by `--shot`; account
+names, the model path and the container name were replaced with
+`[markers]` before publishing.
+
+![Page 5 GPU tasks](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page5-tasks.png)
+
 ---
 
 ## Prerequisites

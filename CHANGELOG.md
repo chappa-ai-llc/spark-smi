@@ -22,6 +22,8 @@ Page 5: a GPU task manager.
   first; any other key cancels. Snapshot mode is read-only, and page 5
   always shows the local machine, also in cluster mode (#4).
 - Unit tests for page 5's session grouping, tree order and confirm gate.
+- README: a page-5 screenshot. `--shot` draws page 5's `▾` GPU markers as
+  shapes, like the other markers, so pictures don't depend on the font.
 
 ### Fixed
 
