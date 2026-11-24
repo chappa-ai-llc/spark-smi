@@ -2,7 +2,7 @@
 
 > A terminal-based system monitor (TUI) built for **NVIDIA Grace Blackwell (GB10)** and hybrid ARM architectures — because `nvidia-smi` alone doesn't tell the full story.
 
-![Version](https://img.shields.io/badge/version-4.0.4-blue)
+![Version](https://img.shields.io/badge/version-4.1.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8%2B-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Linux%20aarch64-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -328,6 +328,10 @@ spark-smi [options]
                    $SPARK_SMI_TOKEN_FILE (or, older setups, $SPARK_SMI_TOKEN)
                    is required as the X-Spark-Token header on /sample
   --serve-verbose  log one line per request to stderr (--serve only)
+  --node-name NAME show NAME instead of this machine's hostname: in the
+                   header, in --json and --serve's payload, and so on every
+                   cluster page (or $SPARK_SMI_NODE_NAME; 1-63 letters,
+                   digits, '-' or '_')
   --cluster HOSTS  cluster mode: page 3 shows every node in HOSTS (comma-
                    separated "host"/"host:port"/"ssh:host" entries, or
                    "@file" -- one entry per line, # comments). Bare
@@ -371,6 +375,30 @@ spark-smi --cluster node-1,node-2 --page 3            # one-shot snapshot (2s po
 - A shared token, if set, is sent as the `X-Spark-Token` header on every
   poll and required by `--serve` on the polled side. Both ends read it the
   same way.
+
+### Display names
+
+Every screen shows the machine's hostname: page 1's header, and each node's
+row on pages 3 and 4 (taken from the `node` field of its `/sample`). To show
+another name, for example before sharing a screenshot, set one per node:
+
+```bash
+SPARK_SMI_NODE_NAME=node-1 spark-smi --serve
+spark-smi -l --node-name node-1 --cluster node-1,node-2
+```
+
+- `--node-name` wins over `$SPARK_SMI_NODE_NAME`; with neither, the hostname
+  shows as before.
+- A name is 1-63 letters, digits, `-` or `_`, starting and ending with a
+  letter or digit. Anything else stops spark-smi with the reason.
+- Set it on the polled node's `--serve` too, since that node's payload
+  carries the name the watching node shows. An `ssh:host` member runs
+  `spark-smi --json` over ssh, which sees only that login's environment.
+- Only the display changes. The cluster list still uses real host names, the
+  local entry is still found by the real hostname, and fabric tests still
+  connect to the hosts in the list.
+- Fabric results record the names shown at the time of the run, so a
+  renamed node's earlier runs keep its old name.
 
 ### Shared token
 
