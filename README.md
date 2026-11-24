@@ -2,7 +2,7 @@
 
 > A terminal-based system monitor (TUI) built for **NVIDIA Grace Blackwell (GB10)** and hybrid ARM architectures — because `nvidia-smi` alone doesn't tell the full story.
 
-![Version](https://img.shields.io/badge/version-4.3.0-blue)
+![Version](https://img.shields.io/badge/version-4.3.1-blue)
 ![Python](https://img.shields.io/badge/python-3.8%2B-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Linux%20aarch64-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -638,9 +638,12 @@ alike.
 
 **Page 4 — Fabric validation.** Four rails driven concurrently, charted live,
 with ASIC temperature tracked across the run and an all-pairs
-bandwidth/latency matrix. Between two Sparks it measured about 53 Gb/s per
-rail: four rails sharing one PCIe gen5 ×4 uplink, which is exactly the kind
-of ceiling this page exists to expose.
+bandwidth/latency matrix. Between two Sparks it measured about 55 Gb/s per
+rail with a 2.5 µs round trip: four rails sharing one PCIe gen5 ×4 uplink,
+which is exactly the kind of ceiling this page exists to expose. Captured
+with 4.3 after a 10-second all-pairs sweep, saved with the live `S` key.
+
+![Page 4 fabric validation](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page4-fabric.png)
 
 **Page 5 — GPU tasks.** Every GPU process under its GPU, grouped by where it
 runs: a tmux server, a docker container, the desktop's terminal. The eGPU

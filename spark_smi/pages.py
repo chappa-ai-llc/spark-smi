@@ -17,7 +17,7 @@ from . import node
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "4.3.0"
+    VERSION = "4.3.1"
 
 # The header shows the major.minor series ("4.0"). Derived from VERSION rather
 # than written out, because a hardcoded literal here silently drifted a whole
@@ -336,7 +336,7 @@ def _build_footer(x0, width, y, driver, cuda, rate, has_nvml, extra_keys=None, k
     explanation."""
     if remote_note:
         p = panels.Panel(y, x0, width, kind="plain")
-        p.rows.append(([(" q quit · 1 2 3 page · esc back to cluster", 9), (f"  {remote_note}", 6)], []))
+        p.rows.append(([(" q quit · 1 2 3 5 page · esc back to cluster", 9), (f"  {remote_note}", 6)], []))
         return p
 
     if knob_ui and (knob_ui.get("confirming") or knob_ui.get("toast")):
@@ -372,7 +372,7 @@ def _build_footer(x0, width, y, driver, cuda, rate, has_nvml, extra_keys=None, k
         # hints themselves are abbreviated/dropped -- "knobs absent from
         # the registry grey out or drop from the bar" is about registry
         # gating (extra_keys already reflects that), not width pressure.
-        base = " q quit · 1 2 page"
+        base = " q quit · 1 2 5 page"
         short_keys = extra_keys.replace("pwr limit", "pwr").replace("clock locks", "clk")
         variants = [
             base + " · t °C/°F · u GiB/GB · c colors" + extra_keys,
@@ -382,9 +382,9 @@ def _build_footer(x0, width, y, driver, cuda, rate, has_nvml, extra_keys=None, k
         ]
     else:
         variants = [
-            " q quit · 1 2 page · t °C/°F · u GiB/GB · c colors · n active NICs · s sort · ? help",
-            " q quit · 1 2 page · t °C/°F · u GiB/GB · c colors · n NICs",
-            " q quit · 1 2 page · t temp · u units",
+            " q quit · 1 2 5 page · t °C/°F · u GiB/GB · c colors · n active NICs · s sort · ? help",
+            " q quit · 1 2 5 page · t °C/°F · u GiB/GB · c colors · n NICs",
+            " q quit · 1 2 5 page · t temp · u units",
         ]
     src = "NVML" if has_nvml else "CLI"
     # Same no-sensor-no-row rule the panels follow: on a box with no NVIDIA
@@ -2625,7 +2625,7 @@ def build_page3(cluster_ctx, tier, width, x0=0, height=None, has_perf=False):
         alerts_p = _build_alerts_panel(y, x0, width, views, metrics, kind="mid")
         out.append(alerts_p); y += alerts_p.total_height + 1
 
-    page_nums = "1 2 3 4" if has_perf else "1 2 3"
+    page_nums = "1 2 3 4 5" if has_perf else "1 2 3 5"
     if fleet_mode:
         keys = " q quit · ↑↓ select · enter node detail · a alerts only · o sort col · c colors"
     else:
@@ -3038,7 +3038,7 @@ def build_page4(fab_ctx, tier, width, x0=0, height=None):
         out.append(p)
         y += p.total_height + 1
         fp = panels.Panel(y, x0, width, kind="plain")
-        fp.rows.append(([(" q quit · 1 2 3 4 page", 9)], []))
+        fp.rows.append(([(" q quit · 1 2 3 4 5 page", 9)], []))
         out.append(fp)
         return out
 
@@ -3068,7 +3068,7 @@ def build_page4(fab_ctx, tier, width, x0=0, height=None):
     matrix_panel = _build_matrix_panel(y, x0, width, fab_ctx, worst_only=matrix_worst_only)
     out.append(matrix_panel); y += matrix_panel.total_height + 1
 
-    keys = " space start/stop · m mode · d duration · ↑↓ pair · 1-4 page"
+    keys = " space start/stop · m mode · d duration · ↑↓ pair · 1-5 page"
     fab = fab_ctx.get("fab")
     if fab and fab.get("toast"):
         text, slot = fab["toast"]

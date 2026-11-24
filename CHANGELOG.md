@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.3.1] — 2026-11-24
+
+### Fixed
+
+- Footers name page 5 where its key works: pages 1 and 2 (`1 2 5 page`),
+  page 3, a node drilldown, and page 4 (`1-5 page`).
+- `--shot` and the `S` key draw page 4's `◂ ▸` mode arrows as shapes, so
+  pictures don't show empty boxes where the font lacks them.
+
+### Changed
+
+- README: a page-4 screenshot (two Sparks, 10-second all-pairs sweep, about
+  55 Gb/s per rail at 2.5 µs) (#9).
+
 ## [4.3.0] — 2026-11-24
 
 Page 5: a GPU task manager.
@@ -358,6 +372,7 @@ is still there, on page 1.
 
 - Initial public release.
 
+[4.3.1]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.3.1
 [4.3.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.3.0
 [4.2.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.2.0
 [4.1.1]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.1.1

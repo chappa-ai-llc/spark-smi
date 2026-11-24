@@ -73,7 +73,7 @@ class SvgTest(unittest.TestCase):
 
     def test_tree_markers_are_drawn_not_typed(self):
         # page 5: picture fonts may lack these, so they are shapes
-        root = parse(shot.grid_to_svg(grid_of(["▾▶"])))
+        root = parse(shot.grid_to_svg(grid_of(["▾▶◂▸"])))
         self.assertEqual(len(list(root.iter(NS + "text"))), 0)
 
     def test_empty_grid(self):
