@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.0.2] — 2026-11-24
+
+A hardening release: the cluster shared secret can come from a file.
+
+### Added
+
+- `$SPARK_SMI_TOKEN_FILE` names a file holding the `--serve`/`--cluster`
+  shared secret, such as a Docker secret under `/run/secrets` or a systemd
+  `LoadCredential` file. Trailing whitespace is stripped (#8).
+
+### Changed
+
+- `--serve` and `--cluster` refuse to start when `$SPARK_SMI_TOKEN_FILE` is
+  set but unreadable or empty, or when both token variables are set, instead
+  of running without the token. `$SPARK_SMI_TOKEN` still works; `--serve`
+  then suggests moving the token to a file (#8).
+
 ## [4.0.1] — 2026-11-21
 
 A maintenance release: releases now publish from the BUILD office, and the
@@ -178,6 +195,7 @@ is still there, on page 1.
 
 - Initial public release.
 
+[4.0.2]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.0.2
 [4.0.1]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.0.1
 [4.0.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.0.0
 [3.6.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v3.6.0

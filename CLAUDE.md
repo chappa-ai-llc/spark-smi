@@ -21,10 +21,11 @@ python spark-smi.py -l --cluster a,b,c   # pages 3 (fleet) and 4 (fabric tests) 
 python spark-smi.py --json        # one sample as JSON to stdout, then exit
 ```
 
-The monitor has no tests and no linter is configured — verification is by
+The monitor's rendering has no tests and no linter is configured — verification is by
 rendering against real hardware over ssh (see `scratchpad/`, gitignored, for
-the deploy/record helpers). Only the release script has unit tests:
-`python3 -m unittest discover -s deploy`. Packaging is setuptools via
+the deploy/record helpers). Unit tests cover only the release script and
+the cluster token reader: `python3 -m unittest discover -s deploy` and
+`python3 -m unittest discover -s tests`. Packaging is setuptools via
 `pyproject.toml`; the pip entry point is `spark-smi = spark_smi.__main__:main`.
 
 Note for anything user-facing: the DGX Spark's own Ubuntu 24.04 marks system
@@ -117,6 +118,7 @@ spark_smi/
   cluster.py      Cluster mode: the to_wire/from_wire sample codec (psutil
                   named tuples don't survive JSON), the read-only --serve
                   HTTP agent (GET /sample, GET /healthz, optional
+                  token from read_token(): $SPARK_SMI_TOKEN_FILE, else
                   $SPARK_SMI_TOKEN), and ClusterAggregator — a background
                   poller the render loop never blocks on. Also local-domain
                   inference (reverse-PTR first) so short cluster hostnames

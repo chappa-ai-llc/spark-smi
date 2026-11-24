@@ -20,7 +20,7 @@ from . import term
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "4.0.1"
+    VERSION = "4.0.2"
 DEFAULT_REFRESH_RATE = 1.0
 HIST_LEN = 60
 
@@ -42,8 +42,9 @@ Usage: spark-smi [options]
   --ascii          force plain-ASCII bars/frames (no UTF-8 box drawing)
   --json           print one sample as JSON (+ node/model/version/ts) and exit
   --serve [PORT]   read-only HTTP sample server (default port {cluster.DEFAULT_PORT});
-                   GET /sample, GET /healthz. $SPARK_SMI_TOKEN, if set, is
-                   required as the X-Spark-Token header on /sample
+                   GET /sample, GET /healthz. A token in the file named by
+                   $SPARK_SMI_TOKEN_FILE (or, older setups, $SPARK_SMI_TOKEN)
+                   is required as the X-Spark-Token header on /sample
   --serve-verbose  log one line per request to stderr (--serve only)
   --cluster HOSTS  cluster mode: page 3 shows every node in HOSTS (comma-
                    separated "host"/"host:port"/"ssh:host" entries, or
@@ -796,6 +797,16 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
             time.sleep(0.05)
 
 
+
+def _token_or_exit(flag):
+    """cluster.read_token(), exiting with the reason when the operator asked
+    for a token that cannot be used -- never serve or poll without it."""
+    try:
+        return cluster.read_token()
+    except cluster.TokenError as e:
+        print(f"{flag}: {e}", file=sys.stderr)
+        sys.exit(1)
+
 def main():
     argv = sys.argv[1:]
     opts = _parse_args(argv)
@@ -834,7 +845,9 @@ def main():
     # --serve: block forever answering GET /sample + /healthz. Never reaches
     # the render paths below -- this process IS the server, nothing else.
     if opts["serve"] is not None:
-        cluster.run_server(state, port=opts["serve"], verbose=opts["serve_verbose"])
+        token, source = _token_or_exit("--serve")
+        cluster.run_server(state, port=opts["serve"], verbose=opts["serve_verbose"],
+                           token=token, token_source=source)
         return
 
     # --cluster: build the aggregator (and its ClusterUI) up front so both
@@ -851,7 +864,7 @@ def main():
         if not entries:
             print("--cluster: no hosts to poll (empty list/file)", file=sys.stderr)
             sys.exit(1)
-        token = os.environ.get("SPARK_SMI_TOKEN") or None
+        token, _source = _token_or_exit("--cluster")
         aggregator = cluster.ClusterAggregator(entries, state, rate=opts["rate"], token=token)
         cluster_ctx = {"name": cname, "aggregator": aggregator, "ui": cluster.ClusterUI()}
 

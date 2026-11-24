@@ -16,7 +16,7 @@ from . import term
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "4.0.1"
+    VERSION = "4.0.2"
 
 # The header shows the major.minor series ("4.0"). Derived from VERSION rather
 # than written out, because a hardcoded literal here silently drifted a whole

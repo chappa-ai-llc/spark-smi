@@ -30,7 +30,7 @@ from types import SimpleNamespace
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "4.0.1"
+    VERSION = "4.0.2"
 
 DEFAULT_PORT = 8817
 POLL_TIMEOUT = 0.75          # per-member urllib timeout (spec)
@@ -218,19 +218,57 @@ def _make_handler(cache, token, verbose):
     return Handler
 
 
-def run_server(state, port=DEFAULT_PORT, verbose=False, host=""):
+class TokenError(Exception):
+    """The shared secret was asked for but cannot be used (unreadable or empty
+    $SPARK_SMI_TOKEN_FILE, or both variables set). Callers exit on it rather
+    than run without the token the operator meant to require."""
+
+
+def read_token(environ=None):
+    """The cluster shared secret and where it came from, as (token, source).
+
+    $SPARK_SMI_TOKEN_FILE names a file holding the token (a Docker secret
+    under /run/secrets, a systemd LoadCredential file); trailing whitespace
+    and newlines are stripped. $SPARK_SMI_TOKEN, the token itself, still
+    works for older setups. Neither set -> (None, None). Both set, or a file
+    that cannot be read or holds nothing -> TokenError: fail closed, never
+    fall back to an open server."""
+    env = os.environ if environ is None else environ
+    path = env.get("SPARK_SMI_TOKEN_FILE") or ""
+    inline = env.get("SPARK_SMI_TOKEN") or ""
+    if path and inline:
+        raise TokenError("set $SPARK_SMI_TOKEN_FILE or $SPARK_SMI_TOKEN, not both")
+    if path:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                token = f.read().strip()
+        except (OSError, UnicodeDecodeError) as e:
+            raise TokenError(f"$SPARK_SMI_TOKEN_FILE: cannot read {path}: "
+                             f"{getattr(e, 'strerror', None) or e}")
+        if not token:
+            raise TokenError(f"$SPARK_SMI_TOKEN_FILE: {path} is empty")
+        return token, "file"
+    if inline:
+        return inline, "env"
+    return None, None
+
+
+def run_server(state, port=DEFAULT_PORT, verbose=False, host="", token=None,
+               token_source=None):
     """Blocks serving GET /sample + /healthz until Ctrl-C. Read-only: any
-    other method/path gets 404/405. Optional shared-secret auth via
-    $SPARK_SMI_TOKEN (header X-Spark-Token, constant-time compare -> 403
+    other method/path gets 404/405. Optional shared-secret auth: `token`
+    from read_token() (header X-Spark-Token, constant-time compare -> 403
     when set and missing/wrong). Logs one line per request to stderr only
     when `verbose` (--serve-verbose)."""
-    token = os.environ.get("SPARK_SMI_TOKEN") or None
     cache = _SampleCache(state)
     handler = _make_handler(cache, token, verbose)
     httpd = http.server.ThreadingHTTPServer((host, port), handler)
     httpd.daemon_threads = True
     print(f"spark-smi --serve: listening on :{port} (node {local_hostname()})"
           + (" [token required]" if token else " [no token -- open on this port]"), file=sys.stderr)
+    if token_source == "env":
+        print("spark-smi --serve: token read from $SPARK_SMI_TOKEN; prefer "
+              "$SPARK_SMI_TOKEN_FILE (a file only this user can read)", file=sys.stderr)
     try:
         httpd.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
