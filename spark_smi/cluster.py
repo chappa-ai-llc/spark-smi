@@ -32,7 +32,7 @@ from . import node
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "4.3.1"
+    VERSION = "4.4.0"
 
 DEFAULT_PORT = 8817
 POLL_TIMEOUT = 0.75          # per-member urllib timeout (spec)
@@ -646,6 +646,9 @@ class ClusterUI:
         # name (what Enter drills into).
         self.last_n = 0
         self.selected_name = None
+        # Page 3's TOPOLOGY map remembers links here, so a node that stops
+        # answering keeps its (dimmed) lines -- see topomap._merge_cache.
+        self.topo_cache = {}
 
     @property
     def sort_mode(self):

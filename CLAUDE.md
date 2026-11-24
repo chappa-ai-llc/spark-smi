@@ -27,8 +27,8 @@ The monitor's rendering has no tests and no linter is configured — verificatio
 rendering against real hardware over ssh (see `scratchpad/`, gitignored, for
 the deploy/record helpers). Unit tests cover the release script and a few
 pure pieces (cluster token reader, node names, the network counter rules,
-the ethtool netlink codec, themes, graphs, SVG shots, and page 5's session
-grouping and confirm gate): `python3 -m unittest discover -s deploy` and
+the ethtool netlink codec, themes, graphs, SVG shots, page 3's topology map,
+and page 5's session grouping and confirm gate): `python3 -m unittest discover -s deploy` and
 `python3 -m unittest discover -s tests` (the second needs psutil installed). Packaging is setuptools via
 `pyproject.toml`; the pip entry point is `spark-smi = spark_smi.__main__:main`.
 
@@ -153,6 +153,13 @@ spark_smi/
                   the knobs.py shape), and end_process()/end_group()/
                   open_group_argv() -- the only code that signals or runs
                   a session manager. Live mode only constructs TaskUI.
+  topomap.py      Page 3's TOPOLOGY map: build_graph() finds links from
+                  the nodes' nic_pf networks (ip + prefix; 2 members = a
+                  cable, 3+ = a switch bus), render() lays boxes out in one
+                  or two rows, neighbours' rails across the gaps, other
+                  links on tracks beneath, into rows of (text, slot) runs.
+                  Pure drawing; ClusterUI.topo_cache keeps a silent node's
+                  links. build_page3 calls it only with spare height.
   node.py         Node identity: hostname() (real short hostname — local-
                   member detection and fabtest's local-vs-ssh choice) and
                   display_name() (--node-name / $SPARK_SMI_NODE_NAME, else

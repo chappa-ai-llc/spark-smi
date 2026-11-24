@@ -2,7 +2,7 @@
 
 > A terminal-based system monitor (TUI) built for **NVIDIA Grace Blackwell (GB10)** and hybrid ARM architectures — because `nvidia-smi` alone doesn't tell the full story.
 
-![Version](https://img.shields.io/badge/version-4.3.1-blue)
+![Version](https://img.shields.io/badge/version-4.4.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8%2B-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Linux%20aarch64-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -83,9 +83,11 @@ live (see below).
 **Page 3 — Cluster** (`3`, needs `--cluster`): every node in the cluster on
 one screen, each section (CPU / MEMORY / GPU / FABRIC / STORAGE) stacking one
 row per node so you compare members down a column instead of tabbing between
-hosts. Up to 8 nodes it's a sections view; beyond that it becomes a compact
-fleet matrix plus an alerts panel. `↑`/`↓` selects a node and `Enter` drills
-into that node's page 1. See "Cluster mode" below.
+hosts. When the terminal has rows to spare, a TOPOLOGY map opens above them:
+each node as a box, each fabric link as a line with its live traffic. Up to
+8 nodes it's a sections view; beyond that it becomes a compact fleet matrix
+plus an alerts panel. `↑`/`↓` selects a node and `Enter` drills into that
+node's page 1. See "Cluster mode" below.
 
 **Page 4 — Fabric validation** (`4`, needs `--cluster` with 2+ members): the
 one page that *actuates*. It runs real RDMA bandwidth and latency tests
@@ -479,6 +481,11 @@ spark-smi --cluster node-1,node-2 --page 3            # one-shot snapshot (2s po
   FABRIC / STORAGE. More than 8: a FLEET matrix (one compact row per node)
   plus an ALERTS panel (unreachable · temp ≥ 80°C · CNP storm · link down ·
   disk ≥ 85%).
+- Bars and history graphs widen with the terminal; the graphs run to the
+  right edge, and the CPU, MEMORY and GPU graphs start in one column.
+- The TOPOLOGY map (sections view only) uses the rows the sections leave
+  free; in a terminal too short for it, the page is the sections alone. See
+  "Topology map" below.
 - A node that stops answering is marked stale (dim "unreachable Ns" row with
   its last-seen values) after 3× the poll interval — the render loop never
   blocks on the network; it always draws whatever the background poller last
@@ -486,6 +493,30 @@ spark-smi --cluster node-1,node-2 --page 3            # one-shot snapshot (2s po
 - A shared token, if set, is sent as the `X-Spark-Token` header on every
   poll and required by `--serve` on the polled side. Both ends read it the
   same way.
+
+### Topology map
+
+The map draws each node as a box (GPU, CPU and memory use, the hottest
+sensor, and power: the `spbm` wall input where present, otherwise the GPUs'
+draw) and each fabric link as a line between boxes.
+
+- **Links are found, not configured.** Each node reports its RDMA ports'
+  IPv4 address and prefix. Two nodes with a port on the same network are
+  cabled together; a network three or more nodes share is a switch, drawn
+  as one bus they all hang off. A node on an older version sends no prefix
+  and is read as /24.
+- **Two nodes cabled directly** sit side by side with one line per rail
+  (`p0f0`, `p0f1`, … as on page 4) and that rail's traffic each way:
+  `▸112G ◂117M` reads left to right, then right to left.
+- **More nodes** sit in a row (two rows when they don't fit). Neighbours'
+  links run across the gap between them; other links and switches run along
+  tracks beneath the boxes, labelled with their traffic.
+- **Line weight and colour follow load:** dim when idle (under 1 Mb/s),
+  graded colour when busy, heavy at half the link's speed or more; red for a
+  rail without carrier. A node that stops answering keeps its lines, dimmed,
+  labelled `no data`.
+- The selected node's box takes the accent colour, as its rows do below.
+- Nodes are mapped in name order, whatever the sections' sort.
 
 ### Display names
 
@@ -592,10 +623,11 @@ spark-smi -l --cluster node-1,node-2,node-3,node-4
 
 ## Screenshots
 
-Captured with spark-smi 4.2 on two DGX Sparks, one with an RTX 3090
-attached, in the `nord` theme, with an iperf3 run on the first ConnectX-7
-port and the node names set with `--node-name`. Pages 1 and 2 were written
-by `--shot` itself; page 3 was saved with the live `S` key.
+Captured on two DGX Sparks, one with an RTX 3090 attached, in the `nord`
+theme, with the node names set with `--node-name`: pages 1 and 2 with
+spark-smi 4.2 during an iperf3 run on the first ConnectX-7 port, written by
+`--shot` itself; page 3 with 4.4 during an `ib_write_bw` run on one rail,
+saved with the live `S` key.
 
 ### Make your own
 
@@ -624,8 +656,10 @@ every thermal zone, NVMe SMART, and the `spbm` power rails with their knobs.
 
 ![Page 2 advanced](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page2-advanced.png)
 
-**Page 3 — Cluster.** Two nodes compared down each column, with a mixed-GPU
-fleet summary and per-node totals in the section headers.
+**Page 3 — Cluster.** The TOPOLOGY map on top: two Sparks cabled directly
+over four rails, one carrying an RDMA run. Below it, the two nodes compared
+down each column, with a mixed-GPU fleet summary and per-node totals in the
+section headers.
 
 ![Page 3 cluster](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page3-cluster.png)
 

@@ -13,11 +13,12 @@ import psutil
 from . import panels
 from . import term
 from . import node
+from . import topomap
 
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "4.3.1"
+    VERSION = "4.4.0"
 
 # The header shows the major.minor series ("4.0"). Derived from VERSION rather
 # than written out, because a hardcoded literal here silently drifted a whole
@@ -76,17 +77,18 @@ class _Flow:
         return False
 
 
-def _add_graded_spark(f, history, max_cells, lead="  "):
+def _add_graded_spark(f, history, max_cells, lead="  ", cap=20):
     """Graded history graph (term.sparkline_runs, fixed 0-100% scale) plus
     its window peak, added to Flow `f` as one atomic group: the peak label
-    drops first when the row is tight, then the whole graph."""
+    drops first when the row is tight, then the whole graph. `cap` limits
+    the graph's own cells (None: as wide as the row allows)."""
     hist = [v for v in (history or []) if v is not None]
     room = min(f.room() - len(lead), max_cells)
     if room < 4 or len(hist) < 2:
         return
     label_w = 10  # " peak 100%", the widest label
     if room - label_w >= 4:
-        cells = min(room - label_w, 20)
+        cells = room - label_w if cap is None else min(room - label_w, cap)
         runs = term.sparkline_runs(hist, cells)
         if runs:
             # the peak of the samples drawn, not of the whole ring buffer;
@@ -2106,6 +2108,7 @@ def _cluster_metrics(sample):
             "percpu": percpu, "cpu_hist": cpu_hist,
             "mem_total": mem_total, "mem_used": mem_used,
             "mem_pct": (mem_used / mem_total * 100) if mem_total else 0.0,
+            "mem_hist": list(mem.get("history") or []),
             "gpu_alloc": gpu_alloc, "gpus": gpus,
             "gpu_util_max": gpu_util_max, "gpu_pwr_sum": gpu_pwr_sum,
             "nics": nics, "rx_sum": rx_sum, "tx_sum": tx_sum,
@@ -2198,6 +2201,35 @@ def _cluster_pct_bar(f, pct, width, suffix_slot=3):
 
 # --- SECTIONS mode (<=8 nodes) ------------------------------------------
 
+def _cluster_bar_w(width):
+    """Bar cells for the SECTIONS rows: 11 up to a 100-column interior, then
+    growing with the terminal (to 24) so a wide window is not left blank."""
+    inner = width - 2
+    return 11 if inner < 100 else min(24, 11 + (inner - 100) // 3)
+
+
+def _cluster_layout(width, metrics, name_w):
+    """{"bar": cells, "gcol": column} shared by the CPU, MEMORY and GPU rows
+    so their history graphs start in one column and run to the right edge."""
+    bw = _cluster_bar_w(width)
+    strip_w = max((len(term.core_strip((m or {}).get("percpu") or [])) for m in metrics), default=0)
+    lead = 2 + name_w + 1 + 2 + bw + 5
+    detail = max(2 + (strip_w + 2 if strip_w else 0) + 10 + 6,   # CPU
+                 2 + 17 + 14,                                   # MEMORY
+                 2 + 13 + 6 + 7)                                # GPU
+    return {"bar": bw, "gcol": lead + detail + 1}
+
+
+def _cluster_graph(f, history, lay):
+    """Pads Flow `f` to the shared graph column (when the row has room for
+    a useful graph there), then adds the history graph to the row's end."""
+    if lay and f.room() >= (lay["gcol"] - f.used) + 14:
+        f.add(" " * max(0, lay["gcol"] - f.used), 3)
+        _add_graded_spark(f, history, f.room(), lead="", cap=None)
+    else:
+        _add_graded_spark(f, history, 26, lead="")
+
+
 def _cluster_cpu_summary(views):
     total_cores = total_clusters = 0
     family = None
@@ -2215,7 +2247,7 @@ def _cluster_cpu_summary(views):
     return f"{total_cores} cores · {total_clusters}× {family or 'CPU'} clusters"
 
 
-def _build_cluster_cpu_section(y, x0, width, views, metrics, selected_idx, name_w, kind):
+def _build_cluster_cpu_section(y, x0, width, views, metrics, selected_idx, name_w, kind, lay=None):
     inner = width - 2
     loadavg_sum = 0.0
     have_loadavg = False
@@ -2237,19 +2269,19 @@ def _build_cluster_cpu_section(y, x0, width, views, metrics, selected_idx, name_
             f.add("— unreachable" + (f" ({why})" if why else ""), 6)
             p.add_row(_finish_row(f, 1))
             continue
-        _cluster_pct_bar(f, m["cpu_pct"], 11)
+        _cluster_pct_bar(f, m["cpu_pct"], lay["bar"] if lay else 11)
         f.add("  ", 3)
         strip = term.core_strip(m["percpu"])
         if strip:
             f.try_add(strip + "  ", 1)
         f.try_add(f"{m['cpu_ghz']:.2f} GHz  ", 3)
         f.try_add(f"{term.fmt_temp(m['cpu_temp']):<5} ", 3)
-        _add_graded_spark(f, m["cpu_hist"], 26, lead="")
+        _cluster_graph(f, m["cpu_hist"], lay)
         p.add_row(_finish_row(f, 1))
     return p
 
 
-def _build_cluster_mem_section(y, x0, width, views, metrics, selected_idx, name_w, kind):
+def _build_cluster_mem_section(y, x0, width, views, metrics, selected_idx, name_w, kind, lay=None):
     inner = width - 2
     total = sum((m or {}).get("mem_total") or 0 for m in metrics)
     used = sum((m or {}).get("mem_used") or 0 for m in metrics)
@@ -2269,7 +2301,7 @@ def _build_cluster_mem_section(y, x0, width, views, metrics, selected_idx, name_
         if gpu_alloc > 0:
             segs_spec.append((gpu_alloc / m["mem_total"], 2, "▓"))
         segs_spec.append((max(0.0, 1.0 - sum(s[0] for s in segs_spec)), 7, "░"))
-        chunks = term.seg_bar(segs_spec, 16)
+        chunks = term.seg_bar(segs_spec, lay["bar"] if lay else 16)
         lb, rb = term.bar_brackets()
         f.add(lb, 10)
         for text, slot in chunks:
@@ -2281,11 +2313,13 @@ def _build_cluster_mem_section(y, x0, width, views, metrics, selected_idx, name_
             f.try_add(f"gpu-alloc {gpu_alloc / (1024 ** 3):.1f}G", 3)
         else:
             f.try_add("gpu-alloc —", 6)
+        if m.get("mem_hist"):
+            _cluster_graph(f, m["mem_hist"], lay)
         p.add_row(_finish_row(f, 1))
     return p
 
 
-def _build_cluster_gpu_section(y, x0, width, views, metrics, selected_idx, name_w, kind):
+def _build_cluster_gpu_section(y, x0, width, views, metrics, selected_idx, name_w, kind, lay=None):
     inner = width - 2
     # Mixed fleets (eGPU on one node) need per-model counts, not
     # "3× <first GPU's name>". Strip marketing prefixes for brevity.
@@ -2314,7 +2348,7 @@ def _build_cluster_gpu_section(y, x0, width, views, metrics, selected_idx, name_
                 f.add("  ", 3)
                 f.add(_cluster_node_field(view.get("name"), name_w) + " ", 6)
             util = g.get("util", 0) or 0
-            _cluster_pct_bar(f, util, 11)
+            _cluster_pct_bar(f, util, lay["bar"] if lay else 11)
             f.add("  ", 3)
             # A discrete card allocates from its own VRAM; only a unified SoC
             # draws on the node's system RAM. Printing the node-level figure
@@ -2331,7 +2365,7 @@ def _build_cluster_gpu_section(y, x0, width, views, metrics, selected_idx, name_
                 f.try_add("alloc —  ", 6)
             f.try_add(f"{term.fmt_temp(g.get('temp')):<5} ", 3)
             f.try_add(f"{g.get('pwr_str', 'N/A'):<6} ", 8)
-            _add_graded_spark(f, g.get("history"), 26, lead="")
+            _cluster_graph(f, g.get("history"), lay)
             p.add_row(_finish_row(f, 1))
     return p
 
@@ -2393,7 +2427,7 @@ def _build_cluster_fabric_section(y, x0, width, views, metrics, selected_idx, na
     return p
 
 
-def _build_cluster_storage_section(y, x0, width, views, metrics, selected_idx, name_w, kind):
+def _build_cluster_storage_section(y, x0, width, views, metrics, selected_idx, name_w, kind, lay=None):
     inner = width - 2
     total_size = 0
     hottest = None
@@ -2424,7 +2458,7 @@ def _build_cluster_storage_section(y, x0, width, views, metrics, selected_idx, n
             used_pct = hd.get("used_pct")
             if used_pct is not None:
                 lb, rb = term.bar_brackets()
-                bar, slot = term.make_bar(used_pct, 10)
+                bar, slot = term.make_bar(used_pct, lay["bar"] if lay else 10)
                 f.try_add_multi([(lb, 10), (bar, slot), (rb, 10), (f" {int(used_pct):>2}%  ", 3)])
             f.try_add(f"R {term.fmt_rate(hd.get('read_bps', 0), 'byte')}  ", 2)
             f.try_add(f"W {term.fmt_rate(hd.get('write_bps', 0), 'byte')}  ", 2)
@@ -2537,6 +2571,25 @@ def _build_alerts_panel(y, x0, width, views, metrics, kind):
     return p
 
 
+def _build_topology_panel(y, x0, width, topo, n_nodes):
+    """The TOPOLOGY panel around topomap.render()'s rows (drawn 1 cell in
+    from each border, so the boxes never touch the frame)."""
+    bits = [f"{n_nodes} nodes"]
+    if topo["links"]:
+        bits.append(f"{topo['links']} link{'s' if topo['links'] != 1 else ''}")
+    if topo["buses"]:
+        bits.append(f"{topo['buses']} switch{'es' if topo['buses'] != 1 else ''}")
+    if topo["rails"]:
+        bits.append(f"{topo['rails']} rail{'s' if topo['rails'] != 1 else ''}")
+    if not topo["links"] and not topo["buses"]:
+        bits.append("no shared fabric network found")
+    p = panels.Panel(y, x0, width, title=[("TOPOLOGY", 9), (" " + " · ".join(bits), 3)],
+                     title_right=[(f"Σ fabric {term.fmt_rate(topo['bps'], 'bit')}", 3)], kind="top")
+    for runs in topo["rows"]:
+        p.add_row([(1, runs[0][0], runs[0][1])] + [(None, t, sl) for t, sl in runs[1:]])
+    return p
+
+
 # --- Assembly --------------------------------------------------------
 
 def build_page3(cluster_ctx, tier, width, x0=0, height=None, has_perf=False):
@@ -2601,16 +2654,37 @@ def build_page3(cluster_ctx, tier, width, x0=0, height=None, has_perf=False):
     avail_rows = max(4, (height or 30) - y - 3)
 
     if not fleet_mode:
-        cpu_p = _build_cluster_cpu_section(y, x0, width, views, metrics, selected_idx, name_w, kind="top")
-        out.append(cpu_p); y += cpu_p.total_height
-        mem_p = _build_cluster_mem_section(y, x0, width, views, metrics, selected_idx, name_w, kind="mid")
-        out.append(mem_p); y += mem_p.total_height
-        gpu_p = _build_cluster_gpu_section(y, x0, width, views, metrics, selected_idx, name_w, kind="mid")
-        out.append(gpu_p); y += gpu_p.total_height
-        fab_p = _build_cluster_fabric_section(y, x0, width, views, metrics, selected_idx, name_w, kind="mid")
-        out.append(fab_p); y += fab_p.total_height
-        stor_p = _build_cluster_storage_section(y, x0, width, views, metrics, selected_idx, name_w, kind="mid")
-        out.append(stor_p); y += stor_p.total_height + 1
+        lay = _cluster_layout(width, metrics, name_w)
+        builders = (_build_cluster_cpu_section, _build_cluster_mem_section, _build_cluster_gpu_section,
+                    _build_cluster_fabric_section, _build_cluster_storage_section)
+
+        def sections(y0, first_kind):
+            built, yy = [], y0
+            for k, build in enumerate(builders):
+                kw = {"lay": lay} if build is not _build_cluster_fabric_section else {}
+                sp = build(yy, x0, width, views, metrics, selected_idx, name_w,
+                           kind=first_kind if k == 0 else "mid", **kw)
+                built.append(sp)
+                yy += sp.total_height
+            return built, yy
+
+        # TOPOLOGY map from spare height: whatever the sections, their
+        # closing border and the footer leave (they always come first)
+        _, sec_end = sections(y, "top")
+        spare = (height or 0) - (sec_end + 2)
+        map_p = None
+        if spare >= 6:
+            pairs_by_name = sorted(zip(views, metrics), key=lambda vm: vm[0].get("name") or "")
+            cache = getattr(ui, "topo_cache", None) if ui else None
+            topo = topomap.render(pairs_by_name, width - 4, spare - 1,
+                                  selected_name=(ui.selected_name if ui else None), cache=cache)
+            if topo:
+                map_p = _build_topology_panel(y, x0, width, topo, len(views))
+        if map_p is not None:
+            out.append(map_p); y += map_p.total_height
+        built, y = sections(y, "top" if map_p is None else "mid")
+        out.extend(built)
+        y += 1
     else:
         visible = max(2, avail_rows - 4)  # reserve a few rows for ALERTS
         start = 0
