@@ -639,6 +639,50 @@ def sparkline(history, width):
     return "".join(chars)
 
 
+def ramp_slot(frac):
+    """Graph-ramp slot (11 dimmest .. 15 brightest) for a value's fraction
+    of its scale, 0..1."""
+    frac = max(0.0, min(float(frac), 1.0))
+    return RAMP_SLOTS[min(len(RAMP_SLOTS) - 1, int(frac * len(RAMP_SLOTS)))]
+
+
+def sparkline_runs(history, width, y_max=100.0):
+    """Graded braille history graph (D-02 item 2): [(text, slot), ...] runs,
+    exactly `width` cells, each cell coloured by the ramp step of its
+    higher sample, on a FIXED scale 0..y_max (so brightness means the same
+    on every row and every tick, unlike sparkline()'s window-relative
+    scale). Any non-zero sample shows at least its bottom dot. [] where
+    sparkline() would return "" (no braille glyphs, or under 2 samples)."""
+    if BAR_STYLE != "eighths" or width < 1 or len(history) < 2:
+        return []
+    n = width * 2
+    hist = [max(0.0, float(v or 0)) for v in list(history)[-n:]]
+    if len(hist) < n:
+        hist = [hist[0]] * (n - len(hist)) + hist
+    top = float(y_max) if y_max else (max(hist) or 1.0)
+
+    def level(v):
+        if v <= 0:
+            return 0
+        return max(1, min(4, int(v / top * 4 + 0.5)))
+
+    runs = []
+    for i in range(0, n, 2):
+        a, b = hist[i], hist[i + 1]
+        bits = 0
+        for k in range(level(a)):
+            bits |= _BRAILLE_L[k]
+        for k in range(level(b)):
+            bits |= _BRAILLE_R[k]
+        slot = ramp_slot(max(a, b) / top) if bits else 7
+        ch = chr(0x2800 + bits)
+        if runs and runs[-1][1] == slot:
+            runs[-1] = (runs[-1][0] + ch, slot)
+        else:
+            runs.append((ch, slot))
+    return runs
+
+
 # --- Multi-series braille chart (Phase 7: page 4's BANDWIDTH panel) -------
 # Full 2x4-dot-per-cell braille plotting -- unlike sparkline() above (one
 # series, 2 vertical levels per column, no line segments between samples),

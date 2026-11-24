@@ -20,8 +20,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dark|light` / `$SPARK_SMI_BACKGROUND`, and measures the theme against it.
 - `--theme terminal` draws with the terminal's own 16 colours.
 
+- History graphs are graded: each cell brightens with its value in five
+  steps mixed from the theme's graph colour, and the window's peak is
+  printed beside the graph. Idea from tuios's chart library (MIT, ideas
+  only, no code copied).
+
 ### Changed
 
+- History graphs use a fixed 0-100% scale instead of stretching to the
+  window's own peak, so an idle 2% line no longer fills the graph like a
+  busy one; any activity keeps the bottom dot lit.
 - Every theme is measured, not hand-picked: text holds 4.5:1 contrast
   against the background (WCAG AA), graph marks 3:1, and frames and bar
   tracks a quiet 1.3-3:1 band. Frames now have their own colour (each

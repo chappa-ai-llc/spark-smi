@@ -76,6 +76,28 @@ class _Flow:
         return False
 
 
+def _add_graded_spark(f, history, max_cells, lead="  "):
+    """Graded history graph (term.sparkline_runs, fixed 0-100% scale) plus
+    its window peak, added to Flow `f` as one atomic group: the peak label
+    drops first when the row is tight, then the whole graph."""
+    hist = [v for v in (history or []) if v is not None]
+    room = min(f.room() - len(lead), max_cells)
+    if room < 4 or len(hist) < 2:
+        return
+    label_w = 10  # " peak 100%", the widest label
+    if room - label_w >= 4:
+        cells = min(room - label_w, 20)
+        runs = term.sparkline_runs(hist, cells)
+        if runs:
+            # the peak of the samples drawn, not of the whole ring buffer
+            peak = f" peak {max(hist[-2 * cells:]):.0f}%"
+            f.try_add_multi([(lead, 3)] + runs + [(peak, 6)])
+        return
+    runs = term.sparkline_runs(hist, room)
+    if runs:
+        f.try_add_multi([(lead, 3)] + runs)
+
+
 def _fmt_uptime(seconds):
     try:
         seconds = int(seconds)
@@ -537,11 +559,7 @@ def _build_cpu_panel(y, x0, width, cpu_state, tier, show_sparkline):
         if strip:
             f.try_add("   " + strip, 1)
         if show_sparkline:
-            room = min(f.room() - 2, 20)  # capped so it doesn't balloon into all leftover width
-            if room >= 4:
-                spark = term.sparkline(cl.get("history") or [], room)
-                if spark:
-                    f.add("  " + spark, 2)
+            _add_graded_spark(f, cl.get("history"), 30)
         segs = list(f.segs)
         segs[0] = (1, segs[0][1], segs[0][2])
         p.add_row(segs)
@@ -651,11 +669,7 @@ def _build_gpu_card(y, x0, w, gpu, caps, show_sparkline):
     f1.add(rb, 10)
     f1.add(f" {int(util):>3}%", 3)
     if show_sparkline:
-        room = min(f1.room() - 2, 16)  # capped so it doesn't balloon into all leftover width
-        if room >= 4:
-            spark = term.sparkline(gpu.get("history") or [], room)
-            if spark:
-                f1.add("  " + spark, 2)
+        _add_graded_spark(f1, gpu.get("history"), 26)
     segs1 = list(f1.segs)
     segs1[0] = (2, segs1[0][1], segs1[0][2])
     p.add_row(segs1)
@@ -2099,9 +2113,7 @@ def _build_cluster_cpu_section(y, x0, width, views, metrics, selected_idx, name_
             f.try_add(strip + "  ", 1)
         f.try_add(f"{m['cpu_ghz']:.2f} GHz  ", 3)
         f.try_add(f"{term.fmt_temp(m['cpu_temp']):<5} ", 3)
-        spark = term.sparkline(m["cpu_hist"], min(16, max(0, f.room())))
-        if spark:
-            f.add(spark, 2)
+        _add_graded_spark(f, m["cpu_hist"], 26, lead="")
         p.add_row(_finish_row(f, 1))
     return p
 
@@ -2188,9 +2200,7 @@ def _build_cluster_gpu_section(y, x0, width, views, metrics, selected_idx, name_
                 f.try_add("alloc —  ", 6)
             f.try_add(f"{term.fmt_temp(g.get('temp')):<5} ", 3)
             f.try_add(f"{g.get('pwr_str', 'N/A'):<6} ", 8)
-            spark = term.sparkline(g.get("history") or [], min(16, max(0, f.room())))
-            if spark:
-                f.add(spark, 2)
+            _add_graded_spark(f, g.get("history"), 26, lead="")
             p.add_row(_finish_row(f, 1))
     return p
 

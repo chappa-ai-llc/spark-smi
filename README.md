@@ -93,6 +93,17 @@ between nodes — per rail, node-to-node, or all nodes at once — and charts th
 result live while correlating each NIC's ASIC temperature against sustained
 load. Every run is behind an explicit confirm. See "Fabric validation" below.
 
+### History graphs
+
+CPU clusters and GPUs carry a braille graph of up to the last 40 samples
+(40 seconds at the default refresh; live mode, or snapshot mode with
+`--warmup`). The scale is fixed at
+0-100%, so a tall bar always means a busy part, and each cell brightens with
+its value in five steps from the theme's graph colour, so a spike stands
+out even at the edge of your vision. Any activity keeps at least the bottom
+dot lit, and the peak of the samples shown is printed beside the graph
+(`peak 82%`), where the row has room.
+
 ### PCIe link monitoring
 
 Any PCIe slot can carry more than one kind of device over its lifetime — on
