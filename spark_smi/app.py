@@ -18,12 +18,13 @@ from . import node
 from . import pages
 from . import panels
 from . import shot
+from . import tasks
 from . import term
 
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "4.2.0"
+    VERSION = "4.3.0"
 DEFAULT_REFRESH_RATE = 1.0
 HIST_LEN = 60
 
@@ -39,7 +40,10 @@ Usage: spark-smi [options]
                    NIC/thermal/SMART panels), 3 cluster (--cluster), or
                    4 fabric validation (--cluster with 2+ members; renders
                    the last recorded run only -- snapshot mode never starts
-                   a test)
+                   a test), or
+                   5 GPU tasks (every process holding a GPU context, grouped
+                   under its GPU by the terminal session it lives in --
+                   read-only in snapshot mode)
   --theme <name>   color theme (default: spark; or $SPARK_SMI_THEME)
   --theme list     print the available theme names, one per line, and exit
   --background auto|dark|light
@@ -95,6 +99,11 @@ Live-mode keys: q quit  ·  t toggle C/F  ·  u toggle GiB/GB  ·  1/2 page
                 duration · up/down select pair (pair mode) · y confirms a
                 run -- generates real RDMA/network traffic between nodes,
                 so every run is confirm-gated (see README)
+                page 5 (GPU tasks, local only): up/down select · enter/o
+                open the session (tmux/screen attach, journalctl/docker
+                logs tail) · e end (SIGTERM, or the session's own stop) ·
+                k kill (SIGKILL) · a also list bare /dev/nvidia* holders ·
+                y confirms an end/kill, anything else cancels
 """
 
 
@@ -147,7 +156,7 @@ def _parse_args(argv):
             if i < len(argv):
                 try:
                     n = int(argv[i])
-                    opts["page"] = n if n in (1, 2, 3, 4) else 1
+                    opts["page"] = n if n in (1, 2, 3, 4, 5) else 1
                 except ValueError:
                     pass
         elif a == "--theme":
@@ -213,6 +222,11 @@ class State:
         self.thermal = collectors.ThermalCollector()
         self.smart = collectors.SmartCollector()
         self.pcie = collectors.PcieCollector()
+        # Page 5: only sampled while page 5 is on screen (render_dashboard),
+        # never as part of sample() -- so --serve/--json/pages 1-4 pay
+        # nothing for the /proc walk, and nothing about local pids ever
+        # goes over the cluster wire format.
+        self.tasks = tasks.TaskCollector()
         self.cluster_hist = [deque(maxlen=HIST_LEN) for _ in self.cpu.clusters]
         self.gpu_hist = {}
         self.nic_hist = {}
@@ -384,10 +398,17 @@ _EMPTY_SAMPLE = {"cpu": {}, "mem": {}, "gpus": [], "nics": [], "disks": [], "the
 
 def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_hint=None, page_num=1,
                       knob_ui=None, sort_nics=False, show_help=False, theme_toast=None, cluster_ctx=None,
-                      fab_ui=None, fab_engine=None):
+                      fab_ui=None, fab_engine=None, task_ui=None):
     """Single UI entry point for both backends. Builds the requested page
     (1 overview, 2 advanced, 3 cluster, 4 fabric validation -- Phases 6/7,
-    both --cluster only) and draws it.
+    both --cluster only -- 5 GPU tasks, always local) and draws it.
+
+    `task_ui` (page 5) is a tasks.TaskUI in live mode only -- None in
+    snapshot mode, exactly like knob_ui: with no TaskUI there is no
+    selection, no confirm prompt, and nothing that could ever reach
+    tasks.end_process()/end_group(). Page 5 always samples the LOCAL
+    machine, even inside a cluster drilldown (signals, like knob writes,
+    must never be aimed at a remote node's pid numbers).
 
     `knob_ui` (Phase 4) is a knobs.KnobUI instance in live mode's page 2 only
     -- main() never constructs one for the snapshot path, so passing None
@@ -487,6 +508,44 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
             # (the live-series shape bug hid behind a bare `built = []` here)
             err = panels.Panel(0, x0, draw_w, kind="plain")
             err.rows.append(([(f" page 4 render error: {type(e).__name__}: {str(e)[:80]}", 4)], []))
+            built = [err]
+        if show_help:
+            try:
+                built = built + pages.build_help_overlay(w, h)
+            except Exception:
+                pass
+        try:
+            panels.render(stdscr, built, colors_map)
+        except Exception:
+            pass
+        return
+
+    if page_num == 5:
+        try:
+            sample = state.sample()
+        except Exception:
+            sample = dict(_EMPTY_SAMPLE, rate=state.rate)
+        include_holders = bool(task_ui is not None and task_ui.include_holders)
+        try:
+            tree = state.tasks.sample(sample.get("gpus") or [], include_holders=include_holders)
+        except Exception:
+            tree = {"gpus": [], "n_procs": 0, "n_orphans": 0, "source": "none", "caps": {}}
+        try:
+            rows = tasks.flatten(tree)
+        except Exception:
+            rows = []
+        task_ctx = None
+        if task_ui is not None:
+            task_ui.set_rows(rows)
+            task_ui.tick()
+            task_ctx = task_ui.render_ctx()
+        try:
+            built = pages.build_page5(sample, tree, rows, tier, draw_w, x0, height=height_hint or h,
+                                       ui=task_ctx, theme_toast=theme_toast, cluster_tabs=has_cluster,
+                                       has_perf=has_perf)
+        except Exception as e:
+            err = panels.Panel(0, x0, draw_w, kind="plain")
+            err.rows.append(([(f" page 5 render error: {type(e).__name__}: {str(e)[:80]}", 4)], []))
             built = [err]
         if show_help:
             try:
@@ -618,6 +677,47 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
     # page 3's own keys are, so a None fab_ui/fab_engine is never touched.
     fab_ui = fabtest.FabTestUI() if cluster_ctx else None
     fab_engine = fabtest.FabricEngine(cluster_ctx["aggregator"]) if cluster_ctx else None
+    # Page 5: the task manager's selection/confirm state. Live-mode only,
+    # same reasoning as knob_ui -- the snapshot path never has one, so it
+    # can never signal a process.
+    task_ui = tasks.TaskUI()
+
+    def _run_outside_curses(argv):
+        """Suspends curses, runs an interactive command (tmux attach, screen,
+        journalctl -f, docker logs -f) in the terminal, then restores the
+        screen. Ctrl-C is meant for the child, so SIGINT is ignored in this
+        process for the duration -- otherwise a `journalctl -f` tail would
+        take the dashboard down with it."""
+        import signal
+        import subprocess
+        try:
+            curses.def_prog_mode()
+            curses.endwin()
+        except Exception:
+            pass
+        old = None
+        try:
+            old = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        except Exception:
+            pass
+        try:
+            subprocess.call(argv)
+        except Exception:
+            pass
+        finally:
+            if old is not None:
+                try:
+                    signal.signal(signal.SIGINT, old)
+                except Exception:
+                    pass
+            try:
+                curses.reset_prog_mode()
+                stdscr.clear()
+                stdscr.refresh()
+                curses.flushinp()
+            except Exception:
+                pass
+
     while True:
         if fab_ui is not None:
             try:
@@ -647,7 +747,7 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
             render_dashboard(screen, colors, state, active_nics_only, height_hint=h, page_num=state.page,
                               knob_ui=knob_ui, sort_nics=sort_nics, show_help=show_help,
                               theme_toast=theme_toast, cluster_ctx=cluster_ctx,
-                              fab_ui=fab_ui, fab_engine=fab_engine)
+                              fab_ui=fab_ui, fab_engine=fab_engine, task_ui=task_ui)
             stdscr.refresh()
         except Exception:
             pass
@@ -699,6 +799,64 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
                     cluster_ui.exit_drilldown()
                 state.page = 4
                 stdscr.clear()
+                break
+            if ch == ord('5'):
+                # Page 5 is local-only: leaving a drilldown here keeps the
+                # cluster tabs but never shows a remote node's processes.
+                if cluster_ui and cluster_ui.drilldown:
+                    cluster_ui.exit_drilldown()
+                if state.page != 5:
+                    state.page = 5
+                    task_ui.cancel()
+                    stdscr.clear()
+                break
+            # Page 5 keys. Confirm swallows everything first ('y' acts,
+            # anything else cancels) -- the same rule knobs and fabtest use.
+            if state.page == 5 and task_ui.confirming:
+                if ch != -1:
+                    if ch in (ord('y'), ord('Y')):
+                        task_ui.confirm_yes()
+                    else:
+                        task_ui.cancel()
+                    break
+            elif state.page == 5 and ch == curses.KEY_UP:
+                task_ui.move(-1)
+                break
+            elif state.page == 5 and ch == curses.KEY_DOWN:
+                task_ui.move(1)
+                break
+            elif state.page == 5 and ch == curses.KEY_PPAGE:
+                task_ui.move(-10)
+                break
+            elif state.page == 5 and ch == curses.KEY_NPAGE:
+                task_ui.move(10)
+                break
+            elif state.page == 5 and ch == ord('e'):
+                task_ui.arm_end(force=False)
+                break
+            elif state.page == 5 and ch == ord('k'):
+                task_ui.arm_end(force=True)
+                break
+            elif state.page == 5 and ch == ord('a'):
+                task_ui.toggle_holders()
+                stdscr.clear()
+                break
+            elif state.page == 5 and ch in (ord('o'), curses.KEY_ENTER, 10, 13):
+                spec = task_ui.open_spec()
+                if spec:
+                    argv, blocking = spec
+                    if blocking:
+                        _run_outside_curses(argv)
+                    else:
+                        try:
+                            import subprocess
+                            subprocess.run(argv, capture_output=True, timeout=5)
+                        except Exception:
+                            pass
+                    stdscr.clear()
+                break
+            elif state.page == 5 and ch == 27:  # Esc
+                task_ui.cancel()
                 break
             if ch == 27 and cluster_ui and cluster_ui.drilldown:  # Esc: drilldown -> back to page 3
                 cluster_ui.exit_drilldown()
