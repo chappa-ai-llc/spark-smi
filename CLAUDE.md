@@ -19,6 +19,7 @@ python spark-smi.py --theme nord  # one of 10 themes; `c` cycles them in live mo
 python spark-smi.py --serve       # read-only sample agent on :8817 (GET /sample, /healthz)
 python spark-smi.py -l --cluster a,b,c   # pages 3 (fleet) and 4 (fabric tests) need this
 python spark-smi.py --json        # one sample as JSON to stdout, then exit
+python spark-smi.py --page 2 --size 130 --warmup 5 --shot p2.svg   # page as SVG
 ```
 
 The monitor's rendering has no tests and no linter is configured — verification is by
@@ -125,6 +126,11 @@ spark_smi/
                   poller the render loop never blocks on. Also local-domain
                   inference (reverse-PTR first) so short cluster hostnames
                   resolve. Has NO code path that writes anything.
+  color.py        Colour maths: xterm-256 RGB, OKLab mix, WCAG contrast,
+                  nearest xterm colour under a contrast floor. Stdlib only.
+  shot.py         SVG pictures of a VirtualCurses grid (--shot, live `S`):
+                  box/block/braille glyphs drawn as merged shapes, other
+                  text as selectable <text>. Stdlib only.
   ethtool.py      Physical-port MAC byte counters over ethtool generic
                   netlink (stdlib socket only); port_byte_reader(iface)
                   returns None wherever the kernel/driver can't report them.
@@ -216,7 +222,10 @@ grayed out otherwise (e.g. "root required" for an unwritable `spbm`
 `standard` (84–110), `wide` (>110, content capped at 160 and centered on
 wider terminals). Height degradation, applied in `build_page1`/`build_page2`
 when a `height` hint is given, drops content in this order: sparklines →
-memory legend row → NIC rows collapse to one summary line.
+memory legend row → NIC rows collapse to one summary line. The other way,
+spare height opens mirrored history rows (`term.mirror_chart`, 4 rows each,
+`pages.MIRROR_ROWS`): NICs first, then disks (needs rx/tx_history and
+read/write_history, which `State.sample` keeps; snapshot only with --warmup).
 
 ### Data collection and fallback chain
 
@@ -317,6 +326,12 @@ can't take the render loop down.
 
 ### Other conventions
 
+- **Colour slots** (term.py's table): 1-9 as before, 10 frames and bar
+  brackets, 11-15 the graph ramp. Slot 6 is dim TEXT now, not the frame.
+  `term.build_palette()` derives the live palette from THEMES (design
+  intent) by measuring against the background (`term.BACKGROUND`, set by
+  `detect_background`/`set_background`); never hand-edit a palette to pass
+  a floor -- `tests/test_themes.py` enforces the floors.
 - Unit/temperature toggles are module globals in `term.py`
   (`USE_FAHRENHEIT`, `USE_DECIMAL_UNITS`) flipped by keypress in `main_loop`.
 - Errors are swallowed broadly (bare `except Exception: pass`) by design —

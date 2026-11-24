@@ -2,7 +2,7 @@
 
 > A terminal-based system monitor (TUI) built for **NVIDIA Grace Blackwell (GB10)** and hybrid ARM architectures — because `nvidia-smi` alone doesn't tell the full story.
 
-![Version](https://img.shields.io/badge/version-4.1.1-blue)
+![Version](https://img.shields.io/badge/version-4.2.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8%2B-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Linux%20aarch64-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -66,8 +66,8 @@ the tool isn't there, the feature isn't shown, nothing crashes:
 
 **Page 1 — Overview** (`1`): CPU clusters with per-core load, MEMORY with a
 segmented used/cache/free bar, one card per GPU (utilization, memory, clocks,
-power), NETWORK (physical ports, RX/TX bars), STORAGE (block devices,
-temperature, R/W rates, usage). This is the "glance at it and know the
+power), NETWORK (physical ports, RX/TX bars, or mirrored RX/TX history when
+there is room), STORAGE (block devices, temperature, R/W rates, usage). This is the "glance at it and know the
 system's state" page.
 
 **Page 2 — Advanced** (`2`): per-GPU detail (clocks, PCIe generation/width/
@@ -92,6 +92,27 @@ one page that *actuates*. It runs real RDMA bandwidth and latency tests
 between nodes — per rail, node-to-node, or all nodes at once — and charts the
 result live while correlating each NIC's ASIC temperature against sustained
 load. Every run is behind an explicit confirm. See "Fabric validation" below.
+
+### History graphs
+
+CPU clusters and GPUs carry a braille graph of up to the last 40 samples
+(40 seconds at the default refresh; live mode, or snapshot mode with
+`--warmup`). The scale is fixed at
+0-100%, so a tall bar always means a busy part, and each cell brightens with
+its value in five steps from the theme's graph colour, so a spike stands
+out even at the edge of your vision. Any activity keeps at least the bottom
+dot lit, and the peak of the samples shown is printed beside the graph
+(`peak 82%`), where the row has room.
+
+When the terminal has rows to spare, page 1's NETWORK and STORAGE rows open
+up into a **mirrored history**: download (or disk reads) rises above a faint
+baseline and upload (or writes) hangs below it, each half scaled to its own
+recent peak, with the current rate on the outer rows and the peak and
+average of the window beside the inner ones. Each half's scale never drops
+below 1% of the link speed (10 MB/s for disks), so an idle port stays flat
+instead of magnifying noise. A mirrored row takes four lines; NICs get them
+first, then disks, and on a short terminal the rows stay one line each, as
+before. A disk's usage bar moves under its name.
 
 ### PCIe link monitoring
 
@@ -271,6 +292,7 @@ directory, plus ASIC temperature from the NIC's own hwmon device.
 | `t` | all | Toggle temperature units (°C / °F) |
 | `u` | all | Toggle memory units (GiB / GB, decimal) |
 | `c` | all | Cycle color theme (see "Themes" above; capital `T` is an undocumented alias) |
+| `S` | all | Save the screen as an SVG picture in the current folder, named `spark-smi-page<N>-<date>-<time>.svg` |
 | `?` | 1 / 2 | Toggle the help overlay (any key dismisses it) |
 | `n` | 1 | Show active NICs only |
 | `s` | 1 | Sort NIC rows by current rate (max of RX/TX), descending — toggle back to detection order |
@@ -305,27 +327,52 @@ node's data read-only, with a "knobs are local-only" note in the footer.
 
 ## Themes
 
-Ten named color themes, each a full remapping of the dashboard's 9 color
-slots (bar fill, labels, warn/critical, frame dimming, accents, etc.) —
-`spark` (green, the original default), `nord` (blue), `dracula` (magenta),
-`solarized` (cyan), `gruvbox` (yellow), `mono` (grayscale), `amber`,
-`ice` (cyan), `sunset` (magenta), `cyber` (cyan).
+Ten named colour themes — `spark` (green, the original default), `nord`
+(blue), `dracula` (magenta), `solarized` (cyan), `gruvbox` (yellow), `mono`
+(greyscale), `amber`, `ice` (cyan), `sunset` (magenta), `cyber` (cyan) — plus
+`terminal`, which draws with your terminal's own 16 colours so spark-smi
+matches whatever theme the terminal already uses.
 
 - `--theme <name>` picks one for the session; `--theme list` (or `--themes`)
-  prints the ten names and exits.
+  prints the names and exits.
 - `$SPARK_SMI_THEME` sets the default when `--theme` isn't passed.
 - In live mode (`-l`), the `c` key cycles through them (wrapping back to
-  `spark` after `cyber`) — a footer toast confirms the new name for a few
+  `spark` after `terminal`) — a footer toast confirms the new name for a few
   ticks. Lowercase `c` is deliberate: it's distinct from page 2's capital
   `C` (SM clock-lock knob focus), so theme cycling works on both pages
   without stealing that binding. Terminals below 256-color fall back to
-  each theme's basic-8 approximation automatically, same as the default
-  theme always has.
+  each theme's basic-8 approximation automatically.
+
+### Readable on dark and light terminals
+
+Every theme is measured against the terminal's background, not hand-picked
+for a dark one. Text stays at **4.5:1** contrast or better (the WCAG AA
+level), graph marks at **3:1**, and frames and empty bar tracks sit in a
+quiet band (1.3 to 3:1) so they never shout over the numbers. A colour that
+misses its floor moves only as far as it must and snaps to the nearest
+xterm-256 colour that passes; a unit test holds every theme to these floors.
+
+spark-smi works out the background by itself:
+
+| Order | Source |
+|:---:|:---|
+| 1 | `--background dark` or `light` (or `$SPARK_SMI_BACKGROUND`) |
+| 2 | the terminal's answer to an OSC 11 query (its exact background colour) |
+| 3 | `$COLORFGBG` |
+| 4 | dark |
+
+On a light background the neutral inks swap lightness (bright text becomes
+dark text) and the coloured ones darken, keeping their hue. `--shot`
+pictures use the dark palette unless `--background light` is given, so a
+picture looks the same whoever makes it. The `terminal` theme is not
+measured: your terminal's theme owns those colours.
 
 ```bash
 spark-smi --theme nord
 spark-smi --theme list
 SPARK_SMI_THEME=dracula spark-smi -l
+spark-smi --theme terminal -l
+spark-smi --background light --page 2 --shot page2-light.svg
 ```
 
 ---
@@ -344,7 +391,19 @@ spark-smi [options]
                    ever shows the last recorded run -- it never starts one)
   --theme <name>   color theme (default: spark; or $SPARK_SMI_THEME)
   --theme list     print the available theme names, one per line, and exit
+  --background auto|dark|light
+                   which ground the theme is measured against (default auto:
+                   ask the terminal, then $COLORFGBG, else dark; or
+                   $SPARK_SMI_BACKGROUND). Pictures (--shot) use dark
+                   unless this says light
   --ascii          force plain-ASCII bars/frames (no UTF-8 box drawing)
+  --shot FILE.svg  snapshot mode: write the page as an SVG picture instead of
+                   printing it (complete page, any width; see --size)
+  --size COLS[xROWS]
+                   snapshot mode: render at this size instead of the
+                   terminal's (with --shot, ROWS defaults to the whole page)
+  --warmup SECS    snapshot mode: sample once a second for SECS first, so
+                   history graphs have data (0-120, default 0)
   --json           print one sample as JSON (+ node/model/version/ts) and exit
   --serve [PORT]   read-only HTTP sample server (default port 8817);
                    GET /sample, GET /healthz. A token in the file named by
@@ -507,6 +566,21 @@ spark-smi -l --cluster node-1,node-2,node-3,node-4
 Captured on two DGX Sparks, one with an RTX 3090 attached, in the `nord`
 theme, with an iperf3 run on the first ConnectX-7 port and the node names
 set with `--node-name`.
+
+### Make your own
+
+spark-smi draws its own pictures. `--shot` writes a page as SVG instead of
+printing it, always the complete page, at any width:
+
+```bash
+spark-smi --page 2 --size 130 --warmup 10 --node-name node-1 --shot page2.svg
+```
+
+`--warmup 10` samples for ten seconds first, so the history graphs have
+data, and `--node-name` keeps your real host name out of the picture. In
+live mode, `S` saves the screen as it is. Frames, bars and braille graphs
+are drawn as shapes, so they line up in any viewer whatever fonts it has;
+text stays selectable. A page is about 20-45 KB.
 
 **Page 1 — Overview.** Hybrid Cortex-X925/A725 clusters, unified memory split
 into process/GPU/cache segments, both GPUs side by side, RDMA-aware NIC

@@ -17,7 +17,7 @@ from . import node
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "4.1.1"
+    VERSION = "4.2.0"
 
 # The header shows the major.minor series ("4.0"). Derived from VERSION rather
 # than written out, because a hardcoded literal here silently drifted a whole
@@ -74,6 +74,30 @@ class _Flow:
                 self.add(t, s)
             return True
         return False
+
+
+def _add_graded_spark(f, history, max_cells, lead="  "):
+    """Graded history graph (term.sparkline_runs, fixed 0-100% scale) plus
+    its window peak, added to Flow `f` as one atomic group: the peak label
+    drops first when the row is tight, then the whole graph."""
+    hist = [v for v in (history or []) if v is not None]
+    room = min(f.room() - len(lead), max_cells)
+    if room < 4 or len(hist) < 2:
+        return
+    label_w = 10  # " peak 100%", the widest label
+    if room - label_w >= 4:
+        cells = min(room - label_w, 20)
+        runs = term.sparkline_runs(hist, cells)
+        if runs:
+            # the peak of the samples drawn, not of the whole ring buffer;
+            # none for an all-idle window, whose graph is blank anyway
+            top = max(hist[-2 * cells:])
+            label = [(f" peak {top:.0f}%", 6)] if round(top) > 0 else []
+            f.try_add_multi([(lead, 3)] + runs + label)
+        return
+    runs = term.sparkline_runs(hist, room)
+    if runs:
+        f.try_add_multi([(lead, 3)] + runs)
 
 
 def _fmt_uptime(seconds):
@@ -381,6 +405,7 @@ def build_help_overlay(term_w, term_h):
         ("  t            toggle °C / °F", 3),
         ("  u            toggle GiB / GB (decimal units)", 3),
         (f"  c            cycle color theme  (now: {term.ACTIVE_THEME})", 3),
+        ("  S            save this screen as SVG (current folder)", 3),
         ("  ?            toggle this help", 3),
         ("", 3),
         ("Page 1 -- overview", 9),
@@ -500,7 +525,7 @@ def _build_cpu_panel(y, x0, width, cpu_state, tier, show_sparkline):
             f.try_add_multi([(f"{short[:5]:<5}", 3)])
             lb, rb = term.bar_brackets()
             bar, slot = term.make_bar(cl.get("avg", 0.0), 12)
-            f.try_add_multi([(lb, 6), (bar, slot), (rb, 6), (f"{int(cl.get('avg', 0)):>3}%", 3)])
+            f.try_add_multi([(lb, 10), (bar, slot), (rb, 10), (f"{int(cl.get('avg', 0)):>3}%", 3)])
             strip = term.core_strip(cl.get("loads") or [])
             if strip:
                 f.try_add(" " + strip, 1)
@@ -524,9 +549,9 @@ def _build_cpu_panel(y, x0, width, cpu_state, tier, show_sparkline):
         bar_w = 20 if tier == "wide" else 16
         lb, rb = term.bar_brackets()
         bar, slot = term.make_bar(avg, bar_w)
-        f.add(lb, 6)
+        f.add(lb, 10)
         f.add(bar, slot)
-        f.add(rb, 6)
+        f.add(rb, 10)
         f.add(f" {avg:>3.0f}%  ", 3)
         f.try_add(f"cores {cl.get('range', '')}", 2)
         # The strip gets its own >=3-space gap baked into ONE atomic add, so
@@ -536,11 +561,7 @@ def _build_cpu_panel(y, x0, width, cpu_state, tier, show_sparkline):
         if strip:
             f.try_add("   " + strip, 1)
         if show_sparkline:
-            room = min(f.room() - 2, 20)  # capped so it doesn't balloon into all leftover width
-            if room >= 4:
-                spark = term.sparkline(cl.get("history") or [], room)
-                if spark:
-                    f.add("  " + spark, 2)
+            _add_graded_spark(f, cl.get("history"), 30)
         segs = list(f.segs)
         segs[0] = (1, segs[0][1], segs[0][2])
         p.add_row(segs)
@@ -645,16 +666,12 @@ def _build_gpu_card(y, x0, w, gpu, caps, show_sparkline):
     f1.add("   ", 3)
     lb, rb = term.bar_brackets()
     bar, slot = term.make_bar(util, bar_w)
-    f1.add(lb, 6)
+    f1.add(lb, 10)
     f1.add(bar, slot)
-    f1.add(rb, 6)
+    f1.add(rb, 10)
     f1.add(f" {int(util):>3}%", 3)
     if show_sparkline:
-        room = min(f1.room() - 2, 16)  # capped so it doesn't balloon into all leftover width
-        if room >= 4:
-            spark = term.sparkline(gpu.get("history") or [], room)
-            if spark:
-                f1.add("  " + spark, 2)
+        _add_graded_spark(f1, gpu.get("history"), 26)
     segs1 = list(f1.segs)
     segs1[0] = (2, segs1[0][1], segs1[0][2])
     p.add_row(segs1)
@@ -764,7 +781,7 @@ def _build_network_compact_rows(p, inner, nics):
             lb, rb = term.bar_brackets()
             pct = max(n.get("rx_pct", 0) or 0, n.get("tx_pct", 0) or 0)
             bar, slot = term.make_bar(pct, 10)
-            f.try_add_multi([(lb, 6), (bar, slot), (rb, 6), (f" {int(pct):>2}%", 3)])
+            f.try_add_multi([(lb, 10), (bar, slot), (rb, 10), (f" {int(pct):>2}%", 3)])
         else:
             f.add("down ", 4)
             f.try_add(f"— {n.get('down_reason', 'no carrier')}", 6)
@@ -793,7 +810,7 @@ def _build_network_compact_rows(p, inner, nics):
 
 
 def _build_network_panel(y, x0, width, nics, collapse, tier, has_rdma=True,
-                         rdma_counting=True, port_counting=False):
+                         rdma_counting=True, port_counting=False, mirror=False):
     inner = width - 2
     # Port MAC counters see RDMA and kernel traffic alike (issue #11). Else
     # only advertise the HCA-counter path when there's actually an RDMA
@@ -847,6 +864,17 @@ def _build_network_panel(y, x0, width, nics, collapse, tier, has_rdma=True,
             continue
         f.add(f"{n.get('speed_str', '?'):<{link_w}}", 3)
 
+        if mirror and can_mirror(n, "rx_history", "tx_history"):
+            segs = list(f.segs)
+            segs[0] = (1, segs[0][1], segs[0][2])
+            chart_col = 1 + name_w + hw_w + link_w
+            labels = ((f"▼ {term.fmt_rate(n.get('rx_bps', 0), 'bit')}  {int(n.get('rx_pct', 0) or 0)}%", 2),
+                      (f"▲ {term.fmt_rate(n.get('tx_bps', 0), 'bit')}  {int(n.get('tx_pct', 0) or 0)}%", 2))
+            floor = (n.get("speed_mbit") or 0) * 1e6 * 0.01  # 1% of the link
+            if _add_mirror_rows(p, inner, chart_col, [segs, [], [], []], n["rx_history"], n["tx_history"],
+                                labels, "bit", (floor, floor)):
+                continue
+
         # Suffix is ONE separator space + the number right-justified to 2
         # digits (not 3) -- a stray extra `:>3` here previously reserved a
         # column no mock row actually uses (a "reserve the right-group
@@ -854,15 +882,65 @@ def _build_network_panel(y, x0, width, nics, collapse, tier, has_rdma=True,
         lb, rb = term.bar_brackets()
         f.add(f"{term.fmt_rate(n.get('rx_bps', 0), 'bit'):<{rate_w}}", 2)
         rx_bar, rx_slot = term.make_bar(n.get("rx_pct", 0) or 0, 10)
-        f.try_add_multi([(lb, 6), (rx_bar, rx_slot), (rb, 6), (f" {int(n.get('rx_pct', 0) or 0):>2}% ", 3)])
+        f.try_add_multi([(lb, 10), (rx_bar, rx_slot), (rb, 10), (f" {int(n.get('rx_pct', 0) or 0):>2}% ", 3)])
         f.add(f"{term.fmt_rate(n.get('tx_bps', 0), 'bit'):<{rate_w}}", 2)
         tx_bar, tx_slot = term.make_bar(n.get("tx_pct", 0) or 0, 10)
-        f.try_add_multi([(lb, 6), (tx_bar, tx_slot), (rb, 6), (f" {int(n.get('tx_pct', 0) or 0):>2}%", 3)])
+        f.try_add_multi([(lb, 10), (tx_bar, tx_slot), (rb, 10), (f" {int(n.get('tx_pct', 0) or 0):>2}%", 3)])
 
         segs = list(f.segs)
         segs[0] = (1, segs[0][1], segs[0][2])
         p.add_row(segs)
     return p
+
+
+# =========================================================================
+# Mirrored history rows (D-02 item 1): page 1 NETWORK and STORAGE, when the
+# terminal has the height to spare (build_page1 decides)
+# =========================================================================
+MIRROR_ROWS = 4          # rows per mirrored NIC or disk (2 per half)
+MIRROR_MAX_CELLS = 30    # 60 samples, the whole history ring buffer
+MIRROR_LABEL_W = 27      # "peak 142.6 · avg 100.1 Gb/s"
+
+
+def _peak_avg(values, mode):
+    """"peak 96.1 · avg 41.8 Gb/s" over `values`, both in the peak's unit."""
+    vals = [float(v or 0) for v in values] or [0.0]
+    peak, avg = max(vals), sum(vals) / len(vals)
+    if mode == "byte":
+        return f"peak {peak / 1e9:.2f} · avg {avg / 1e9:.2f} GB/s"
+    if peak >= 1e8:
+        return f"peak {peak / 1e9:.1f} · avg {avg / 1e9:.1f} Gb/s"
+    return f"peak {peak / 1e6:.0f} · avg {avg / 1e6:.0f} Mb/s"
+
+
+def can_mirror(item, up_key, down_key):
+    return (term.BAR_STYLE == "eighths" and len(item.get(up_key) or []) >= 2
+            and len(item.get(down_key) or []) >= 2)
+
+
+def _add_mirror_rows(p, inner, chart_col, left_rows, up, down, labels, mode, floors):
+    """Adds MIRROR_ROWS rows to panel p: left_rows[i] are the segments left
+    of the chart on row i, the chart starts at chart_col, and the right-hand
+    labels are, top to bottom: up rate, up peak/avg, down peak/avg, down
+    rate. Falls back to nothing (returns False) when the chart can't fit."""
+    cells = min(MIRROR_MAX_CELLS, inner - 1 - chart_col - 2 - MIRROR_LABEL_W)
+    if cells < 8:
+        return False
+    rows = term.mirror_chart(up, down, cells, half_rows=MIRROR_ROWS // 2,
+                             up_floor=floors[0], down_floor=floors[1])
+    if rows is None:
+        return False
+    n = cells * 2
+    texts = [labels[0], (_peak_avg(up[-n:], mode), 6), (_peak_avg(down[-n:], mode), 6), labels[1]]
+    for i, runs in enumerate(rows):
+        segs = list(left_rows[i])
+        segs.append((chart_col, runs[0][0], runs[0][1]))
+        for t, slot in runs[1:]:
+            segs.append((None, t, slot))
+        text, slot = texts[i]
+        segs.append((chart_col + cells + 2, text, slot))
+        p.add_row(segs)
+    return True
 
 
 # =========================================================================
@@ -884,7 +962,7 @@ def _build_storage_compact_rows(p, inner, disks):
         if used_pct is not None:
             lb, rb = term.bar_brackets()
             bar, slot = term.make_bar(used_pct, 10)
-            right = [(lb, 6), (bar, slot), (rb, 6), (f" {int(used_pct):>2}%", 3)]
+            right = [(lb, 10), (bar, slot), (rb, 10), (f" {int(used_pct):>2}%", 3)]
         p.add_row(segs, right=right)
     return p
 
@@ -908,7 +986,7 @@ def _model_size_segments(model, size_str, model_w):
     return prefix, size_shown, " " * pad
 
 
-def _build_storage_panel(y, x0, width, disks, tier):
+def _build_storage_panel(y, x0, width, disks, tier, mirror=False):
     inner = width - 2
     p = panels.Panel(y, x0, width,
                       title=[("STORAGE", 9), (" block devices · rates from /proc/diskstats · temps from hwmon", 3)],
@@ -952,13 +1030,32 @@ def _build_storage_panel(y, x0, width, disks, tier):
         f.add(f"{term.fmt_temp(temp):<{temp_w}}" if temp is not None else f"{'—':<{temp_w}}",
               3 if temp is not None else 6)
 
+        if mirror and can_mirror(d, "read_history", "write_history"):
+            segs = list(f.segs)
+            segs[0] = (1, segs[0][1], segs[0][2])
+            # the usage bar moves under the model name, into the rows the
+            # chart opens up
+            below = []
+            used_pct = d.get("used_pct")
+            if used_pct is not None:
+                lb, rb = term.bar_brackets()
+                bar, slot = term.make_bar(used_pct, 10)
+                below = [(1 + name_w, lb, 10), (None, bar, slot), (None, rb, 10),
+                         (None, f" {int(used_pct)}% used", 3)]
+            chart_col = 1 + name_w + model_w + temp_w
+            labels = ((f"R {term.fmt_rate(d.get('read_bps', 0), 'byte')}", 2),
+                      (f"W {term.fmt_rate(d.get('write_bps', 0), 'byte')}", 2))
+            if _add_mirror_rows(p, inner, chart_col, [segs, below, [], []], d["read_history"],
+                                d["write_history"], labels, "byte", (10e6, 10e6)):
+                continue
+
         f.add(f"{rw:<{rate_w}}", 2)
 
         used_pct = d.get("used_pct")
         if used_pct is not None:
             lb, rb = term.bar_brackets()
             bar, slot = term.make_bar(used_pct, 10)
-            f.try_add_multi([(lb, 6), (bar, slot), (rb, 6), (f" {int(used_pct)}% used", 3)])
+            f.try_add_multi([(lb, 10), (bar, slot), (rb, 10), (f" {int(used_pct)}% used", 3)])
 
         segs = list(f.segs)
         segs[0] = (1, segs[0][1], segs[0][2])
@@ -988,6 +1085,7 @@ def build_page1(state, tier, width, x0=0, height=None, sort_nics=False, theme_to
     show_sparkline = True
     show_legend = True
     collapse_nics = False
+    mirror_nics = mirror_disks = False
 
     cpu = state.get("cpu") or {}
     mem = state.get("mem") or {}
@@ -1012,6 +1110,17 @@ def build_page1(state, tier, width, x0=0, height=None, sort_nics=False, theme_to
             est -= 1
         if est > height and len(nics) > 1:
             collapse_nics = True
+        # Mirrored history (D-02 item 1) only with height to spare: NICs
+        # first, then disks; each mirrored row costs MIRROR_ROWS - 1 more.
+        if tier != "compact" and est <= height:
+            spare = height - est
+            up_nics = [n for n in nics if n.get("up") and can_mirror(n, "rx_history", "tx_history")]
+            cost = (MIRROR_ROWS - 1) * len(up_nics)
+            if up_nics and cost <= spare:
+                mirror_nics, spare = True, spare - cost
+            cost = (MIRROR_ROWS - 1) * sum(1 for d in disks if can_mirror(d, "read_history", "write_history"))
+            if mirror_nics and cost and cost <= spare:
+                mirror_disks = True
 
     out.append(_build_header(x0, width, tier, cluster_tabs=cluster_tabs, remote=remote, has_perf=has_perf))
     y = 1
@@ -1034,11 +1143,11 @@ def build_page1(state, tier, width, x0=0, height=None, sort_nics=False, theme_to
     rdma_counting = bool(net_caps.get("rdma_counting", True))
     port_counting = bool(net_caps.get("port_counting", False))
     net_panel = _build_network_panel(y, x0, width, nics, collapse_nics, tier, has_rdma,
-                                     rdma_counting, port_counting)
+                                     rdma_counting, port_counting, mirror=mirror_nics)
     out.append(net_panel)
     if disks:
         y += net_panel.total_height  # no +1: STORAGE continues this same frame
-        storage_panel = _build_storage_panel(y, x0, width, disks, tier)
+        storage_panel = _build_storage_panel(y, x0, width, disks, tier, mirror=mirror_disks)
         out.append(storage_panel)
         y += storage_panel.total_height + 1  # +1 for the frame's bottom border
     else:
@@ -1208,9 +1317,9 @@ def _row_power(inner, gpu, knob=None, focus_id=None, pending=None):
     lb, rb = term.bar_brackets()
     bar_w = 20 if inner > 90 else 14
     bar, slot = term.make_bar(pct, bar_w)
-    f.add(lb, 6)
+    f.add(lb, 10)
     f.add(bar, slot)
-    f.add(rb, 6)
+    f.add(rb, 10)
     f.add(f" {int(pct)}% of limit", 3)
     return f, right
 
@@ -1554,7 +1663,7 @@ def _build_thermals_panel(y, x0, width, entries, kind="top", paired=False, show_
             f.try_add_multi([(f"{e['label'][:label_w]:<{label_w}}", 3), (f"{term.fmt_temp(e['temp_c']):>5} ", 8)])
             lb, rb = term.bar_brackets()
             bar, slot = term.make_bar(max(0.0, min(e["temp_c"], 100.0)), 11)
-            f.try_add_multi([(lb, 6), (bar, slot), (rb, 6)])
+            f.try_add_multi([(lb, 10), (bar, slot), (rb, 10)])
             p.add_row(_finish_row(f))
         return p
 
@@ -1570,7 +1679,7 @@ def _build_thermals_panel(y, x0, width, entries, kind="top", paired=False, show_
             if show_bars:
                 lb, rb = term.bar_brackets()
                 bar, slot = term.make_bar(max(0.0, min(e["temp_c"], 100.0)), 11)
-                f.try_add_multi([(lb, 6), (bar, slot), (rb, 6)])
+                f.try_add_multi([(lb, 10), (bar, slot), (rb, 10)])
             segs = list(f.segs)
             if segs:
                 segs[0] = (j * cell_w + 1, segs[0][1], segs[0][2])
@@ -1633,9 +1742,9 @@ def _build_power_rails_panel(y, x0, width, rails, kind="top", essentials_only=Fa
         f.add(f"{r['watts']:>5.1f} W ", 8)
         lb, rb = term.bar_brackets()
         bar, slot = term.make_bar(pct, 16 if inner > 60 else 10)
-        f.add(lb, 6)
+        f.add(lb, 10)
         f.add(bar, slot)
-        f.add(rb, 6)
+        f.add(rb, 10)
         if is_focused:
             shown = pending if pending is not None else cap
             la, ra = term.knob_arrows()
@@ -2044,9 +2153,9 @@ def _cluster_row_prefix(f, view, is_selected, name_w):
 def _cluster_pct_bar(f, pct, width, suffix_slot=3):
     lb, rb = term.bar_brackets()
     bar, slot = term.make_bar(pct, width)
-    f.add(lb, 6)
+    f.add(lb, 10)
     f.add(bar, slot)
-    f.add(rb, 6)
+    f.add(rb, 10)
     f.add(f" {int(pct):>3}%", suffix_slot)
 
 
@@ -2098,9 +2207,7 @@ def _build_cluster_cpu_section(y, x0, width, views, metrics, selected_idx, name_
             f.try_add(strip + "  ", 1)
         f.try_add(f"{m['cpu_ghz']:.2f} GHz  ", 3)
         f.try_add(f"{term.fmt_temp(m['cpu_temp']):<5} ", 3)
-        spark = term.sparkline(m["cpu_hist"], min(16, max(0, f.room())))
-        if spark:
-            f.add(spark, 2)
+        _add_graded_spark(f, m["cpu_hist"], 26, lead="")
         p.add_row(_finish_row(f, 1))
     return p
 
@@ -2127,10 +2234,10 @@ def _build_cluster_mem_section(y, x0, width, views, metrics, selected_idx, name_
         segs_spec.append((max(0.0, 1.0 - sum(s[0] for s in segs_spec)), 7, "░"))
         chunks = term.seg_bar(segs_spec, 16)
         lb, rb = term.bar_brackets()
-        f.add(lb, 6)
+        f.add(lb, 10)
         for text, slot in chunks:
             f.add(text, slot)
-        f.add(rb, 6)
+        f.add(rb, 10)
         f.add(f" {int(m['mem_pct']):>3}%  ", 3)
         f.try_add(f"{m['mem_used'] / (1024 ** 3):.1f} / {m['mem_total'] / (1024 ** 3):.1f} G  ", 3)
         if gpu_alloc > 0:
@@ -2187,9 +2294,7 @@ def _build_cluster_gpu_section(y, x0, width, views, metrics, selected_idx, name_
                 f.try_add("alloc —  ", 6)
             f.try_add(f"{term.fmt_temp(g.get('temp')):<5} ", 3)
             f.try_add(f"{g.get('pwr_str', 'N/A'):<6} ", 8)
-            spark = term.sparkline(g.get("history") or [], min(16, max(0, f.room())))
-            if spark:
-                f.add(spark, 2)
+            _add_graded_spark(f, g.get("history"), 26, lead="")
             p.add_row(_finish_row(f, 1))
     return p
 
@@ -2283,7 +2388,7 @@ def _build_cluster_storage_section(y, x0, width, views, metrics, selected_idx, n
             if used_pct is not None:
                 lb, rb = term.bar_brackets()
                 bar, slot = term.make_bar(used_pct, 10)
-                f.try_add_multi([(lb, 6), (bar, slot), (rb, 6), (f" {int(used_pct):>2}%  ", 3)])
+                f.try_add_multi([(lb, 10), (bar, slot), (rb, 10), (f" {int(used_pct):>2}%  ", 3)])
             f.try_add(f"R {term.fmt_rate(hd.get('read_bps', 0), 'byte')}  ", 2)
             f.try_add(f"W {term.fmt_rate(hd.get('write_bps', 0), 'byte')}  ", 2)
             if hd.get("temp") is not None:
@@ -2678,7 +2783,7 @@ def _build_bandwidth_panel(y, x0, width, fab_ctx, chart_h, show_legend):
             bar, _slot = term.make_bar(min(100.0, cur / link_gbps * 100.0), min(30, chart_w))
             slot = _RAIL_SLOTS[idx % len(_RAIL_SLOTS)]
             label = labels[idx] if idx < len(labels) else f"rail{i}"
-            p.add_row([(2, f"{label:<6}", slot), (9, lb, 6), (None, bar, slot), (None, rb, 6),
+            p.add_row([(2, f"{label:<6}", slot), (9, lb, 10), (None, bar, slot), (None, rb, 10),
                        (None, f" {cur:.0f} Gb/s", 3)])
         return p
 
@@ -2693,7 +2798,7 @@ def _build_bandwidth_panel(y, x0, width, fab_ctx, chart_h, show_legend):
             col += len(text)
         p.add_row(segs)
 
-    p.add_row([(2, "    └" + "─" * chart_w, 6)])
+    p.add_row([(2, "    └" + "─" * chart_w, 10)])
 
     dur = (last or {}).get("duration") or (fab_ctx.get("fab") or {}).get("duration") or 30
     tick_row = [(2, "     0s", 6)]
@@ -2753,7 +2858,7 @@ def _build_rails_panel(y, x0, width, fab_ctx):
             bar_slot = 5
         f = _Flow(inner - 1)
         f.add(f"{label:<6}", 3)
-        f.add(lb, 6); f.add(bar, bar_slot); f.add(rb, 6)
+        f.add(lb, 10); f.add(bar, bar_slot); f.add(rb, 10)
         f.add(f" {gbps:.0f} Gb/s", 8)
         if asic_s is not None and asic_m is not None:
             f.try_add_multi([(f"   asic {term.fmt_temp(asic_s)}→{term.fmt_temp(asic_m)}", 5 if throttling else 3)])

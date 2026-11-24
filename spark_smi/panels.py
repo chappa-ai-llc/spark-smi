@@ -62,20 +62,20 @@ class Panel:
 
 def bar_segments(col, pct, width):
     """Row segments for a threshold-colored bar `width` cells wide, framed
-    by term.bar_brackets() in slot 6 (dim/frame)."""
+    by term.bar_brackets() in slot 10 (frame)."""
     lb, rb = term.bar_brackets()
     bar, slot = term.make_bar(pct, width)
-    return [(col, lb, 6), (None, bar, slot), (None, rb, 6)]
+    return [(col, lb, 10), (None, bar, slot), (None, rb, 10)]
 
 def seg_bar_segments(col, chunks, suffix=None, suffix_slot=3):
     """Row segments for a pre-built multi-segment bar (term.seg_bar output),
     framed the same way as bar_segments(), with an optional trailing label
     (e.g. " 56%")."""
     lb, rb = term.bar_brackets()
-    segs = [(col, lb, 6)]
+    segs = [(col, lb, 10)]
     for text, slot in chunks:
         segs.append((None, text, slot))
-    segs.append((None, rb, 6))
+    segs.append((None, rb, 10))
     if suffix:
         segs.append((None, suffix, suffix_slot))
     return segs
@@ -135,7 +135,7 @@ def _draw_right(screen, y, right_edge_x, right, colors_map, max_x):
 
 
 def _draw_title(screen, y, x, w, corner_l, corner_r, title, title_right, colors_map, max_x, fc):
-    dim = colors_map.get(6)
+    dim = colors_map.get(10)
     h = fc["h"]
     _safe_addstr(screen, y, x, corner_l, dim, max_x)
     _safe_addstr(screen, y, x + 1, h, dim, max_x)
@@ -177,7 +177,7 @@ def render(screen, panels, colors_map):
     except Exception:
         return
     fc = _frame_chars()
-    dim = colors_map.get(6)
+    dim = colors_map.get(10)
 
     for i, p in enumerate(panels):
         try:

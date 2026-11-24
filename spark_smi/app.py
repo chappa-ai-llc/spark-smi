@@ -5,6 +5,7 @@ through the duck-typed screen interface shared by VirtualCurses and real
 curses windows.
 """
 import os
+import shutil
 import sys
 import time
 from collections import deque
@@ -16,12 +17,13 @@ from . import knobs
 from . import node
 from . import pages
 from . import panels
+from . import shot
 from . import term
 
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "4.1.1"
+    VERSION = "4.2.0"
 DEFAULT_REFRESH_RATE = 1.0
 HIST_LEN = 60
 
@@ -40,7 +42,19 @@ Usage: spark-smi [options]
                    a test)
   --theme <name>   color theme (default: spark; or $SPARK_SMI_THEME)
   --theme list     print the available theme names, one per line, and exit
+  --background auto|dark|light
+                   which ground the theme is measured against (default auto:
+                   ask the terminal, then $COLORFGBG, else dark; or
+                   $SPARK_SMI_BACKGROUND). Pictures (--shot) use dark
+                   unless this says light
   --ascii          force plain-ASCII bars/frames (no UTF-8 box drawing)
+  --shot FILE.svg  snapshot mode: write the page as an SVG picture instead of
+                   printing it (complete page, any width; see --size)
+  --size COLS[xROWS]
+                   snapshot mode: render at this size instead of the
+                   terminal's (with --shot, ROWS defaults to the whole page)
+  --warmup SECS    snapshot mode: sample once a second for SECS first, so
+                   history graphs have data (0-120, default 0)
   --json           print one sample as JSON (+ node/model/version/ts) and exit
   --serve [PORT]   read-only HTTP sample server (default port {cluster.DEFAULT_PORT});
                    GET /sample, GET /healthz. A token in the file named by
@@ -60,8 +74,10 @@ Usage: spark-smi [options]
   -h, --help       show this help and exit
 
 Themes: {", ".join(term.THEMES)}, cycled live with the 'c' key.
-$SPARK_SMI_THEME sets the default when --theme isn't passed; an unknown name
-prints the valid list and exits 1.
+"terminal" uses your terminal's own 16 colours. $SPARK_SMI_THEME sets the
+default when --theme isn't passed; an unknown name prints the valid list
+and exits 1. Every theme keeps text at 4.5:1 contrast or better against the
+background, on dark and light terminals alike.
 
 Snapshot mode (default, no -l) renders once and prints ANSI to stdout.
 `--cluster ... --page 3` (or `4`) does one blocking poll round (2s cap) then
@@ -70,7 +86,7 @@ members) prints a short "needs --cluster" note instead of a fabric panel.
 
 Live-mode keys: q quit  ·  t toggle C/F  ·  u toggle GiB/GB  ·  1/2 page
                 n active-NICs-only  ·  s sort NICs by rate  ·  c cycle theme
-                ? help overlay
+                S save this screen as SVG (current folder)  ·  ? help overlay
                 page 2: tab select GPU  ·  P/C/M/R/X knobs
                 page 3 (--cluster only): up/down select · enter drill into
                 node · esc back · a alerts only (fleet) · o sort col (fleet)
@@ -112,7 +128,8 @@ def _pcie_stuck_from_history(history, gen_max):
 def _parse_args(argv):
     opts = {"loop": False, "rate": DEFAULT_REFRESH_RATE, "help": False, "page": 1,
             "theme": None, "theme_list": False, "json": False, "serve": None,
-            "serve_verbose": False, "cluster": _UNSET, "node_name": None}
+            "serve_verbose": False, "cluster": _UNSET, "node_name": None,
+            "shot": None, "size": None, "warmup": 0.0, "background": None}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -161,6 +178,18 @@ def _parse_args(argv):
             if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
                 i += 1
                 opts["cluster"] = argv[i]
+        elif a == "--background":
+            opts["background"] = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 1
+        elif a == "--shot":
+            opts["shot"] = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 1
+        elif a == "--size":
+            opts["size"] = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 1
+        elif a == "--warmup":
+            opts["warmup"] = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 1
         elif a in ("-h", "--help"):
             opts["help"] = True
         # --ascii is read directly from sys.argv by term._detect_bar_style()
@@ -187,6 +216,7 @@ class State:
         self.cluster_hist = [deque(maxlen=HIST_LEN) for _ in self.cpu.clusters]
         self.gpu_hist = {}
         self.nic_hist = {}
+        self.disk_hist = {}
         # Phase 8: per-GPU (util, gen_cur) history for stuck-under-load
         # detection -- separate from gpu_hist (util-only, for sparklines)
         # since this needs the paired gen_cur reading at the same tick.
@@ -324,6 +354,13 @@ class State:
             hist["tx"].append(n.get("tx_bps", 0) or 0)
             n["rx_history"] = list(hist["rx"])
             n["tx_history"] = list(hist["tx"])
+        # Same for block devices: page 1's mirrored R/W history (D-02 item 1).
+        for d in disks:
+            hist = self.disk_hist.setdefault(d.get("name"), {"r": deque(maxlen=HIST_LEN), "w": deque(maxlen=HIST_LEN)})
+            hist["r"].append(d.get("read_bps", 0) or 0)
+            hist["w"].append(d.get("write_bps", 0) or 0)
+            d["read_history"] = list(hist["r"])
+            d["write_history"] = list(hist["w"])
 
         try:
             driver, cuda = self.gpu.driver_info()
@@ -520,6 +557,15 @@ def _init_curses_colors(curses):
     caches color-pair definitions across frames, so this has to be re-run
     -- not just re-read -- whenever the active theme changes (main_loop's
     'c' key), in addition to the one-time call at loop startup."""
+    if term.ACTIVE_THEME == term.TERMINAL_THEME:
+        # the terminal's own colours: ANSI 0-15 (8-15 as bold 0-7 where the
+        # terminal has only 8) and -1, its default foreground
+        colors = {}
+        for slot, code in term.PALETTE_256.items():
+            bold = code >= 8 and curses.COLORS < 16
+            curses.init_pair(slot, code - 8 if bold else code, -1)
+            colors[slot] = curses.color_pair(slot) | (curses.A_BOLD if bold or slot in (8, 9) else 0)
+        return colors
     if curses.COLORS >= 256:
         for slot, code in term.PALETTE_256.items():
             curses.init_pair(slot, code, -1)
@@ -535,7 +581,10 @@ def _init_curses_colors(curses):
         _, bold, dim = term.BASIC_SLOTS.get(slot, ("WHITE", False, False))
         if bold:
             attr |= curses.A_BOLD
-        if dim:
+        # A_DIM only stands in for missing colours: on 256 colours the inks
+        # are measured (term.build_palette), and dimming them again would
+        # push dim text under its 4.5:1 floor. Snapshot mode never dimmed.
+        if dim and curses.COLORS < 256:
             attr |= curses.A_DIM
         colors[slot] = attr
     return colors
@@ -555,6 +604,7 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
     show_help = False
     theme_toast_text = None
     theme_toast_ticks = 0
+    shot_pending = False
     THEME_TOAST_TICKS = knobs.KnobUI.TOAST_TICKS
     # Phase 4: page 2's interactive power/clock knobs. Constructed here (not
     # in State, which the snapshot path also uses) so the write-capable UI
@@ -590,14 +640,28 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
         in_remote = bool(cluster_ui and cluster_ui.drilldown)
         try:
             stdscr.erase()
-            h, _ = stdscr.getmaxyx()
-            render_dashboard(stdscr, colors, state, active_nics_only, height_hint=h, page_num=state.page,
+            h, w = stdscr.getmaxyx()
+            screen = stdscr
+            if shot_pending:
+                screen = _TeeScreen(stdscr, term.VirtualCurses(size=(w, h)), colors)
+            render_dashboard(screen, colors, state, active_nics_only, height_hint=h, page_num=state.page,
                               knob_ui=knob_ui, sort_nics=sort_nics, show_help=show_help,
                               theme_toast=theme_toast, cluster_ctx=cluster_ctx,
                               fab_ui=fab_ui, fab_engine=fab_engine)
             stdscr.refresh()
         except Exception:
             pass
+        if shot_pending:
+            # `S`: the frame just drawn, as SVG in the current folder. The
+            # toast shows on the next frame, so it is not in the picture.
+            shot_pending = False
+            name = _live_shot_name(state.page)
+            try:
+                shot.write_svg(name, screen.virtual.grid)
+                theme_toast_text = f"saved {name}"
+            except Exception as e:
+                theme_toast_text = f"save failed: {getattr(e, 'strerror', None) or e}"
+            theme_toast_ticks = THEME_TOAST_TICKS
 
         start_wait = time.time()
         while time.time() - start_wait < rate:
@@ -703,6 +767,9 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
                 break
             elif state.page == 4 and cluster_ctx and ch == curses.KEY_DOWN:
                 fab_ui.move_pair(1)
+                break
+            if ch == ord('S'):
+                shot_pending = True
                 break
             if ch == ord('s'):
                 sort_nics = not sort_nics
@@ -817,6 +884,47 @@ def _token_or_exit(flag):
         print(f"{flag}: {e}", file=sys.stderr)
         sys.exit(1)
 
+def parse_size(text):
+    """(cols, rows or None) from "COLS" or "COLSxROWS". Raises ValueError
+    with the reason. The floor is render_dashboard's own minimum (40x8)."""
+    parts = text.lower().split("x")
+    if len(parts) not in (1, 2) or not all(p.isdigit() for p in parts):
+        raise ValueError(f"'{text}' is not COLS or COLSxROWS, e.g. 140 or 140x45")
+    cols = int(parts[0])
+    rows = int(parts[1]) if len(parts) == 2 else None
+    if not 40 <= cols <= 400 or (rows is not None and not 8 <= rows <= 500):
+        raise ValueError("COLS must be 40-400 and ROWS 8-500")
+    return cols, rows
+
+
+SHOT_ROWS = 500  # --shot without ROWS: tall enough for any page, then trimmed
+
+
+class _TeeScreen:
+    """Draws one frame to the live curses window and to a VirtualCurses grid
+    at once, so the live `S` key saves exactly the frame on screen without
+    a second render (which would take a second, near-zero-interval sample)."""
+
+    def __init__(self, screen, virtual, colors):
+        self.screen, self.virtual = screen, virtual
+        self.slot_of = {attr: slot for slot, attr in colors.items()}
+
+    def getmaxyx(self):
+        return self.screen.getmaxyx()
+
+    def erase(self):
+        self.screen.erase()
+        self.virtual.erase()
+
+    def addstr(self, y, x, text, attr=0):
+        self.virtual.addstr(y, x, text, self.slot_of.get(attr))
+        return self.screen.addstr(y, x, text, attr)
+
+
+def _live_shot_name(page):
+    return time.strftime(f"spark-smi-page{page}-%Y%m%d-%H%M%S.svg")
+
+
 def main():
     argv = sys.argv[1:]
     opts = _parse_args(argv)
@@ -833,6 +941,22 @@ def main():
     # BEFORE either rendering path constructs anything that reads the
     # palette -- VirtualCurses() below and main_loop's curses.init_pair()
     # both need the final theme in place first.
+    # --background wins over $SPARK_SMI_BACKGROUND wins over "auto". Only a
+    # render to a real terminal asks it (OSC 11); pictures and pipes never
+    # do, so a --shot looks the same whoever runs it.
+    bg_setting = (opts["background"] if opts["background"] is not None
+                  else os.environ.get("SPARK_SMI_BACKGROUND") or "auto").lower()
+    if bg_setting not in ("auto", "dark", "light"):
+        print("--background: give auto, dark or light", file=sys.stderr)
+        sys.exit(1)
+    if opts["json"] or opts["serve"] is not None:
+        pass
+    elif opts["shot"] is not None:
+        term.set_background(bg_setting == "light", source="setting" if bg_setting != "auto" else "default")
+    else:
+        light, rgb, source = term.detect_background(bg_setting, ask=opts["loop"] or sys.stdout.isatty())
+        term.set_background(light, rgb, source)
+
     theme_name = opts["theme"] or os.environ.get("SPARK_SMI_THEME") or term.ACTIVE_THEME
     try:
         term.set_theme(theme_name)
@@ -847,6 +971,24 @@ def main():
     except ValueError as e:
         source = "--node-name" if opts["node_name"] is not None else "$" + node.ENV_VAR
         print(f"{source}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    size = None
+    if opts["size"] is not None:
+        try:
+            size = parse_size(opts["size"])
+        except ValueError as e:
+            print(f"--size: {e}", file=sys.stderr)
+            sys.exit(1)
+    if opts["shot"] is not None and not opts["shot"].lower().endswith(".svg"):
+        print("--shot: give a file name ending in .svg", file=sys.stderr)
+        sys.exit(1)
+    try:
+        warmup = float(opts["warmup"])
+        if not 0 <= warmup <= 120:
+            raise ValueError
+    except (TypeError, ValueError):
+        print("--warmup: give a number of seconds from 0 to 120", file=sys.stderr)
         sys.exit(1)
 
     state = State(opts["rate"])
@@ -917,9 +1059,25 @@ def main():
             # ever DISPLAYS results (fab_ui/fab_engine are never constructed
             # below) -- this poll is just for the header/MATRIX node list.
             cluster_ctx["aggregator"].poll_once_sync(budget=2.0)
-        v = term.VirtualCurses()
+        # --warmup: fill the history ring buffers the way live mode does, one
+        # sample a second, so the single render below can draw its graphs.
+        for _ in range(int(warmup)):
+            state.sample()
+            time.sleep(1.0)
+        if opts["shot"] is not None:
+            cols = size[0] if size else shutil.get_terminal_size((140, 50)).columns
+            size = (max(40, min(cols, 400)), (size[1] if size and size[1] else SHOT_ROWS))
+        v = term.VirtualCurses(size=size)
         colors = {i: i for i in term.PALETTE_256}
         render_dashboard(v, colors, state, page_num=state.page, cluster_ctx=cluster_ctx)
+        if opts["shot"] is not None:
+            try:
+                shot.write_svg(opts["shot"], v.grid)
+            except OSError as e:
+                print(f"--shot: cannot write {opts['shot']}: {e.strerror or e}", file=sys.stderr)
+                sys.exit(1)
+            print(f"wrote {opts['shot']}")
+            return
         output = v.render()
         # Some Windows consoles/pipes report a non-UTF-8 stdout encoding
         # (cp1252/cp437) even when BAR_STYLE picked "ascii" for the bars --

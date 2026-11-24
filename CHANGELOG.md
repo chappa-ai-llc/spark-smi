@@ -4,6 +4,51 @@ All notable changes to SPARK-SMI are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.2.0] — 2026-11-24
+
+A visual upgrade: mirrored traffic history, graded graphs, themes measured
+for contrast on dark and light terminals, and built-in SVG screenshots.
+
+### Added
+
+- `--shot FILE.svg` writes a page as an SVG picture instead of printing it:
+  the complete page at any width (`--size COLS[xROWS]`), with frames, bars
+  and braille graphs drawn as shapes so they line up in any viewer, and text
+  left selectable. `--warmup SECS` samples first so history graphs have
+  data. In live mode, `S` saves the current screen to the current folder.
+  Standard library only; a page is about 20-45 KB. Idea from tuios's
+  screenshot export (MIT, ideas only, no code copied).
+- Themes readable on light terminals. spark-smi asks the terminal for its
+  background (OSC 11, then `$COLORFGBG`) or takes `--background
+  dark|light` / `$SPARK_SMI_BACKGROUND`, and measures the theme against it.
+- `--theme terminal` draws with the terminal's own 16 colours.
+
+- Mirrored traffic history on page 1: when the terminal has rows to spare,
+  each NETWORK port shows download rising above a baseline and upload
+  hanging below it, each half scaled to its own recent peak (never below 1%
+  of the link), with the current rate, peak and average beside it. STORAGE
+  rows do the same for reads and writes. Short terminals keep one-line
+  rows. Idea from tuios's mirrored chart, which credits iptop (both MIT;
+  ideas only, no code copied).
+- History graphs are graded: each cell brightens with its value in five
+  steps mixed from the theme's graph colour, and the window's peak is
+  printed beside the graph. Idea from tuios's chart library (MIT, ideas
+  only, no code copied).
+
+### Changed
+
+- History graphs use a fixed 0-100% scale instead of stretching to the
+  window's own peak, so an idle 2% line no longer fills the graph like a
+  busy one; any activity keeps the bottom dot lit.
+- Every theme is measured, not hand-picked: text holds 4.5:1 contrast
+  against the background (WCAG AA), graph marks 3:1, and frames and bar
+  tracks a quiet 1.3-3:1 band. Frames now have their own colour (each
+  theme's old frame colour where it already fit), so dim text no longer
+  shares it and is easier to read; a few too-dark colours (such as nord's
+  red) are a little brighter. A unit test holds every theme to the floors.
+  Live mode no longer dims colours a 256-colour terminal shows exactly.
+  Idea from tuios's measured palettes (MIT, ideas only, no code copied).
+
 ## [4.1.1] — 2026-11-24
 
 TCP and RDMA on one port at the same time now read as their sum.
@@ -275,6 +320,7 @@ is still there, on page 1.
 
 - Initial public release.
 
+[4.2.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.2.0
 [4.1.1]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.1.1
 [4.1.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.1.0
 [4.0.4]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.0.4
