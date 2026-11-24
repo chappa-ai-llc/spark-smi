@@ -2,7 +2,7 @@
 
 > A terminal-based system monitor (TUI) built for **NVIDIA Grace Blackwell (GB10)** and hybrid ARM architectures — because `nvidia-smi` alone doesn't tell the full story.
 
-![Version](https://img.shields.io/badge/version-4.0.1-blue)
+![Version](https://img.shields.io/badge/version-4.0.2-blue)
 ![Python](https://img.shields.io/badge/python-3.8%2B-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Linux%20aarch64-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -315,8 +315,9 @@ spark-smi [options]
   --ascii          force plain-ASCII bars/frames (no UTF-8 box drawing)
   --json           print one sample as JSON (+ node/model/version/ts) and exit
   --serve [PORT]   read-only HTTP sample server (default port 8817);
-                   GET /sample, GET /healthz. $SPARK_SMI_TOKEN, if set, is
-                   required as the X-Spark-Token header on /sample
+                   GET /sample, GET /healthz. A token in the file named by
+                   $SPARK_SMI_TOKEN_FILE (or, older setups, $SPARK_SMI_TOKEN)
+                   is required as the X-Spark-Token header on /sample
   --serve-verbose  log one line per request to stderr (--serve only)
   --cluster HOSTS  cluster mode: page 3 shows every node in HOSTS (comma-
                    separated "host"/"host:port"/"ssh:host" entries, or
@@ -358,9 +359,33 @@ spark-smi --cluster sparky-1,sparky-2 --page 3         # one-shot snapshot (2s p
   its last-seen values) after 3× the poll interval — the render loop never
   blocks on the network; it always draws whatever the background poller last
   collected.
-- `$SPARK_SMI_TOKEN`, if set, is sent as the `X-Spark-Token` header on every
-  poll and required by `--serve` on the polled side (both ends read the same
-  variable).
+- A shared token, if set, is sent as the `X-Spark-Token` header on every
+  poll and required by `--serve` on the polled side. Both ends read it the
+  same way.
+
+### Shared token
+
+Keep the token in a file that only the user running `spark-smi` can read,
+and point `$SPARK_SMI_TOKEN_FILE` at it on every node:
+
+```bash
+install -d -m 700 ~/.config/spark-smi
+python3 -c 'import secrets; print(secrets.token_urlsafe(32))' > ~/.config/spark-smi/token
+chmod 600 ~/.config/spark-smi/token
+SPARK_SMI_TOKEN_FILE=~/.config/spark-smi/token spark-smi --serve
+```
+
+Copy the same file to each node, and set the same variable where you run
+`--cluster`. In a container, use a Docker secret
+(`SPARK_SMI_TOKEN_FILE=/run/secrets/spark_smi_token`). Under systemd, use
+`LoadCredential=` (`SPARK_SMI_TOKEN_FILE=%d/token`).
+
+- Trailing whitespace and newlines in the file are ignored.
+- If the file is missing, unreadable or empty, `--serve` and `--cluster`
+  exit with the reason. They never run without the token you asked for.
+- `$SPARK_SMI_TOKEN` (the token itself in the environment) still works for
+  older setups, but other processes of the same user can read it from
+  `/proc`. Set one variable, not both.
 
 ---
 
