@@ -16,7 +16,7 @@ from . import term
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "4.0.2"
+    VERSION = "4.0.3"
 
 # The header shows the major.minor series ("4.0"). Derived from VERSION rather
 # than written out, because a hardcoded literal here silently drifted a whole
@@ -1961,9 +1961,9 @@ def _cluster_alerts(view, m):
     """[(node_name, reason_text, "red"|"amber"), ...] for one node, per the
     spec's rules: unreachable is the only "red" case, everything else
     (temp>=80, cnp rate>50/s, a port link down, a disk>=85% used, a GPU
-    stuck at gen1 under load) is "amber" -- matches mock_cluster_fleet's
-    ALERTS row (sparky-03 cnp+temp, sparky-04 link down, both amber;
-    sparky-07 unreachable, red). The pcie_stuck flag itself is computed
+    stuck at gen1 under load) is "amber" -- matches the design mockup's
+    ALERTS row (one node cnp+temp, one link down, both amber; one
+    unreachable, red). The pcie_stuck flag itself is computed
     node-side by app.py's State.sample() and travels here unchanged over
     the wire format (cluster.to_wire/from_wire pass gpu dict fields through
     verbatim) -- this function only has to read it."""

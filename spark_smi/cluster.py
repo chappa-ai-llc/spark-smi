@@ -30,7 +30,7 @@ from types import SimpleNamespace
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "4.0.2"
+    VERSION = "4.0.3"
 
 DEFAULT_PORT = 8817
 POLL_TIMEOUT = 0.75          # per-member urllib timeout (spec)
@@ -366,7 +366,7 @@ class ClusterMember:
 
 def _summarize(sample):
     """One-line "last seen" text for a member that's since gone stale, e.g.
-    "gpu 71% · 342 W · asic 66C" (mock_cluster_fleet's sparky-07 row).
+    "gpu 71% · 342 W · asic 66C".
     Best-effort -- any missing field is just dropped, never a crash."""
     try:
         gpus = sample.get("gpus") or []
@@ -584,8 +584,8 @@ class ClusterAggregator:
             sample, last_ok, err, last_seen = m.snapshot()
             stale = (sample is None) or ((now - last_ok) > (STALE_MULTIPLIER * self.rate))
             # Display name: prefer the node's own short hostname from its
-            # payload over the connection string ("sparky-2", not the
-            # truncated "sparky-2.chappa.ai" the cluster list happened to use)
+            # payload over the connection string ("node-2", not the
+            # "node-2.example.com" the cluster list happened to use)
             name = m.name
             if sample and sample.get("node"):
                 name = str(sample["node"]).split(".")[0]

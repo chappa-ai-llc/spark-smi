@@ -105,8 +105,7 @@ def _subnet24(ip):
 def pair_rails(src_rails, dst_rails):
     """[(src_rail, dst_rail_or_None), ...], one entry per src rail. Real
     topology (verified, CLAUDE.md): each rail pair lives on its own /24
-    subnet (sparky-1 enp1s0f0np0=192.168.175.11 <-> sparky-2's .175.12,
-    etc.) -- so the primary match is "same /24 network". Any src rail that
+    subnet (node-1 enp1s0f0np0=10.x.y.11 <-> node-2's 10.x.y.12, etc.) -- so the primary match is "same /24 network". Any src rail that
     doesn't find a subnet match falls back to positional pairing against
     whatever dst rails are left, both sides sorted by (port, rdma_dev) --
     keeps pairing deterministic even against a node whose rails aren't on
@@ -472,8 +471,8 @@ def _member_sample(aggregator, name):
 
 def _member_host(aggregator, name):
     """ssh/connect host for a member. Views display the payload's SHORT
-    hostname ("sparky-2"), which may not resolve in DNS -- the cluster-list
-    entry host ("sparky-2.chappa.ai") is what ssh must use. Accepts either
+    hostname ("node-2"), which may not resolve in DNS -- the cluster-list
+    entry host ("node-2.example.com") is what ssh must use. Accepts either
     form, mirroring get_member_sample's matching."""
     try:
         for m in aggregator.members:

@@ -487,7 +487,7 @@ def _normalize_pci_addr(bus_id):
     """NVML/nvidia-smi PCI bus ids read like "00000004:01:00.0" (8-hex-digit
     domain) -- sysfs's /sys/bus/pci/devices addresses (PcieCollector's join
     key) use a 4-hex-digit domain, lowercase: "0004:01:00.0". Verified on
-    sparky-1: nvidia-smi's pci.bus_id for the RTX 3090 reads
+    a DGX Spark: nvidia-smi's pci.bus_id for the RTX 3090 reads
     "00000004:01:00.0" while sysfs lists the SAME device as "0004:01:00.0"
     -- only the domain's zero-padding differs. None for anything that
     doesn't look like a bus id at all."""
@@ -1461,7 +1461,7 @@ class NetCollector:
 # =========================================================================
 
 # PCIe spec's fixed GT/s-per-generation table -- sysfs's current_link_speed/
-# max_link_speed strings read like "2.5 GT/s PCIe" (verified on sparky-1).
+# max_link_speed strings read like "2.5 GT/s PCIe" (verified on a DGX Spark).
 _PCIE_GEN_BY_SPEED = {2.5: 1, 5.0: 2, 8.0: 3, 16.0: 4, 32.0: 5, 64.0: 6}
 
 # PCIE LINKS panel row order (spec): degraded rows first (handled by the
@@ -1552,7 +1552,7 @@ def _pcie_device_name(addr, vendor_hex, device_hex, class_label):
     """Reuses the same PCI-ID naming chain built for NIC labels (built-in
     vendor table -> pci.ids -> driver name) -- an endpoint being a GPU or an
     NVMe drive rather than a NIC doesn't need a second lookup table. Verified
-    live on sparky-1: an unlisted device (the RTX 3090 isn't in
+    live on a DGX Spark: an unlisted device (the RTX 3090 isn't in
     PCI_DEVICE_NAMES) fell through to the raw pci.ids string "NVIDIA
     Corporation GA102 [GeForce RTX 3090]" -- the bracket-extraction below
     pulls out the recognizable marketing name instead of rendering the

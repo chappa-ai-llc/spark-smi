@@ -1,5 +1,5 @@
 # What deploy/release.py installs to build a release. All pure Python: the
-# office's releaser cannot load native extensions from its temp directory, so
+# release runner cannot load native extensions from its temp directory, so
 # the upload is done by release.py itself, with the standard library.
 # Regenerate the hashes after changing this file (see CLAUDE.md, "Releasing").
 build

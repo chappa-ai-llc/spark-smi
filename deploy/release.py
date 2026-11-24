@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Publish one spark-smi release to PyPI and GitHub.
 
-The BUILD office runs this on a vX.Y.Z tag and tries each tag once. PyPI
+A release runner calls this on a vX.Y.Z tag and tries each tag once. PyPI
 versions are immutable, so every check that can fail runs before the upload;
 a failure after it needs a new version, never a re-tag.
 
@@ -11,9 +11,9 @@ a failure after it needs a new version, never a re-tag.
 Needs PYPI_TOKEN_FILE and GITHUB_TOKEN_FILE, each the path of a file holding
 one token. Standard library only. The build tools (build, setuptools, wheel,
 all pure Python) go into a throwaway venv, pinned by hash. The upload itself is
-done here, over PyPI's upload API, because the office's releaser has no temp
+done here, over PyPI's upload API, because the release runner has no temp
 directory that may execute files, and twine's native dependencies cannot load
-there (forum topic 66d383f7f946aba282117616, issue #6).
+there (issue #6).
 
 Optional settings, for a fork or a test index:
     RELEASE_GITHUB_REPO      owner/name of the GitHub repo (default chappa-ai-llc/spark-smi)
