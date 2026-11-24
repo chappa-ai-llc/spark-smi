@@ -66,8 +66,8 @@ the tool isn't there, the feature isn't shown, nothing crashes:
 
 **Page 1 — Overview** (`1`): CPU clusters with per-core load, MEMORY with a
 segmented used/cache/free bar, one card per GPU (utilization, memory, clocks,
-power), NETWORK (physical ports, RX/TX bars), STORAGE (block devices,
-temperature, R/W rates, usage). This is the "glance at it and know the
+power), NETWORK (physical ports, RX/TX bars, or mirrored RX/TX history when
+there is room), STORAGE (block devices, temperature, R/W rates, usage). This is the "glance at it and know the
 system's state" page.
 
 **Page 2 — Advanced** (`2`): per-GPU detail (clocks, PCIe generation/width/
@@ -103,6 +103,16 @@ its value in five steps from the theme's graph colour, so a spike stands
 out even at the edge of your vision. Any activity keeps at least the bottom
 dot lit, and the peak of the samples shown is printed beside the graph
 (`peak 82%`), where the row has room.
+
+When the terminal has rows to spare, page 1's NETWORK and STORAGE rows open
+up into a **mirrored history**: download (or disk reads) rises above a faint
+baseline and upload (or writes) hangs below it, each half scaled to its own
+recent peak, with the current rate on the outer rows and the peak and
+average of the window beside the inner ones. Each half's scale never drops
+below 1% of the link speed (10 MB/s for disks), so an idle port stays flat
+instead of magnifying noise. A mirrored row takes four lines; NICs get them
+first, then disks, and on a short terminal the rows stay one line each, as
+before. A disk's usage bar moves under its name.
 
 ### PCIe link monitoring
 

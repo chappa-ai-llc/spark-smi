@@ -683,6 +683,57 @@ def sparkline_runs(history, width, y_max=100.0):
     return runs
 
 
+def mirror_chart(up, down, width, half_rows=2, up_floor=0.0, down_floor=0.0):
+    """Mirrored braille history (D-02 item 1): `up` (download / read) rises
+    above a baseline and `down` (upload / write) hangs below it, each half
+    scaled to its own peak over the samples drawn -- but never below its
+    floor, so idle noise cannot fill a half. Returns 2*half_rows rows, top
+    to bottom, each [(text, slot), ...] exactly `width` cells; rows nearest
+    the baseline use dimmer ramp steps. None where braille is unavailable
+    or either series has fewer than 2 samples. Empty columns show a faint
+    baseline in the track colour (slot 7), so the chart reads as one piece
+    before its history fills."""
+    if BAR_STYLE != "eighths" or width < 1 or len(up) < 2 or len(down) < 2:
+        return None
+    n = width * 2
+    dots_h = half_rows * 4
+
+    def heights(series, floor):
+        vals = [max(0.0, float(v or 0)) for v in list(series)[-n:]]
+        if len(vals) < n:
+            vals = [0.0] * (n - len(vals)) + vals
+        top = max(max(vals), float(floor or 0)) or 1.0
+        return [0 if v <= 0 else max(1, min(dots_h, int(v / top * dots_h + 0.5))) for v in vals]
+
+    hu, hd = heights(up, up_floor), heights(down, down_floor)
+    rows = []
+    for r in range(2 * half_rows):
+        upper = r < half_rows
+        # distance from the baseline, 0 = the row touching it
+        dist = (half_rows - 1 - r) if upper else (r - half_rows)
+        slot = ramp_slot((dist + 1) / half_rows * 0.999 if half_rows > 1 else 0.999)
+        runs = []
+        for cx in range(width):
+            bits = 0
+            for col in (0, 1):
+                h = (hu if upper else hd)[cx * 2 + col]
+                for dr in range(4):
+                    # dots counted outward from the baseline
+                    k = dist * 4 + (3 - dr if upper else dr)
+                    if k < h:
+                        bits |= _CHART_BITS[dr][col]
+            cell_slot = slot if bits else 7
+            if not bits and upper and dist == 0:
+                bits = 0x40 | 0x80   # a faint baseline (track colour) where empty
+            ch = chr(0x2800 + bits)
+            if runs and runs[-1][1] == cell_slot:
+                runs[-1] = (runs[-1][0] + ch, cell_slot)
+            else:
+                runs.append((ch, cell_slot))
+        rows.append(runs)
+    return rows
+
+
 # --- Multi-series braille chart (Phase 7: page 4's BANDWIDTH panel) -------
 # Full 2x4-dot-per-cell braille plotting -- unlike sparkline() above (one
 # series, 2 vertical levels per column, no line segments between samples),

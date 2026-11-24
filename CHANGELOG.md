@@ -20,6 +20,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dark|light` / `$SPARK_SMI_BACKGROUND`, and measures the theme against it.
 - `--theme terminal` draws with the terminal's own 16 colours.
 
+- Mirrored traffic history on page 1: when the terminal has rows to spare,
+  each NETWORK port shows download rising above a baseline and upload
+  hanging below it, each half scaled to its own recent peak (never below 1%
+  of the link), with the current rate, peak and average beside it. STORAGE
+  rows do the same for reads and writes. Short terminals keep one-line
+  rows. Idea from tuios's mirrored chart, which credits iptop (both MIT;
+  ideas only, no code copied).
 - History graphs are graded: each cell brightens with its value in five
   steps mixed from the theme's graph colour, and the window's peak is
   printed beside the graph. Idea from tuios's chart library (MIT, ideas

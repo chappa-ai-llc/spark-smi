@@ -222,7 +222,10 @@ grayed out otherwise (e.g. "root required" for an unwritable `spbm`
 `standard` (84–110), `wide` (>110, content capped at 160 and centered on
 wider terminals). Height degradation, applied in `build_page1`/`build_page2`
 when a `height` hint is given, drops content in this order: sparklines →
-memory legend row → NIC rows collapse to one summary line.
+memory legend row → NIC rows collapse to one summary line. The other way,
+spare height opens mirrored history rows (`term.mirror_chart`, 4 rows each,
+`pages.MIRROR_ROWS`): NICs first, then disks (needs rx/tx_history and
+read/write_history, which `State.sample` keeps; snapshot only with --warmup).
 
 ### Data collection and fallback chain
 

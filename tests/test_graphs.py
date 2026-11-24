@@ -80,3 +80,83 @@ class PeakLabelTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MirrorChartTest(unittest.TestCase):
+    def setUp(self):
+        p = mock.patch.object(term, "BAR_STYLE", "eighths")
+        p.start()
+        self.addCleanup(p.stop)
+
+    def rows(self, up, down, width, **kw):
+        return ["".join(t for t, _ in r) for r in term.mirror_chart(up, down, width, **kw)]
+
+    def test_shape_and_width(self):
+        out = term.mirror_chart([1] * 10, [1] * 10, 7)
+        self.assertEqual(len(out), 4)
+        self.assertTrue(all(len("".join(t for t, _ in r)) == 7 for r in out))
+
+    def test_up_rises_and_down_hangs_each_to_own_peak(self):
+        r = self.rows([100, 100], [5, 5], 1)
+        self.assertEqual(r, ["⣿", "⣿", "⣿", "⣿"])        # both halves full: own peaks
+        r = self.rows([0, 0], [10, 10], 1, down_floor=40)  # 10 of a 40 floor: 2 of 8 dots
+        self.assertEqual(r[2], "⠛")                        # top two dot rows, hanging
+        self.assertEqual(r[3], "⠀")
+        self.assertEqual(r[1], "⣀")                        # empty up half: the baseline
+
+    def test_floor_keeps_noise_small(self):
+        r = self.rows([1, 1], [0, 0], 1, up_floor=1000)
+        self.assertEqual(r[1], "⣀")                        # any activity: bottom dots only
+        self.assertEqual(r[0], "⠀")
+
+    def test_rows_near_baseline_are_dimmer(self):
+        out = term.mirror_chart([100, 100], [100, 100], 1)
+        slots = [r[0][1] for r in out]
+        self.assertGreater(slots[0], slots[1])
+        self.assertGreater(slots[3], slots[2])
+
+    def test_baseline_is_track_coloured_when_empty(self):
+        out = term.mirror_chart([0, 0], [0, 0], 2)
+        self.assertEqual(out[1], [("⣀⣀", 7)])
+
+    def test_unavailable(self):
+        self.assertIsNone(term.mirror_chart([1], [1, 2], 4))
+        with mock.patch.object(term, "BAR_STYLE", "ascii"):
+            self.assertIsNone(term.mirror_chart([1, 2], [1, 2], 4))
+
+
+class MirrorLayoutTest(unittest.TestCase):
+    def setUp(self):
+        p = mock.patch.object(term, "BAR_STYLE", "eighths")
+        p.start()
+        self.addCleanup(p.stop)
+
+    def state(self, hist=True):
+        h = [1e9, 5e9, 2e9] if hist else []
+        nic = {"name": "eth0", "hw_label": "Test NIC", "pf_count": 1, "up": True, "speed_mbit": 10000,
+               "speed_str": "10G", "rx_bps": 2e9, "tx_bps": 1e9, "rx_pct": 20, "tx_pct": 10,
+               "rx_history": h, "tx_history": h}
+        disk = {"name": "nvme0", "model": "Disk", "size": 1e12, "read_bps": 1e8, "write_bps": 0,
+                "used_pct": 40, "read_history": h, "write_history": h}
+        return {"cpu": {"clusters": []}, "mem": {}, "gpus": [], "nics": [nic], "disks": [disk], "caps": {}}
+
+    def net_rows(self, state, height):
+        built = pages.build_page1(state, "wide", 130, 0, height=height)
+        net = [p for p in built if p.title and p.title[0][0] == "NETWORK"][0]
+        disk = [p for p in built if p.title and p.title[0][0] == "STORAGE"][0]
+        return len(net.rows), len(disk.rows)
+
+    def test_tall_terminal_mirrors_nics_then_disks(self):
+        self.assertEqual(self.net_rows(self.state(), 60), (4, 4))
+
+    def test_short_terminal_keeps_one_row(self):
+        self.assertEqual(self.net_rows(self.state(), 12), (1, 1))   # estimate 11: one spare row
+        self.assertEqual(self.net_rows(self.state(), 16), (4, 1))   # 5 spare: the NIC, not the disk
+
+    def test_no_history_keeps_one_row(self):
+        self.assertEqual(self.net_rows(self.state(hist=False), 60), (1, 1))
+
+    def test_peak_avg_in_the_peaks_unit(self):
+        self.assertEqual(pages._peak_avg([1e9, 3e9], "bit"), "peak 3.0 · avg 2.0 Gb/s")
+        self.assertEqual(pages._peak_avg([1e6, 3e6], "bit"), "peak 3 · avg 2 Mb/s")
+        self.assertEqual(pages._peak_avg([5e8, 0], "byte"), "peak 0.50 · avg 0.25 GB/s")

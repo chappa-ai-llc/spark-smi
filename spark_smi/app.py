@@ -216,6 +216,7 @@ class State:
         self.cluster_hist = [deque(maxlen=HIST_LEN) for _ in self.cpu.clusters]
         self.gpu_hist = {}
         self.nic_hist = {}
+        self.disk_hist = {}
         # Phase 8: per-GPU (util, gen_cur) history for stuck-under-load
         # detection -- separate from gpu_hist (util-only, for sparklines)
         # since this needs the paired gen_cur reading at the same tick.
@@ -353,6 +354,13 @@ class State:
             hist["tx"].append(n.get("tx_bps", 0) or 0)
             n["rx_history"] = list(hist["rx"])
             n["tx_history"] = list(hist["tx"])
+        # Same for block devices: page 1's mirrored R/W history (D-02 item 1).
+        for d in disks:
+            hist = self.disk_hist.setdefault(d.get("name"), {"r": deque(maxlen=HIST_LEN), "w": deque(maxlen=HIST_LEN)})
+            hist["r"].append(d.get("read_bps", 0) or 0)
+            hist["w"].append(d.get("write_bps", 0) or 0)
+            d["read_history"] = list(hist["r"])
+            d["write_history"] = list(hist["w"])
 
         try:
             driver, cuda = self.gpu.driver_info()

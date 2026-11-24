@@ -808,7 +808,7 @@ def _build_network_compact_rows(p, inner, nics):
 
 
 def _build_network_panel(y, x0, width, nics, collapse, tier, has_rdma=True,
-                         rdma_counting=True, port_counting=False):
+                         rdma_counting=True, port_counting=False, mirror=False):
     inner = width - 2
     # Port MAC counters see RDMA and kernel traffic alike (issue #11). Else
     # only advertise the HCA-counter path when there's actually an RDMA
@@ -862,6 +862,17 @@ def _build_network_panel(y, x0, width, nics, collapse, tier, has_rdma=True,
             continue
         f.add(f"{n.get('speed_str', '?'):<{link_w}}", 3)
 
+        if mirror and can_mirror(n, "rx_history", "tx_history"):
+            segs = list(f.segs)
+            segs[0] = (1, segs[0][1], segs[0][2])
+            chart_col = 1 + name_w + hw_w + link_w
+            labels = ((f"▼ {term.fmt_rate(n.get('rx_bps', 0), 'bit')}  {int(n.get('rx_pct', 0) or 0)}%", 2),
+                      (f"▲ {term.fmt_rate(n.get('tx_bps', 0), 'bit')}  {int(n.get('tx_pct', 0) or 0)}%", 2))
+            floor = (n.get("speed_mbit") or 0) * 1e6 * 0.01  # 1% of the link
+            if _add_mirror_rows(p, inner, chart_col, [segs, [], [], []], n["rx_history"], n["tx_history"],
+                                labels, "bit", (floor, floor)):
+                continue
+
         # Suffix is ONE separator space + the number right-justified to 2
         # digits (not 3) -- a stray extra `:>3` here previously reserved a
         # column no mock row actually uses (a "reserve the right-group
@@ -878,6 +889,56 @@ def _build_network_panel(y, x0, width, nics, collapse, tier, has_rdma=True,
         segs[0] = (1, segs[0][1], segs[0][2])
         p.add_row(segs)
     return p
+
+
+# =========================================================================
+# Mirrored history rows (D-02 item 1): page 1 NETWORK and STORAGE, when the
+# terminal has the height to spare (build_page1 decides)
+# =========================================================================
+MIRROR_ROWS = 4          # rows per mirrored NIC or disk (2 per half)
+MIRROR_MAX_CELLS = 30    # 60 samples, the whole history ring buffer
+MIRROR_LABEL_W = 27      # "peak 142.6 · avg 100.1 Gb/s"
+
+
+def _peak_avg(values, mode):
+    """"peak 96.1 · avg 41.8 Gb/s" over `values`, both in the peak's unit."""
+    vals = [float(v or 0) for v in values] or [0.0]
+    peak, avg = max(vals), sum(vals) / len(vals)
+    if mode == "byte":
+        return f"peak {peak / 1e9:.2f} · avg {avg / 1e9:.2f} GB/s"
+    if peak >= 1e8:
+        return f"peak {peak / 1e9:.1f} · avg {avg / 1e9:.1f} Gb/s"
+    return f"peak {peak / 1e6:.0f} · avg {avg / 1e6:.0f} Mb/s"
+
+
+def can_mirror(item, up_key, down_key):
+    return (term.BAR_STYLE == "eighths" and len(item.get(up_key) or []) >= 2
+            and len(item.get(down_key) or []) >= 2)
+
+
+def _add_mirror_rows(p, inner, chart_col, left_rows, up, down, labels, mode, floors):
+    """Adds MIRROR_ROWS rows to panel p: left_rows[i] are the segments left
+    of the chart on row i, the chart starts at chart_col, and the right-hand
+    labels are, top to bottom: up rate, up peak/avg, down peak/avg, down
+    rate. Falls back to nothing (returns False) when the chart can't fit."""
+    cells = min(MIRROR_MAX_CELLS, inner - 1 - chart_col - 2 - MIRROR_LABEL_W)
+    if cells < 8:
+        return False
+    rows = term.mirror_chart(up, down, cells, half_rows=MIRROR_ROWS // 2,
+                             up_floor=floors[0], down_floor=floors[1])
+    if rows is None:
+        return False
+    n = cells * 2
+    texts = [labels[0], (_peak_avg(up[-n:], mode), 6), (_peak_avg(down[-n:], mode), 6), labels[1]]
+    for i, runs in enumerate(rows):
+        segs = list(left_rows[i])
+        segs.append((chart_col, runs[0][0], runs[0][1]))
+        for t, slot in runs[1:]:
+            segs.append((None, t, slot))
+        text, slot = texts[i]
+        segs.append((chart_col + cells + 2, text, slot))
+        p.add_row(segs)
+    return True
 
 
 # =========================================================================
@@ -923,7 +984,7 @@ def _model_size_segments(model, size_str, model_w):
     return prefix, size_shown, " " * pad
 
 
-def _build_storage_panel(y, x0, width, disks, tier):
+def _build_storage_panel(y, x0, width, disks, tier, mirror=False):
     inner = width - 2
     p = panels.Panel(y, x0, width,
                       title=[("STORAGE", 9), (" block devices · rates from /proc/diskstats · temps from hwmon", 3)],
@@ -967,6 +1028,25 @@ def _build_storage_panel(y, x0, width, disks, tier):
         f.add(f"{term.fmt_temp(temp):<{temp_w}}" if temp is not None else f"{'—':<{temp_w}}",
               3 if temp is not None else 6)
 
+        if mirror and can_mirror(d, "read_history", "write_history"):
+            segs = list(f.segs)
+            segs[0] = (1, segs[0][1], segs[0][2])
+            # the usage bar moves under the model name, into the rows the
+            # chart opens up
+            below = []
+            used_pct = d.get("used_pct")
+            if used_pct is not None:
+                lb, rb = term.bar_brackets()
+                bar, slot = term.make_bar(used_pct, 10)
+                below = [(1 + name_w, lb, 10), (None, bar, slot), (None, rb, 10),
+                         (None, f" {int(used_pct)}% used", 3)]
+            chart_col = 1 + name_w + model_w + temp_w
+            labels = ((f"R {term.fmt_rate(d.get('read_bps', 0), 'byte')}", 2),
+                      (f"W {term.fmt_rate(d.get('write_bps', 0), 'byte')}", 2))
+            if _add_mirror_rows(p, inner, chart_col, [segs, below, [], []], d["read_history"],
+                                d["write_history"], labels, "byte", (10e6, 10e6)):
+                continue
+
         f.add(f"{rw:<{rate_w}}", 2)
 
         used_pct = d.get("used_pct")
@@ -1003,6 +1083,7 @@ def build_page1(state, tier, width, x0=0, height=None, sort_nics=False, theme_to
     show_sparkline = True
     show_legend = True
     collapse_nics = False
+    mirror_nics = mirror_disks = False
 
     cpu = state.get("cpu") or {}
     mem = state.get("mem") or {}
@@ -1027,6 +1108,17 @@ def build_page1(state, tier, width, x0=0, height=None, sort_nics=False, theme_to
             est -= 1
         if est > height and len(nics) > 1:
             collapse_nics = True
+        # Mirrored history (D-02 item 1) only with height to spare: NICs
+        # first, then disks; each mirrored row costs MIRROR_ROWS - 1 more.
+        if tier != "compact" and est <= height:
+            spare = height - est
+            up_nics = [n for n in nics if n.get("up") and can_mirror(n, "rx_history", "tx_history")]
+            cost = (MIRROR_ROWS - 1) * len(up_nics)
+            if up_nics and cost <= spare:
+                mirror_nics, spare = True, spare - cost
+            cost = (MIRROR_ROWS - 1) * sum(1 for d in disks if can_mirror(d, "read_history", "write_history"))
+            if mirror_nics and cost and cost <= spare:
+                mirror_disks = True
 
     out.append(_build_header(x0, width, tier, cluster_tabs=cluster_tabs, remote=remote, has_perf=has_perf))
     y = 1
@@ -1049,11 +1141,11 @@ def build_page1(state, tier, width, x0=0, height=None, sort_nics=False, theme_to
     rdma_counting = bool(net_caps.get("rdma_counting", True))
     port_counting = bool(net_caps.get("port_counting", False))
     net_panel = _build_network_panel(y, x0, width, nics, collapse_nics, tier, has_rdma,
-                                     rdma_counting, port_counting)
+                                     rdma_counting, port_counting, mirror=mirror_nics)
     out.append(net_panel)
     if disks:
         y += net_panel.total_height  # no +1: STORAGE continues this same frame
-        storage_panel = _build_storage_panel(y, x0, width, disks, tier)
+        storage_panel = _build_storage_panel(y, x0, width, disks, tier, mirror=mirror_disks)
         out.append(storage_panel)
         y += storage_panel.total_height + 1  # +1 for the frame's bottom border
     else:
