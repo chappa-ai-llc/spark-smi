@@ -56,7 +56,8 @@ Usage: spark-smi [options]
                    printing it (complete page, any width; see --size)
   --size COLS[xROWS]
                    snapshot mode: render at this size instead of the
-                   terminal's (with --shot, ROWS defaults to the whole page)
+                   terminal's (ROWS defaults to the terminal's height, or
+                   with --shot to the whole page)
   --warmup SECS    snapshot mode: sample once a second for SECS first, so
                    history graphs have data (0-120, default 0)
   --json           print one sample as JSON (+ node/model/version/ts) and exit
@@ -88,7 +89,7 @@ Snapshot mode (default, no -l) renders once and prints ANSI to stdout.
 renders the page once. `--page 4` with no --cluster (or fewer than 2
 members) prints a short "needs --cluster" note instead of a fabric panel.
 
-Live-mode keys: q quit  ·  t toggle C/F  ·  u toggle GiB/GB  ·  1/2 page
+Live-mode keys: q quit  ·  t toggle C/F  ·  u toggle GiB/GB  ·  1/2/5 page
                 n active-NICs-only  ·  s sort NICs by rate  ·  c cycle theme
                 S save this screen as SVG (current folder)  ·  ? help overlay
                 page 2: tab select GPU  ·  P/C/M/R/X knobs

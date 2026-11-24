@@ -507,7 +507,9 @@ class TaskCollector:
 
         panes = self._tmux.get() or {}
         screens = self._screen.get() or {}
-        for a in chain:
+        # The process itself first: a workload started as a pane's own
+        # command (no shell between) IS the pane's process.
+        for a in [cur] + chain:
             apid, comm = a["pid"], a["comm"]
             if apid in panes:
                 pn = panes[apid]
