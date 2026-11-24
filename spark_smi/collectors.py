@@ -4,6 +4,7 @@ state for pages.py to render -- no rendering logic lives here. Every sysfs
 read and subprocess call is guarded; a missing sensor degrades to N/A or a
 capability flag, it never raises past this module.
 """
+import ipaddress
 import math
 import os
 import re
@@ -1012,6 +1013,23 @@ def _first_ipv4(iface, addrs):
         pass
     return None
 
+
+def _first_ipv4_prefix(iface, addrs):
+    """Prefix length of that same first IPv4 address (24 for 255.255.255.0),
+    or None when there is no address or no usable netmask. Page 3's cluster
+    map joins rails on (address, prefix) networks; a node that sends no
+    prefix (older versions) is read as /24 there, as page 4 always has."""
+    try:
+        for snic in addrs.get(iface, []):
+            if snic.family == socket.AF_INET:
+                if not snic.netmask:
+                    return None
+                return ipaddress.IPv4Network(f"0.0.0.0/{snic.netmask}").prefixlen
+    except Exception:
+        pass
+    return None
+
+
 class NetCollector:
     """Physical-NIC discovery + RDMA-aware, physical-port-grouped throughput.
     Moved verbatim from the pre-2.0 NetMonitor -- rename only, plus a .caps
@@ -1523,6 +1541,7 @@ class NetCollector:
                 "ecn_marked": rates["np_ecn_marked_roce_packets"],
                 "discard": rates["out_of_buffer"],
                 "ip": _first_ipv4(iface, addrs),
+                "prefix": _first_ipv4_prefix(iface, addrs),
                 "asic_temp": self._rail_asic_temp(ib),
             })
         # Sort by (port, rdma dev) rather than the netdev iteration order

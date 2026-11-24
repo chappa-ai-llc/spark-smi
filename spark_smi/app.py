@@ -24,7 +24,7 @@ from . import term
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "4.3.1"
+    VERSION = "4.4.0"
 DEFAULT_REFRESH_RATE = 1.0
 HIST_LEN = 60
 
@@ -232,6 +232,8 @@ class State:
         self.gpu_hist = {}
         self.nic_hist = {}
         self.disk_hist = {}
+        # Page 3's MEMORY rows graph used % per node (sent in the sample).
+        self.mem_hist = deque(maxlen=HIST_LEN)
         # Phase 8: per-GPU (util, gen_cur) history for stuck-under-load
         # detection -- separate from gpu_hist (util-only, for sparklines)
         # since this needs the paired gen_cur reading at the same tick.
@@ -369,6 +371,11 @@ class State:
             hist["tx"].append(n.get("tx_bps", 0) or 0)
             n["rx_history"] = list(hist["rx"])
             n["tx_history"] = list(hist["tx"])
+        try:
+            self.mem_hist.append(float(mem["vm"].percent))
+            mem["history"] = list(self.mem_hist)
+        except Exception:
+            pass
         # Same for block devices: page 1's mirrored R/W history (D-02 item 1).
         for d in disks:
             hist = self.disk_hist.setdefault(d.get("name"), {"r": deque(maxlen=HIST_LEN), "w": deque(maxlen=HIST_LEN)})

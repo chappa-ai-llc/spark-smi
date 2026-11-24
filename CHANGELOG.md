@@ -6,6 +6,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.4.0] — 2026-11-24
+
+Page 3 fills the screen, and draws the cluster.
+
+### Added
+
+- **TOPOLOGY map on page 3:** when the terminal has rows to spare, a map
+  opens above the sections. Each node is a box (GPU, CPU and memory use,
+  hottest sensor, power). Each fabric link is a line with its live traffic
+  each way. Its weight and colour follow load. Links are found from the
+  nodes' RDMA port networks: a network two nodes share is a cable, one that
+  three or more share is a switch, drawn as a bus. Two directly cabled
+  nodes show one line per rail. Other links route along tracks beneath the
+  boxes. A node that stops answering keeps its lines, dimmed. The selected
+  node is highlighted on the map too.
+- Each node's sample now carries its RDMA ports' IPv4 prefix (`nic_pf`
+  `prefix`) and a memory-use history (`mem.history`). A node on an older
+  version still works on the map; its ports are read as /24.
+
+### Changed
+
+- Page 3's bars widen with the terminal (11 to 24 cells), and the CPU,
+  MEMORY and GPU history graphs start in one column and run to the right
+  edge instead of stopping at 20 cells. The MEMORY rows gained a graph.
+
 ## [4.3.1] — 2026-11-24
 
 ### Fixed
@@ -372,6 +397,7 @@ is still there, on page 1.
 
 - Initial public release.
 
+[4.4.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.4.0
 [4.3.1]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.3.1
 [4.3.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.3.0
 [4.2.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.2.0
