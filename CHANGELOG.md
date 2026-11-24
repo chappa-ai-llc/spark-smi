@@ -29,6 +29,9 @@ Page 5: a GPU task manager.
   `TypeError`; the picture now keeps the terminal's height (#12).
 - `?` opens the help overlay on every page; the README listed pages 1 and
   2 only.
+- `--ascii` left box-drawing and block glyphs in the header (the `│`
+  separators and the `▌1▐` page tab) and on page 4's chart axis; they now
+  switch to `|`, `[1]` and `+` with the frames.
 
 ### Changed
 

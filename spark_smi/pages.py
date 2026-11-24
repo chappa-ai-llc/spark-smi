@@ -208,17 +208,30 @@ def _short_mem(bytes_val):
 # Header / footer (plain, borderless panels)
 # =========================================================================
 
+def _hdr_glyphs():
+    """(tab open, tab close, separator) for the header: block elements and a
+    box-drawing bar, or ASCII stand-ins under --ascii (no UTF-8 box drawing)."""
+    if term.BAR_STYLE == "ascii":
+        return "[", "]", "|"
+    return "\u258c", "\u2590", "\u2502"
+
+
+def _tab(n, text=None):
+    lo, hi, _ = _hdr_glyphs()
+    return f"{lo}{n}{(' ' + text) if text else ''}{hi}"
+
+
 def _cluster_tabs_text(page, has_perf=False):
     order = [(1, "NODE"), (2, "ADV"), (3, "CLUSTER")]
     if has_perf:
         order.append((4, "PERF"))
     order.append((5, "TASKS"))
-    return " ".join(f"▌{n} {t}▐" if n == page else f"{n} {t}" for n, t in order) + " "
+    return " ".join(_tab(n, t) if n == page else f"{n} {t}" for n, t in order) + " "
 
 
 def _cluster_tabs_compact(page, has_perf=False):
     nums = (1, 2, 3, 4, 5) if has_perf else (1, 2, 3, 5)
-    return "".join(f"▌{n}▐" if n == page else str(n) for n in nums) + "  "
+    return "".join(_tab(n) if n == page else str(n) for n in nums) + "  "
 
 
 # Page 5 (GPU tasks) is local-only but always available, so it sits on the
@@ -227,11 +240,11 @@ def _cluster_tabs_compact(page, has_perf=False):
 # moves depending on how spark-smi was launched.
 def _local_tabs_text(page):
     order = [(1, "OVERVIEW"), (2, "ADVANCED"), (5, "TASKS")]
-    return "  ".join(f"▌{n}▐ {t}" if n == page else f"{n} {t}" for n, t in order) + "  "
+    return "  ".join(f"{_tab(n)} {t}" if n == page else f"{n} {t}" for n, t in order) + "  "
 
 
 def _local_tabs_compact(page):
-    return "".join(f"▌{n}▐" if n == page else str(n) for n in (1, 2, 5)) + "  "
+    return "".join(_tab(n) if n == page else str(n) for n in (1, 2, 5)) + "  "
 
 
 def _build_header(x0, width, tier, page=1, cluster_tabs=False, cluster_summary=None, remote=None, has_perf=False):
@@ -255,16 +268,17 @@ def _build_header(x0, width, tier, page=1, cluster_tabs=False, cluster_summary=N
     arch = (_safe(platform.machine, "") or "") if not remote else ""
     uptime = _fmt_uptime(time.time() - _safe(psutil.boot_time, time.time())) if not remote else ""
     clock = time.strftime("%H:%M:%S")
+    bar = _hdr_glyphs()[2]
     remote_tag = [(" · remote", 6)] if remote else []
 
     if tier == "compact":
         if cluster_summary is not None:
-            core = f" │ {cluster_summary}"
+            core = f" {bar} {cluster_summary}"
         elif remote:
-            core = f" │ {host}"
+            core = f" {bar} {host}"
         else:
             chip = model or arch
-            core = f" │ {host}" + (f" · {chip}" if chip else "")
+            core = f" {bar} {host}" + (f" · {chip}" if chip else "")
         tabs = _cluster_tabs_compact(page, has_perf) if cluster_tabs else _local_tabs_compact(page)
         right = [(tabs, 9), (clock, 3)]
         p = panels.Panel(0, x0, width, kind="plain")
@@ -279,7 +293,7 @@ def _build_header(x0, width, tier, page=1, cluster_tabs=False, cluster_summary=N
     prefix = f" SPARK-SMI {SERIES}"
 
     if cluster_summary is not None:
-        core = f" │ {cluster_summary}"
+        core = f" {bar} {cluster_summary}"
         p = panels.Panel(0, x0, width, kind="plain")
         p.rows.append(([(prefix, 9), (core, 3)], right))
         return p
@@ -291,11 +305,11 @@ def _build_header(x0, width, tier, page=1, cluster_tabs=False, cluster_summary=N
 
     def build():
         tail = [t for t, key in ((model, "model"), (arch, "arch")) if show[key] and t]
-        s = f" │ {host}"
+        s = f" {bar} {host}"
         if tail:
             s += " — " + " · ".join(tail)
         if show["uptime"]:
-            s += f" │ up {uptime}"
+            s += f" {bar} up {uptime}"
         return s
 
     core = build()
@@ -2567,7 +2581,7 @@ def build_page3(cluster_ctx, tier, width, x0=0, height=None, has_perf=False):
 
     summary = f"{total_nodes} node{'s' if total_nodes != 1 else ''} · {'all up' if up == total_nodes else f'{up} up'}"
     if wall_w is not None:
-        summary += f"  │  Σ wall {wall_w / 1000:.2f} kW" if wall_w >= 1000 else f"  │  Σ wall {wall_w:.0f} W"
+        summary += f"  {_hdr_glyphs()[2]}  Σ wall {wall_w / 1000:.2f} kW" if wall_w >= 1000 else f"  {_hdr_glyphs()[2]}  Σ wall {wall_w:.0f} W"
     summary = f"{name} — {summary}"
 
     out.append(_build_header(x0, width, tier, page=3, cluster_tabs=True, cluster_summary=summary, has_perf=has_perf))
@@ -2813,7 +2827,8 @@ def _build_bandwidth_panel(y, x0, width, fab_ctx, chart_h, show_legend):
     y_labels = _chart_y_labels(chart_h, link_gbps)
     for row_idx, run in enumerate(rows):
         lbl = y_labels.get(row_idx)
-        prefix = f"{lbl} ┤" if lbl else "    │"
+        tick, axis = ("+", "|") if term.BAR_STYLE == "ascii" else ("\u2524", "\u2502")
+        prefix = f"{lbl} {tick}" if lbl else f"    {axis}"
         segs = [(2, prefix, 6)]
         col = 2 + len(prefix)
         for text, slot in run:
