@@ -6,6 +6,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.3.0] — 2026-11-24
+
+Page 5: a GPU task manager.
+
+### Added
+
+- **Page 5 — GPU tasks** (`5`, `--page 5`): every process holding a GPU
+  context as a tree, one root per GPU, grouped by the session it lives in
+  (tmux pane, screen, docker container, systemd unit, ssh login, terminal),
+  with orphaned processes flagged. Live mode adds `Enter`/`o` to open the
+  session (tmux/screen attach, journal or docker log tail), `e` to end a
+  process or session through its own manager, `k` to kill it, and `a` to
+  also list bare `/dev/nvidia*` holders. Ending anything asks `y`/`N`
+  first; any other key cancels. Snapshot mode is read-only, and page 5
+  always shows the local machine, also in cluster mode (#4).
+- Unit tests for page 5's session grouping, tree order and confirm gate.
+- README: a page-5 screenshot. `--shot` draws page 5's `▾` GPU markers as
+  shapes, like the other markers, so pictures don't depend on the font.
+
+### Fixed
+
+- `--size COLS` without ROWS and without `--shot` crashed with a
+  `TypeError`; the picture now keeps the terminal's height (#12).
+- `?` opens the help overlay on every page; the README listed pages 1 and
+  2 only.
+- `--ascii` left box-drawing and block glyphs in the header (the `│`
+  separators and the `▌1▐` page tab) and on page 4's chart axis; they now
+  switch to `|`, `[1]` and `+` with the frames.
+
 ### Changed
 
 - README images re-captured with spark-smi 4.2.0 (mirrored history, graded
@@ -329,6 +358,7 @@ is still there, on page 1.
 
 - Initial public release.
 
+[4.3.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.3.0
 [4.2.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.2.0
 [4.1.1]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.1.1
 [4.1.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.1.0

@@ -168,3 +168,25 @@ class IdlePeakTest(unittest.TestCase):
             f = pages._Flow(40)
             pages._add_graded_spark(f, [0, 0, 0, 0], 30)
             self.assertNotIn("peak", "".join(t for _, t, _ in f.segs))
+
+
+class AsciiHeaderTest(unittest.TestCase):
+    """--ascii promises no UTF-8 box drawing: the header's tab marks and
+    separators switch to ASCII with the bars and frames."""
+
+    def text(self, style, **kw):
+        with mock.patch.object(term, "BAR_STYLE", style):
+            p = pages._build_header(0, 140, kw.pop("tier", "wide"), **kw)
+        return "".join(t for left, right in p.rows for t, _ in left + right)
+
+    def test_ascii_header_has_no_box_or_block_glyphs(self):
+        for tier in ("wide", "compact"):
+            for kw in ({"page": 5}, {"page": 3, "cluster_tabs": True, "cluster_summary": "grid"}):
+                s = self.text("ascii", tier=tier, **kw)
+                self.assertFalse(set(s) & set("│▌▐"), (tier, kw, s))
+                self.assertIn("[5" if kw["page"] == 5 else "[3", s)
+
+    def test_unicode_header_keeps_its_marks(self):
+        s = self.text("eighths", page=2)
+        self.assertIn("▌2▐", s)
+        self.assertIn("│", s)

@@ -426,13 +426,15 @@ class VirtualCurses:
         self.colors[0] = "\033[0m"
 
     def update_dims(self):
-        if self.size:
-            self.cols, self.rows = self.size
-            return
         try:
-            self.cols, self.rows = shutil.get_terminal_size()
+            term_cols, term_rows = shutil.get_terminal_size()
         except Exception:
-            self.cols, self.rows = 120, 50
+            term_cols, term_rows = 120, 50
+        if self.size:
+            # --size COLS without ROWS keeps the terminal's height (#12).
+            self.cols, self.rows = self.size[0], (self.size[1] or term_rows)
+            return
+        self.cols, self.rows = term_cols, term_rows
 
     def getmaxyx(self):
         self.update_dims()

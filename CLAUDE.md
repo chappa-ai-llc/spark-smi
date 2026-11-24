@@ -14,6 +14,7 @@ python spark-smi.py               # snapshot mode: render once, print ANSI to st
 python spark-smi.py -l            # live mode: curses TUI, 1s refresh (q=quit, t=°C/°F, u=GiB/GB, ?=help)
 python spark-smi.py -n 2 -l       # live mode at a 2s refresh rate instead of the 1s default
 python spark-smi.py --page 2      # snapshot the advanced page instead of the overview
+python spark-smi.py --page 5      # GPU tasks page (read-only here; live mode adds open/end/kill)
 python spark-smi.py --ascii       # force plain-ASCII bars/frames regardless of terminal detection
 python spark-smi.py --theme nord  # one of 10 themes; `c` cycles them in live mode
 python spark-smi.py --serve       # read-only sample agent on :8817 (GET /sample, /healthz)
@@ -25,8 +26,9 @@ python spark-smi.py --page 2 --size 130 --warmup 5 --shot p2.svg   # page as SVG
 The monitor's rendering has no tests and no linter is configured — verification is by
 rendering against real hardware over ssh (see `scratchpad/`, gitignored, for
 the deploy/record helpers). Unit tests cover the release script and a few
-pure pieces (cluster token reader, node names, the network counter rules and
-the ethtool netlink codec): `python3 -m unittest discover -s deploy` and
+pure pieces (cluster token reader, node names, the network counter rules,
+the ethtool netlink codec, themes, graphs, SVG shots, and page 5's session
+grouping and confirm gate): `python3 -m unittest discover -s deploy` and
 `python3 -m unittest discover -s tests` (the second needs psutil installed). Packaging is setuptools via
 `pyproject.toml`; the pip entry point is `spark-smi = spark_smi.__main__:main`.
 
@@ -109,7 +111,8 @@ spark_smi/
   pages.py        build_page1(state, tier, width, x0, height, sort_nics) and
                   build_page2(state, tier, width, x0, height, knob_ui) turn a
                   sampled state dict into a list of positioned panels.Panel
-                  objects. build_help_overlay(term_w, term_h) builds the `?`
+                  objects (build_page5 draws the tasks tree it is handed;
+                  pages 3-4 have their own builders). build_help_overlay(term_w, term_h) builds the `?`
                   key's overlay panel, appended after the page so it paints
                   on top.
   knobs.py        Phase-4 page-2 power/clock knobs: build_registry(sample) is
@@ -142,6 +145,14 @@ spark_smi/
                   ~/.local/share/spark-smi/fabric-tests.jsonl. Measurements
                   come from HCA counters sampled during the run (median of
                   steady state), never from perftest's own summary line.
+  tasks.py        Page-5 GPU task manager: TaskCollector (GPU pids from
+                  NVML/nvidia-smi, optional /dev/nvidia* holders, each
+                  grouped by session: docker > tmux/screen/zellij pane >
+                  systemd unit > ssh > orphan > tty), flatten() (tree ->
+                  rows), TaskUI (pure state transitions + y-only confirm,
+                  the knobs.py shape), and end_process()/end_group()/
+                  open_group_argv() -- the only code that signals or runs
+                  a session manager. Live mode only constructs TaskUI.
   node.py         Node identity: hostname() (real short hostname — local-
                   member detection and fabtest's local-vs-ssh choice) and
                   display_name() (--node-name / $SPARK_SMI_NODE_NAME, else

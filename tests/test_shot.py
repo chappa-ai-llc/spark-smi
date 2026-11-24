@@ -71,6 +71,11 @@ class SvgTest(unittest.TestCase):
         d = [p.get("d") for p in root.iter(NS + "path")][0]
         self.assertEqual(d.count("h0"), 9)  # 8 dots + 1 dot, blank cell adds none
 
+    def test_tree_markers_are_drawn_not_typed(self):
+        # page 5: picture fonts may lack these, so they are shapes
+        root = parse(shot.grid_to_svg(grid_of(["▾▶"])))
+        self.assertEqual(len(list(root.iter(NS + "text"))), 0)
+
     def test_empty_grid(self):
         root = parse(shot.grid_to_svg(term.VirtualCurses(size=(40, 8)).grid))
         self.assertEqual(root.get("width"), str(shot.PAD * 2))
@@ -93,6 +98,18 @@ class ParseSizeTest(unittest.TestCase):
         for bad in ("", "x", "140x", "abc", "39", "401", "140x7", "140x45x2", "-5"):
             with self.assertRaises(ValueError, msg=bad):
                 app.parse_size(bad)
+
+
+class VirtualCursesSizeTest(unittest.TestCase):
+    def test_cols_without_rows_keeps_terminal_height(self):
+        # --size 120 without --shot: parse_size gives (120, None) (#12).
+        from unittest import mock
+        with mock.patch.object(term.shutil, "get_terminal_size", return_value=os.terminal_size((80, 33))):
+            v = term.VirtualCurses(size=app.parse_size("120"))
+            self.assertEqual(v.getmaxyx(), (33, 120))
+            self.assertEqual(len(v.grid), 33)
+            self.assertEqual(term.VirtualCurses(size=(120, 40)).getmaxyx(), (40, 120))
+            self.assertEqual(term.VirtualCurses().getmaxyx(), (33, 80))
 
 
 class TeeScreenTest(unittest.TestCase):

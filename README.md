@@ -2,7 +2,7 @@
 
 > A terminal-based system monitor (TUI) built for **NVIDIA Grace Blackwell (GB10)** and hybrid ARM architectures — because `nvidia-smi` alone doesn't tell the full story.
 
-![Version](https://img.shields.io/badge/version-4.2.0-blue)
+![Version](https://img.shields.io/badge/version-4.3.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8%2B-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Linux%20aarch64-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -62,7 +62,7 @@ the tool isn't there, the feature isn't shown, nothing crashes:
 
 ---
 
-## Four pages
+## Five pages
 
 **Page 1 — Overview** (`1`): CPU clusters with per-core load, MEMORY with a
 segmented used/cache/free bar, one card per GPU (utilization, memory, clocks,
@@ -92,6 +92,22 @@ one page that *actuates*. It runs real RDMA bandwidth and latency tests
 between nodes — per rail, node-to-node, or all nodes at once — and charts the
 result live while correlating each NIC's ASIC temperature against sustained
 load. Every run is behind an explicit confirm. See "Fabric validation" below.
+
+**Page 5 — GPU tasks** (`5`, live mode, this machine only): every process
+holding a GPU context, as a tree. Each GPU is a root; below it, processes are
+grouped by where they live — a tmux pane, a screen session, a docker
+container, a systemd unit, an ssh login or a plain terminal — and processes
+whose parent or login session is gone are flagged **orphaned**. Columns show
+the user, CPU, resident memory, GPU memory and age (fewer at narrow widths).
+`Enter` opens the selected session (attaches to the tmux pane or screen
+session, or tails the unit's journal or the container's log); `e` ends a
+process or a whole session through its own manager (`tmux kill-pane`,
+`docker stop`, `systemctl stop`), `k` kills it with SIGKILL. Ending anything
+asks `y`/`N` first. A process owned by another user needs passwordless sudo,
+and another user's tmux server cannot be attached. `a` also lists processes
+that only hold `/dev/nvidia*` open (monitoring tools, an idle CUDA context).
+Snapshot mode (`--page 5`) shows the same tree read-only. In cluster mode
+page 5 always shows the local machine.
 
 ### History graphs
 
@@ -287,13 +303,14 @@ directory, plus ASIC temperature from the NIC's own hwmon device.
 |:---:|:---:|:---|
 | `q` | all | Quit |
 | `1` / `2` | all | Switch page (overview / advanced) |
+| `5` | all | GPU tasks page (this machine's processes, even in cluster mode) |
 | `3` | all | Cluster page (only live with `--cluster`; inert otherwise) |
 | `4` | all | Fabric validation page (only live with `--cluster` and 2+ members; inert otherwise) |
 | `t` | all | Toggle temperature units (°C / °F) |
 | `u` | all | Toggle memory units (GiB / GB, decimal) |
 | `c` | all | Cycle color theme (see "Themes" above; capital `T` is an undocumented alias) |
 | `S` | all | Save the screen as an SVG picture in the current folder, named `spark-smi-page<N>-<date>-<time>.svg` |
-| `?` | 1 / 2 | Toggle the help overlay (any key dismisses it) |
+| `?` | all | Toggle the help overlay (any key dismisses it) |
 | `n` | 1 | Show active NICs only |
 | `s` | 1 | Sort NIC rows by current rate (max of RX/TX), descending — toggle back to detection order |
 | `Tab` | 2 | Select GPU (when more than one) |
@@ -312,6 +329,16 @@ directory, plus ASIC temperature from the NIC's own hwmon device.
 | `m` | 4 | Cycle test mode: one pair / all-pairs sweep / all-nodes burst |
 | `d` | 4 | Cycle test duration: 10s / 30s / 60s per pair |
 | `↑` / `↓` | 4 | Select which pair to run (pair mode only) |
+| `↑` / `↓`, `PgUp` / `PgDn` | 5 | Select a row (GPU, session or process); page keys move 10 rows |
+| `Enter` / `o` | 5 | Open the selected session: attach to its tmux pane or screen session, or tail its journal or docker log |
+| `e` | 5 | End the selected process (SIGTERM) or session (its manager's stop) — raises a `y`/`N` confirm |
+| `k` | 5 | Kill the selected process or session (SIGKILL / `docker kill` / `systemctl kill`) — raises a `y`/`N` confirm |
+| `a` | 5 | Also list processes that only hold `/dev/nvidia*` open |
+| `Esc` | 5 | Cancel the pending confirm |
+
+Page 5 can end other people's work: `e` and `k` stop running GPU jobs, and
+unsaved work in them is lost. Nothing is signalled until you press `y` at the
+prompt; any other key cancels.
 
 Page 4 (fabric validation) is confirm-gated for a reason: it drives real RDMA
 traffic between nodes and can saturate the fabric. See "Fabric validation"
@@ -386,9 +413,10 @@ spark-smi [options]
   -n <secs>        refresh rate in seconds (default: 1)
   -p, --page <n>   which page to render in snapshot mode: 1 overview (default),
                    2 advanced (GPU detail, NIC/thermal/SMART panels),
-                   3 cluster (requires --cluster), or 4 fabric validation
+                   3 cluster (requires --cluster), 4 fabric validation
                    (requires --cluster with 2+ members; snapshot mode only
-                   ever shows the last recorded run -- it never starts one)
+                   ever shows the last recorded run -- it never starts one),
+                   or 5 GPU tasks (read-only in snapshot mode)
   --theme <name>   color theme (default: spark; or $SPARK_SMI_THEME)
   --theme list     print the available theme names, one per line, and exit
   --background auto|dark|light
@@ -401,7 +429,8 @@ spark-smi [options]
                    printing it (complete page, any width; see --size)
   --size COLS[xROWS]
                    snapshot mode: render at this size instead of the
-                   terminal's (with --shot, ROWS defaults to the whole page)
+                   terminal's (ROWS defaults to the terminal's height, or
+                   with --shot to the whole page)
   --warmup SECS    snapshot mode: sample once a second for SECS first, so
                    history graphs have data (0-120, default 0)
   --json           print one sample as JSON (+ node/model/version/ts) and exit
@@ -612,6 +641,14 @@ with ASIC temperature tracked across the run and an all-pairs
 bandwidth/latency matrix. Between two Sparks it measured about 53 Gb/s per
 rail: four rails sharing one PCIe gen5 ×4 uplink, which is exactly the kind
 of ceiling this page exists to expose.
+
+**Page 5 — GPU tasks.** Every GPU process under its GPU, grouped by where it
+runs: a tmux server, a docker container, the desktop's terminal. The eGPU
+and the GB10 each get their own tree. Captured with 4.3 by `--shot`; account
+names, the model path and the container name were replaced with
+`[markers]` before publishing.
+
+![Page 5 GPU tasks](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page5-tasks.png)
 
 ---
 
