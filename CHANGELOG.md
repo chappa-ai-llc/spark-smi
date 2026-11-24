@@ -4,7 +4,23 @@ All notable changes to SPARK-SMI are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [4.1.1] — 2026-11-24
+
+TCP and RDMA on one port at the same time now read as their sum.
+
+### Fixed
+
+- Network rates count mixed kernel and RDMA traffic in full. Where a NIC
+  reports the IEEE 802.3 MAC byte counters (mlx5 does, on Linux 5.13 or
+  later), each physical port's rate comes from them, read over ethtool
+  netlink with no root and no subprocess. They count every frame on the
+  wire, so TCP and RDMA on one port add up instead of showing the larger of
+  the two: on a DGX Spark, 49 Gb/s of iperf3 plus 61 Gb/s of `ib_write_bw`
+  now reads 112 Gb/s, not about 60. PFs that share one physical port read
+  the same counter and count once. The per-netdev rule stays the floor and
+  the fallback. Page 2's per-PF rows use the port counter only where a port
+  has a single PF. The NETWORK caption reads **port counters, RDMA +
+  kernel** when every RDMA-backed port has them (#11).
 
 ### Changed
 
@@ -259,6 +275,7 @@ is still there, on page 1.
 
 - Initial public release.
 
+[4.1.1]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.1.1
 [4.1.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.1.0
 [4.0.4]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.0.4
 [4.0.3]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.0.3

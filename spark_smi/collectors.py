@@ -14,6 +14,8 @@ import time
 
 import psutil
 
+from . import ethtool
+
 # --- NVML import strategy ---------------------------------------------
 # Force-check for pynvml, but don't crash if the venv isn't active.
 try:
@@ -1021,13 +1023,31 @@ class NetCollector:
         self._rdma_dev_map = {}  # iface -> (ib_device_name, port_str), filled by _map_rdma_counters
         self.rdma_counters = self._map_rdma_counters()
         self.groups = self._group_physical()
+        # Physical-port MAC byte counters (issue #11): they count RDMA and
+        # kernel traffic alike. PFs sharing one physical port read the same
+        # counter, so it is keyed by port ("unit") and read once per port.
+        self._unit = {n: self._phys_port_key(n) or n for n in self.interfaces}
+        self._unit_size = {}
+        for u in self._unit.values():
+            self._unit_size[u] = self._unit_size.get(u, 0) + 1
+        self.port_readers = {}
+        for n in self.interfaces:
+            u = self._unit[n]
+            if u not in self.port_readers:
+                r = ethtool.port_byte_reader(n)
+                if r is not None:
+                    self.port_readers[u] = r
         # "rdma_counting" flips to True the first time any HCA byte counter
         # reads non-zero. Some driver/firmware builds count only RDMA in
         # ports/N/counters, never kernel traffic (issues #10, #11), so they
         # sit at 0 until RDMA runs; until one moves, page 1 must not claim
         # RDMA traffic is being counted.
+        # "port_counting": every RDMA-backed port has MAC counters, so every
+        # rate includes RDMA and kernel traffic, mixed or not.
         self.caps = {"rdma": bool(self.rdma_counters), "interfaces": len(self.interfaces),
-                     "pf_detail": bool(self._rdma_dev_map), "rdma_counting": False}
+                     "pf_detail": bool(self._rdma_dev_map), "rdma_counting": False,
+                     "port_counting": bool(self.rdma_counters) and all(
+                         self._unit[n] in self.port_readers for n in self.rdma_counters)}
         try:
             netdev_stats = psutil.net_io_counters(pernic=True)
         except Exception:
@@ -1037,6 +1057,8 @@ class NetCollector:
             b = self._read_byte_counters(name, netdev_stats)
             if b is not None:
                 self.prev_bytes[name] = b
+        self.prev_port = {u: v for u, v in
+                          ((u, r.read()) for u, r in self.port_readers.items()) if v is not None}
         self.prev_time = time.time()
         # Separate delta-tracking state for sample_pf_detail() (page 2's
         # ungrouped per-PF panel) -- kept independent of the grouped-port
@@ -1055,6 +1077,11 @@ class NetCollector:
             if b is not None:
                 self.prev_bytes_pf[iface] = b
             self.prev_hw[iface] = self._hw_counter_snapshot(iface)
+        self.prev_port_pf = {}
+        for u in self._pf_port_units():
+            v = self.port_readers[u].read()
+            if v is not None:
+                self.prev_port_pf[u] = v
         self.prev_time_pf = time.time()
 
     def _detect_interfaces(self):
@@ -1156,6 +1183,46 @@ class NetCollector:
                     best = max(best, c[d] - p[d])
             out.append(best * 8 / dt)
         return tuple(out)
+
+    def _port_rate(self, unit, prev_store, dt):
+        """(rx_bps, tx_bps) from the port's MAC counters since the reading in
+        prev_store (updated in place), or None when there is no reading.
+        A counter reset clamps to 0."""
+        reader = self.port_readers.get(unit)
+        cur = reader.read() if reader is not None else None
+        if cur is None:
+            return None
+        prev = prev_store.get(unit)
+        prev_store[unit] = cur
+        if prev is None:
+            return None
+        return tuple(max(cur[d] - prev[d], 0) * 8 / dt for d in (0, 1))
+
+    @staticmethod
+    def _combine(members, unit_of, rate, port_rate):
+        """(rx_bps, tx_bps) for a set of netdevs: each physical port counts
+        once. A port with a MAC-counter rate takes the larger of that and
+        the sum of its PFs' per-netdev rates (which stays the floor, and the
+        whole answer where the port has no MAC counters)."""
+        by_unit = {}
+        for m in members:
+            by_unit.setdefault(unit_of[m], []).append(m)
+        rx = tx = 0.0
+        for unit, ms in by_unit.items():
+            r = (sum(rate[m][0] for m in ms), sum(rate[m][1] for m in ms))
+            p = port_rate.get(unit)
+            if p is not None:
+                r = (max(p[0], r[0]), max(p[1], r[1]))
+            rx += r[0]
+            tx += r[1]
+        return rx, tx
+
+    def _pf_port_units(self):
+        """Ports whose MAC counters page 2 may use for a PF row: only ports
+        with exactly one PF, because a shared port's counter is the sum of
+        all its PFs' traffic, not one PF's."""
+        return [self._unit[i] for i in self._rdma_dev_map
+                if self._unit_size.get(self._unit[i]) == 1 and self._unit[i] in self.port_readers]
 
     def _phys_port_key(self, iface):
         """(switch_id, port_name) identity of the physical port behind a
@@ -1306,6 +1373,11 @@ class NetCollector:
                 continue
             rate[name] = self._rates(b, self.prev_bytes.get(name, b), dt)
             self.prev_bytes[name] = b
+        port_rate = {}
+        for unit in self.port_readers:
+            p = self._port_rate(unit, self.prev_port, dt)
+            if p is not None:
+                port_rate[unit] = p
 
         nics = []
         for g in self.groups:
@@ -1332,8 +1404,7 @@ class NetCollector:
                              "rx_bps": 0, "tx_bps": 0, "rx_pct": 0, "tx_pct": 0,
                              "down_reason": "no carrier", "label": "Link Down"})
                 continue
-            group_rx = sum(rate[m][0] for m in live)
-            group_tx = sum(rate[m][1] for m in live)
+            group_rx, group_tx = self._combine(live, self._unit, rate, port_rate)
             rx_pct = (group_rx / (total_mbit * 1_000_000)) * 100
             tx_pct = (group_tx / (total_mbit * 1_000_000)) * 100
             if shared_port:
@@ -1405,6 +1476,7 @@ class NetCollector:
         except Exception:
             addrs = {}
         rows = []
+        pf_units = set(self._pf_port_units())
         for iface in sorted(self._rdma_dev_map):
             ib = self._rdma_dev_map[iface][0]
 
@@ -1419,6 +1491,11 @@ class NetCollector:
                 # here would mean a newly-appeared iface, not the common case.
                 rx_bps, tx_bps = self._rates(b, self.prev_bytes_pf.get(iface, b), dt)
                 self.prev_bytes_pf[iface] = b
+            unit = self._unit.get(iface, iface)
+            if unit in pf_units:
+                p = self._port_rate(unit, self.prev_port_pf, dt)
+                if p is not None:
+                    rx_bps, tx_bps = max(p[0], rx_bps), max(p[1], tx_bps)
 
             raw = self._hw_counter_snapshot(iface)
             prev_hw = self.prev_hw.get(iface, raw)

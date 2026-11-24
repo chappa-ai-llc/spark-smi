@@ -21,7 +21,7 @@ from . import term
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "4.1.0"
+    VERSION = "4.1.1"
 DEFAULT_REFRESH_RATE = 1.0
 HIST_LEN = 60
 
