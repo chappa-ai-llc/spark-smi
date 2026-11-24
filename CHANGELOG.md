@@ -6,6 +6,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.0.4] — 2026-11-24
+
+A fix for network rates that read 0 on some DGX Spark builds.
+
+### Fixed
+
+- NETWORK (page 1), FABRIC (page 3) and the per-port rates (page 2) read
+  `0 Mb/s` during real traffic where the driver leaves every HCA port counter
+  at 0 (seen with kernel `7.0.0-1025-nvidia` and ConnectX-7 firmware 28.50).
+  Each direction now takes the larger of the HCA and kernel netdev deltas, so
+  TCP traffic always shows, and RDMA still counts where the HCA counters work
+  (#10).
+
+### Changed
+
+- While no HCA counter has moved, page 1's NETWORK caption reads "HCA
+  counters read 0, kernel traffic only" instead of claiming RDMA is counted.
+- Page 2's per-port columns are named `RX` and `TX` (were `RDMA RX` and
+  `RDMA TX`), since they now show port traffic of either kind.
+- The README's counter section names the right directory
+  (`ports/<n>/counters/`, not `hw_counters/`).
+
 ## [4.0.3] — 2026-11-24
 
 A documentation release.
@@ -206,6 +228,7 @@ is still there, on page 1.
 
 - Initial public release.
 
+[4.0.4]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.0.4
 [4.0.3]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.0.3
 [4.0.2]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.0.2
 [4.0.1]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.0.1

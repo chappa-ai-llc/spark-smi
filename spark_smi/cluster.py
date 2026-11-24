@@ -30,7 +30,7 @@ from types import SimpleNamespace
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "4.0.3"
+    VERSION = "4.0.4"
 
 DEFAULT_PORT = 8817
 POLL_TIMEOUT = 0.75          # per-member urllib timeout (spec)

@@ -2,7 +2,7 @@
 
 > A terminal-based system monitor (TUI) built for **NVIDIA Grace Blackwell (GB10)** and hybrid ARM architectures — because `nvidia-smi` alone doesn't tell the full story.
 
-![Version](https://img.shields.io/badge/version-4.0.3-blue)
+![Version](https://img.shields.io/badge/version-4.0.4-blue)
 ![Python](https://img.shields.io/badge/python-3.8%2B-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Linux%20aarch64-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -212,15 +212,24 @@ entirely — it never touches the netdev's `rx_bytes`/`tx_bytes` counters that
 `psutil`, `ifconfig`, or `ip -s link` read. A monitor that only reads netdev
 counters will show near-zero traffic on a link that's actually saturated.
 
-SPARK-SMI reads the **HCA's own hardware counters** instead, wherever an
-RDMA device is present: `/sys/class/infiniband/<hca>/ports/<n>/hw_counters/`
+SPARK-SMI reads the **HCA's own hardware counters** as well, wherever an
+RDMA device is present: `/sys/class/infiniband/<hca>/ports/<n>/counters/`
 exposes `port_rcv_data`/`port_xmit_data` in **4-byte-word units** (per the
 InfiniBand spec — multiplied by 4 to get bytes), and these count RoCE traffic
-that the kernel netdev stats miss. Every other NIC falls back to the normal
-psutil netdev counters. RX and TX are kept as separate rates throughout
-(never summed into one "throughput" number), and a counter reset from a
-driver reload is clamped to zero instead of showing a giant negative-delta
-spike.
+that the kernel netdev stats miss. Every tick, each direction takes the
+larger of the HCA delta and the netdev delta: a working HCA counter also
+counts kernel traffic, so it wins, and a stuck one cannot hide it. Every
+other NIC uses the normal psutil netdev counters. RX and TX are kept as
+separate rates throughout (never summed into one "throughput" number), and
+a counter reset from a driver reload is clamped to zero instead of showing a
+giant negative-delta spike.
+
+Some driver and firmware builds leave every HCA counter at 0 (seen on a DGX
+Spark with kernel `7.0.0-1025-nvidia` and ConnectX-7 firmware 28.50). Until
+one of them moves, the NETWORK panel's caption reads **HCA counters read 0,
+kernel traffic only**: TCP traffic (iperf3, ssh, NFS) still shows, but RDMA
+traffic that bypasses the kernel cannot be counted, so an NCCL or
+`ib_write_bw` run will read low or zero there and on page 4.
 
 Page 2's NIC panel goes further: per-PF congestion/ECN counters (CNP sent/
 handled, ECN marks, buffer discards) straight from the same `hw_counters`
