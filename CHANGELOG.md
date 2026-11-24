@@ -24,6 +24,10 @@ real host names.
 ### Fixed
 
 - `--help` lists page 3 under `--page`, as the README already did.
+- The README's HCA-counter section said an RDMA run reads low or zero where
+  the HCA counters read 0. Measured since: on that build they count RDMA
+  exactly and only miss kernel traffic, so page 4's RDMA tests are right.
+  Mixed TCP + RDMA on one port reads as the larger of the two (#11).
 
 ## [4.0.4] — 2026-11-24
 

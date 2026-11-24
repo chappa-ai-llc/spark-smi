@@ -1022,9 +1022,10 @@ class NetCollector:
         self.rdma_counters = self._map_rdma_counters()
         self.groups = self._group_physical()
         # "rdma_counting" flips to True the first time any HCA byte counter
-        # reads non-zero. Some driver/firmware builds leave every counter
-        # under ports/N/counters at 0 forever (issue #10); until one moves,
-        # page 1 must not claim RDMA traffic is being counted.
+        # reads non-zero. Some driver/firmware builds count only RDMA in
+        # ports/N/counters, never kernel traffic (issues #10, #11), so they
+        # sit at 0 until RDMA runs; until one moves, page 1 must not claim
+        # RDMA traffic is being counted.
         self.caps = {"rdma": bool(self.rdma_counters), "interfaces": len(self.interfaces),
                      "pf_detail": bool(self._rdma_dev_map), "rdma_counting": False}
         try:
