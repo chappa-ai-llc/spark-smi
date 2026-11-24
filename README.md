@@ -563,9 +563,10 @@ spark-smi -l --cluster node-1,node-2,node-3,node-4
 
 ## Screenshots
 
-Captured on two DGX Sparks, one with an RTX 3090 attached, in the `nord`
-theme, with an iperf3 run on the first ConnectX-7 port and the node names
-set with `--node-name`.
+Captured with spark-smi 4.2 on two DGX Sparks, one with an RTX 3090
+attached, in the `nord` theme, with an iperf3 run on the first ConnectX-7
+port and the node names set with `--node-name`. Pages 1 and 2 were written
+by `--shot` itself; page 3 was saved with the live `S` key.
 
 ### Make your own
 
@@ -583,8 +584,8 @@ are drawn as shapes, so they line up in any viewer whatever fonts it has;
 text stays selectable. A page is about 20-45 KB.
 
 **Page 1 — Overview.** Hybrid Cortex-X925/A725 clusters, unified memory split
-into process/GPU/cache segments, both GPUs side by side, RDMA-aware NIC
-rates, storage.
+into process/GPU/cache segments, both GPUs side by side, and mirrored
+upload/download history for every NIC port and disk.
 
 ![Page 1 overview](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page1-overview.png)
 
