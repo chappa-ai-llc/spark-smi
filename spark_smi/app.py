@@ -42,6 +42,11 @@ Usage: spark-smi [options]
                    a test)
   --theme <name>   color theme (default: spark; or $SPARK_SMI_THEME)
   --theme list     print the available theme names, one per line, and exit
+  --background auto|dark|light
+                   which ground the theme is measured against (default auto:
+                   ask the terminal, then $COLORFGBG, else dark; or
+                   $SPARK_SMI_BACKGROUND). Pictures (--shot) use dark
+                   unless this says light
   --ascii          force plain-ASCII bars/frames (no UTF-8 box drawing)
   --shot FILE.svg  snapshot mode: write the page as an SVG picture instead of
                    printing it (complete page, any width; see --size)
@@ -69,8 +74,10 @@ Usage: spark-smi [options]
   -h, --help       show this help and exit
 
 Themes: {", ".join(term.THEMES)}, cycled live with the 'c' key.
-$SPARK_SMI_THEME sets the default when --theme isn't passed; an unknown name
-prints the valid list and exits 1.
+"terminal" uses your terminal's own 16 colours. $SPARK_SMI_THEME sets the
+default when --theme isn't passed; an unknown name prints the valid list
+and exits 1. Every theme keeps text at 4.5:1 contrast or better against the
+background, on dark and light terminals alike.
 
 Snapshot mode (default, no -l) renders once and prints ANSI to stdout.
 `--cluster ... --page 3` (or `4`) does one blocking poll round (2s cap) then
@@ -122,7 +129,7 @@ def _parse_args(argv):
     opts = {"loop": False, "rate": DEFAULT_REFRESH_RATE, "help": False, "page": 1,
             "theme": None, "theme_list": False, "json": False, "serve": None,
             "serve_verbose": False, "cluster": _UNSET, "node_name": None,
-            "shot": None, "size": None, "warmup": 0.0}
+            "shot": None, "size": None, "warmup": 0.0, "background": None}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -171,6 +178,9 @@ def _parse_args(argv):
             if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
                 i += 1
                 opts["cluster"] = argv[i]
+        elif a == "--background":
+            opts["background"] = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 1
         elif a == "--shot":
             opts["shot"] = argv[i + 1] if i + 1 < len(argv) else ""
             i += 1
@@ -539,6 +549,15 @@ def _init_curses_colors(curses):
     caches color-pair definitions across frames, so this has to be re-run
     -- not just re-read -- whenever the active theme changes (main_loop's
     'c' key), in addition to the one-time call at loop startup."""
+    if term.ACTIVE_THEME == term.TERMINAL_THEME:
+        # the terminal's own colours: ANSI 0-15 (8-15 as bold 0-7 where the
+        # terminal has only 8) and -1, its default foreground
+        colors = {}
+        for slot, code in term.PALETTE_256.items():
+            bold = code >= 8 and curses.COLORS < 16
+            curses.init_pair(slot, code - 8 if bold else code, -1)
+            colors[slot] = curses.color_pair(slot) | (curses.A_BOLD if bold or slot in (8, 9) else 0)
+        return colors
     if curses.COLORS >= 256:
         for slot, code in term.PALETTE_256.items():
             curses.init_pair(slot, code, -1)
@@ -554,7 +573,10 @@ def _init_curses_colors(curses):
         _, bold, dim = term.BASIC_SLOTS.get(slot, ("WHITE", False, False))
         if bold:
             attr |= curses.A_BOLD
-        if dim:
+        # A_DIM only stands in for missing colours: on 256 colours the inks
+        # are measured (term.build_palette), and dimming them again would
+        # push dim text under its 4.5:1 floor. Snapshot mode never dimmed.
+        if dim and curses.COLORS < 256:
             attr |= curses.A_DIM
         colors[slot] = attr
     return colors
@@ -911,6 +933,22 @@ def main():
     # BEFORE either rendering path constructs anything that reads the
     # palette -- VirtualCurses() below and main_loop's curses.init_pair()
     # both need the final theme in place first.
+    # --background wins over $SPARK_SMI_BACKGROUND wins over "auto". Only a
+    # render to a real terminal asks it (OSC 11); pictures and pipes never
+    # do, so a --shot looks the same whoever runs it.
+    bg_setting = (opts["background"] if opts["background"] is not None
+                  else os.environ.get("SPARK_SMI_BACKGROUND") or "auto").lower()
+    if bg_setting not in ("auto", "dark", "light"):
+        print("--background: give auto, dark or light", file=sys.stderr)
+        sys.exit(1)
+    if opts["json"] or opts["serve"] is not None:
+        pass
+    elif opts["shot"] is not None:
+        term.set_background(bg_setting == "light", source="setting" if bg_setting != "auto" else "default")
+    else:
+        light, rgb, source = term.detect_background(bg_setting, ask=opts["loop"] or sys.stdout.isatty())
+        term.set_background(light, rgb, source)
+
     theme_name = opts["theme"] or os.environ.get("SPARK_SMI_THEME") or term.ACTIVE_THEME
     try:
         term.set_theme(theme_name)

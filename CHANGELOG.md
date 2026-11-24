@@ -15,6 +15,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   data. In live mode, `S` saves the current screen to the current folder.
   Standard library only; a page is about 20-45 KB. Idea from tuios's
   screenshot export (MIT, ideas only, no code copied).
+- Themes readable on light terminals. spark-smi asks the terminal for its
+  background (OSC 11, then `$COLORFGBG`) or takes `--background
+  dark|light` / `$SPARK_SMI_BACKGROUND`, and measures the theme against it.
+- `--theme terminal` draws with the terminal's own 16 colours.
+
+### Changed
+
+- Every theme is measured, not hand-picked: text holds 4.5:1 contrast
+  against the background (WCAG AA), graph marks 3:1, and frames and bar
+  tracks a quiet 1.3-3:1 band. Frames now have their own colour (each
+  theme's old frame colour where it already fit), so dim text no longer
+  shares it and is easier to read; a few too-dark colours (such as nord's
+  red) are a little brighter. A unit test holds every theme to the floors.
+  Live mode no longer dims colours a 256-colour terminal shows exactly.
+  Idea from tuios's measured palettes (MIT, ideas only, no code copied).
 
 ## [4.1.1] — 2026-11-24
 

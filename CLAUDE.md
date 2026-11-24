@@ -126,6 +126,8 @@ spark_smi/
                   poller the render loop never blocks on. Also local-domain
                   inference (reverse-PTR first) so short cluster hostnames
                   resolve. Has NO code path that writes anything.
+  color.py        Colour maths: xterm-256 RGB, OKLab mix, WCAG contrast,
+                  nearest xterm colour under a contrast floor. Stdlib only.
   shot.py         SVG pictures of a VirtualCurses grid (--shot, live `S`):
                   box/block/braille glyphs drawn as merged shapes, other
                   text as selectable <text>. Stdlib only.
@@ -321,6 +323,12 @@ can't take the render loop down.
 
 ### Other conventions
 
+- **Colour slots** (term.py's table): 1-9 as before, 10 frames and bar
+  brackets, 11-15 the graph ramp. Slot 6 is dim TEXT now, not the frame.
+  `term.build_palette()` derives the live palette from THEMES (design
+  intent) by measuring against the background (`term.BACKGROUND`, set by
+  `detect_background`/`set_background`); never hand-edit a palette to pass
+  a floor -- `tests/test_themes.py` enforces the floors.
 - Unit/temperature toggles are module globals in `term.py`
   (`USE_FAHRENHEIT`, `USE_DECIMAL_UNITS`) flipped by keypress in `main_loop`.
 - Errors are swallowed broadly (bare `except Exception: pass`) by design —

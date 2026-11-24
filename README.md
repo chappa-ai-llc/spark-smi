@@ -306,27 +306,52 @@ node's data read-only, with a "knobs are local-only" note in the footer.
 
 ## Themes
 
-Ten named color themes, each a full remapping of the dashboard's 9 color
-slots (bar fill, labels, warn/critical, frame dimming, accents, etc.) —
-`spark` (green, the original default), `nord` (blue), `dracula` (magenta),
-`solarized` (cyan), `gruvbox` (yellow), `mono` (grayscale), `amber`,
-`ice` (cyan), `sunset` (magenta), `cyber` (cyan).
+Ten named colour themes — `spark` (green, the original default), `nord`
+(blue), `dracula` (magenta), `solarized` (cyan), `gruvbox` (yellow), `mono`
+(greyscale), `amber`, `ice` (cyan), `sunset` (magenta), `cyber` (cyan) — plus
+`terminal`, which draws with your terminal's own 16 colours so spark-smi
+matches whatever theme the terminal already uses.
 
 - `--theme <name>` picks one for the session; `--theme list` (or `--themes`)
-  prints the ten names and exits.
+  prints the names and exits.
 - `$SPARK_SMI_THEME` sets the default when `--theme` isn't passed.
 - In live mode (`-l`), the `c` key cycles through them (wrapping back to
-  `spark` after `cyber`) — a footer toast confirms the new name for a few
+  `spark` after `terminal`) — a footer toast confirms the new name for a few
   ticks. Lowercase `c` is deliberate: it's distinct from page 2's capital
   `C` (SM clock-lock knob focus), so theme cycling works on both pages
   without stealing that binding. Terminals below 256-color fall back to
-  each theme's basic-8 approximation automatically, same as the default
-  theme always has.
+  each theme's basic-8 approximation automatically.
+
+### Readable on dark and light terminals
+
+Every theme is measured against the terminal's background, not hand-picked
+for a dark one. Text stays at **4.5:1** contrast or better (the WCAG AA
+level), graph marks at **3:1**, and frames and empty bar tracks sit in a
+quiet band (1.3 to 3:1) so they never shout over the numbers. A colour that
+misses its floor moves only as far as it must and snaps to the nearest
+xterm-256 colour that passes; a unit test holds every theme to these floors.
+
+spark-smi works out the background by itself:
+
+| Order | Source |
+|:---:|:---|
+| 1 | `--background dark` or `light` (or `$SPARK_SMI_BACKGROUND`) |
+| 2 | the terminal's answer to an OSC 11 query (its exact background colour) |
+| 3 | `$COLORFGBG` |
+| 4 | dark |
+
+On a light background the neutral inks swap lightness (bright text becomes
+dark text) and the coloured ones darken, keeping their hue. `--shot`
+pictures use the dark palette unless `--background light` is given, so a
+picture looks the same whoever makes it. The `terminal` theme is not
+measured: your terminal's theme owns those colours.
 
 ```bash
 spark-smi --theme nord
 spark-smi --theme list
 SPARK_SMI_THEME=dracula spark-smi -l
+spark-smi --theme terminal -l
+spark-smi --background light --page 2 --shot page2-light.svg
 ```
 
 ---
@@ -345,6 +370,11 @@ spark-smi [options]
                    ever shows the last recorded run -- it never starts one)
   --theme <name>   color theme (default: spark; or $SPARK_SMI_THEME)
   --theme list     print the available theme names, one per line, and exit
+  --background auto|dark|light
+                   which ground the theme is measured against (default auto:
+                   ask the terminal, then $COLORFGBG, else dark; or
+                   $SPARK_SMI_BACKGROUND). Pictures (--shot) use dark
+                   unless this says light
   --ascii          force plain-ASCII bars/frames (no UTF-8 box drawing)
   --shot FILE.svg  snapshot mode: write the page as an SVG picture instead of
                    printing it (complete page, any width; see --size)

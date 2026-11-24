@@ -29,7 +29,7 @@ class Xterm256Test(unittest.TestCase):
         self.assertEqual(shot.xterm256(110), "#87afd7")
         self.assertEqual(shot.xterm256(232), "#080808")
         self.assertEqual(shot.xterm256(255), "#eeeeee")
-        self.assertEqual(shot.xterm256(1), "#cd3131")
+        self.assertEqual(shot.xterm256(1), "#cd0000")
 
 
 class SvgTest(unittest.TestCase):

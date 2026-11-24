@@ -11,30 +11,20 @@ it stays selectable. Standard library only.
 import html
 import unicodedata
 
-from . import term
+from . import color, term
 
 FONT_FAMILY = "'DejaVu Sans Mono','Liberation Mono',Menlo,Consolas,'Courier New',monospace"
 CELL_W = 9
 LINE_H = 18
 PAD = 12
-DARK_BG, DARK_FG = "#1e1e1e", "#cccccc"
+DARK_FG = "#cccccc"
 BOLD_SLOTS = (8, 9)  # the slots _ansi_for_slot() also bolds
 
-_BASE16 = ["#000000", "#cd3131", "#0dbc79", "#e5e510", "#2472c8", "#bc3fbc", "#11a8cd", "#e5e5e5",
-           "#666666", "#f14c4c", "#23d18b", "#f5f543", "#3b8eea", "#d670d6", "#29b8db", "#ffffff"]
-_CUBE = [0, 95, 135, 175, 215, 255]
 
 
 def xterm256(n):
     """'#rrggbb' for xterm colour index n (0-255)."""
-    n = max(0, min(int(n), 255))
-    if n < 16:
-        return _BASE16[n]
-    if n >= 232:
-        v = 8 + 10 * (n - 232)
-        return "#%02x%02x%02x" % (v, v, v)
-    n -= 16
-    return "#%02x%02x%02x" % (_CUBE[n // 36], _CUBE[(n // 6) % 6], _CUBE[n % 6])
+    return color.to_hex(color.xterm_rgb(n))
 
 
 # --- glyph geometry ----------------------------------------------------------
@@ -162,18 +152,32 @@ def _emit(prims_by_fill):
     return "".join(out)
 
 
+LIGHT_FG = "#333333"
+
+
+def ground():
+    """(background, default foreground) hex for the active background."""
+    if term.BACKGROUND["light"]:
+        return color.to_hex(term.BACKGROUND["rgb"]), LIGHT_FG
+    return color.to_hex(term.BACKGROUND["rgb"]), DARK_FG
+
+
 def slot_colors(palette=None):
-    """{slot: '#rrggbb'} for a 9-slot xterm-256 palette (default: the live
-    theme). Pictures always use the 256-colour palette, whatever the
-    terminal running spark-smi supports."""
+    """{slot: '#rrggbb'} for a slot palette (default: the live theme).
+    Pictures always use the 256-colour palette, whatever the terminal
+    running spark-smi supports; -1 (the "terminal" theme's default
+    foreground) becomes the picture's foreground."""
     palette = term.PALETTE_256 if palette is None else palette
-    return {slot: xterm256(code) for slot, code in palette.items()}
+    fg = ground()[1]
+    return {slot: (fg if code < 0 else xterm256(code)) for slot, code in palette.items()}
 
 
-def grid_to_svg(grid, colors=None, bg=DARK_BG, fg=DARK_FG):
+def grid_to_svg(grid, colors=None, bg=None, fg=None):
     """SVG text for a VirtualCurses grid (rows of (char, slot) cells),
     trimmed to the last row and column with content."""
     colors = slot_colors() if colors is None else colors
+    g_bg, g_fg = ground()
+    bg, fg = bg or g_bg, fg or g_fg
     rows = [row for row in grid]
     last = max((i for i, row in enumerate(rows) if any(c != " " for c, _ in row)), default=-1)
     rows = rows[:last + 1]
