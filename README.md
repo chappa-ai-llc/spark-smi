@@ -2,7 +2,7 @@
 
 > A terminal-based system monitor (TUI) built for **NVIDIA Grace Blackwell (GB10)** and hybrid ARM architectures — because `nvidia-smi` alone doesn't tell the full story.
 
-![Version](https://img.shields.io/badge/version-4.0.2-blue)
+![Version](https://img.shields.io/badge/version-4.0.3-blue)
 ![Python](https://img.shields.io/badge/python-3.8%2B-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Linux%20aarch64-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -340,9 +340,9 @@ Point one `spark-smi` at several nodes and page 3 turns into a fleet view:
 spark-smi --serve                      # serves GET /sample + /healthz on :8817
 
 # on the node you're watching from:
-spark-smi -l --cluster sparky-1,sparky-2,sparky-3,sparky-4
+spark-smi -l --cluster node-1,node-2,node-3,node-4
 spark-smi -l --cluster @~/.config/spark-smi/cluster   # or bare --cluster to try that path
-spark-smi --cluster sparky-1,sparky-2 --page 3         # one-shot snapshot (2s poll cap)
+spark-smi --cluster node-1,node-2 --page 3            # one-shot snapshot (2s poll cap)
 ```
 
 - `host` polls `http://host:8817/sample`; `host:port` overrides the port;
@@ -433,10 +433,10 @@ secondary cross-check, never the primary source.
 
 ```bash
 # on the node you'll drive tests FROM, in addition to the cluster-mode setup above:
-ssh-copy-id sparky-2   # and every other member -- BatchMode=yes SSH must work unattended
+ssh-copy-id node-2     # and every other member -- BatchMode=yes SSH must work unattended
 sudo apt install perftest   # or iperf3, for rails with no RDMA device
 
-spark-smi -l --cluster sparky-1,sparky-2,sparky-3,sparky-4
+spark-smi -l --cluster node-1,node-2,node-3,node-4
 # press 4, then space, then y to run the default all-pairs sweep
 ```
 

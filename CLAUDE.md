@@ -34,11 +34,9 @@ REFUSED there. pipx or a venv is the documented path.
 
 ## Releasing
 
-A `vX.Y.Z` tag on `main` is the release: the BUILD office runs
-`deploy/release.sh X.Y.Z` once per tag (recipe `spark-smi`, live since office
-0.138.4). The run reads the PyPI token from the office's Secrets page
-(family `rs_spark_smi_pypi_token`, stored 2026-11-21, issue #6) through
-`PYPI_TOKEN_FILE`.
+A `vX.Y.Z` tag on `main` is the release: a release runner calls
+`deploy/release.sh X.Y.Z` once per tag, with the PyPI and GitHub tokens in
+files named by `PYPI_TOKEN_FILE` and `GITHUB_TOKEN_FILE` (issue #6).
 
 1. Bump `VERSION` in `spark_smi/__init__.py` (and the fallback literals in
    `app.py`, `pages.py` and `cluster.py`), `version` in `pyproject.toml` and
@@ -48,7 +46,7 @@ A `vX.Y.Z` tag on `main` is the release: the BUILD office runs
 3. Check it, tag it, push the tag:
 
    ```bash
-   TMPDIR=/scratch/tmp deploy/release.sh X.Y.Z --dry-run
+   deploy/release.sh X.Y.Z --dry-run   # set TMPDIR to an exec-allowed dir if /tmp is noexec
    git tag vX.Y.Z
    git push origin vX.Y.Z
    ```
@@ -74,15 +72,18 @@ installs and for advisory scanners; `pyproject.toml` keeps them open for pip
 users. After changing `requirements.in`, regenerate it the same way from the
 repo root (drop `--allow-unsafe`, and use `requirements.in`/`requirements.txt`).
 
-## BUILD board
+## Public repo
 
-The board lives in the BUILD office (`https://build.chappa.ai/p/spark-smi`).
-This repo is public and the board is owner-only, with lab hostnames in its
-cards, so `.build-board.json` points the client at a gitignored source,
-`scratchpad/board.json`. Never commit that file. A fresh clone won't have it:
+This repo, its Issues, commits and release notes are public. State problems
+without naming the maintainer's private hosts, accounts, home paths, network
+addresses or internal infrastructure; use placeholders such as `node-1` and
+`example.com`. Private details go on the owner-only project board.
+
+The board's source is the gitignored `scratchpad/board.json` (`.build-board.json`
+points the client at it). Never commit that file. A fresh clone won't have it:
 `build_board.py push` then stops with an error instead of emptying the board.
-Rebuild it from the office's copy first, because a push replaces the phases and
-retires any file card the source leaves out.
+Rebuild it from the board's hosted copy first, because a push replaces the
+phases and retires any file card the source leaves out.
 
 ## Architecture
 

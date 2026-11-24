@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.0.3] — 2026-11-24
+
+A documentation release.
+
+### Changed
+
+- The README's cluster and fabric-test examples, and the code comments, use
+  placeholder host names (`node-1`, `example.com`) and a placeholder address.
+- The release docs and scripts describe the tag-driven release runner in
+  general terms.
+
 ## [4.0.2] — 2026-11-24
 
 A hardening release: the cluster shared secret can come from a file.
@@ -25,13 +36,13 @@ A hardening release: the cluster shared secret can come from a file.
 
 ## [4.0.1] — 2026-11-21
 
-A maintenance release: releases now publish from the BUILD office, and the
+A maintenance release: a tag on `main` now publishes the release, and the
 license and dependency metadata are corrected.
 
 ### Added
 
 - `deploy/release.sh`: publishes a tagged release to PyPI and GitHub, with its
-  build tools pinned by hash. The BUILD office runs it on each `vX.Y.Z` tag.
+  build tools pinned by hash. A release runner calls it on each `vX.Y.Z` tag.
   It uploads with the standard library rather than `twine`, so it runs where
   native extensions cannot load (#6).
 
@@ -59,7 +70,7 @@ license and dependency metadata are corrected.
   setuptools 84.2.1, wheel 0.48.0, packaging 26.3, pyproject-hooks 1.3.3).
   No Java anywhere in the package (CVE-2026-114938 does not apply).
 - The release tools' lock is renamed `deploy/requirements-release.txt`
-  (was `release-requirements.txt`), so the office's nightly dependency
+  (was `release-requirements.txt`), so the nightly dependency
   scan, which reads `requirements*.txt`, now covers it too.
 
 ## [4.0.0] — 2026-08-01
@@ -195,6 +206,7 @@ is still there, on page 1.
 
 - Initial public release.
 
+[4.0.3]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.0.3
 [4.0.2]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.0.2
 [4.0.1]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.0.1
 [4.0.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.0.0
