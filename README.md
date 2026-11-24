@@ -271,6 +271,7 @@ directory, plus ASIC temperature from the NIC's own hwmon device.
 | `t` | all | Toggle temperature units (°C / °F) |
 | `u` | all | Toggle memory units (GiB / GB, decimal) |
 | `c` | all | Cycle color theme (see "Themes" above; capital `T` is an undocumented alias) |
+| `S` | all | Save the screen as an SVG picture in the current folder, named `spark-smi-page<N>-<date>-<time>.svg` |
 | `?` | 1 / 2 | Toggle the help overlay (any key dismisses it) |
 | `n` | 1 | Show active NICs only |
 | `s` | 1 | Sort NIC rows by current rate (max of RX/TX), descending — toggle back to detection order |
@@ -345,6 +346,13 @@ spark-smi [options]
   --theme <name>   color theme (default: spark; or $SPARK_SMI_THEME)
   --theme list     print the available theme names, one per line, and exit
   --ascii          force plain-ASCII bars/frames (no UTF-8 box drawing)
+  --shot FILE.svg  snapshot mode: write the page as an SVG picture instead of
+                   printing it (complete page, any width; see --size)
+  --size COLS[xROWS]
+                   snapshot mode: render at this size instead of the
+                   terminal's (with --shot, ROWS defaults to the whole page)
+  --warmup SECS    snapshot mode: sample once a second for SECS first, so
+                   history graphs have data (0-120, default 0)
   --json           print one sample as JSON (+ node/model/version/ts) and exit
   --serve [PORT]   read-only HTTP sample server (default port 8817);
                    GET /sample, GET /healthz. A token in the file named by
@@ -507,6 +515,21 @@ spark-smi -l --cluster node-1,node-2,node-3,node-4
 Captured on two DGX Sparks, one with an RTX 3090 attached, in the `nord`
 theme, with an iperf3 run on the first ConnectX-7 port and the node names
 set with `--node-name`.
+
+### Make your own
+
+spark-smi draws its own pictures. `--shot` writes a page as SVG instead of
+printing it, always the complete page, at any width:
+
+```bash
+spark-smi --page 2 --size 130 --warmup 10 --node-name node-1 --shot page2.svg
+```
+
+`--warmup 10` samples for ten seconds first, so the history graphs have
+data, and `--node-name` keeps your real host name out of the picture. In
+live mode, `S` saves the screen as it is. Frames, bars and braille graphs
+are drawn as shapes, so they line up in any viewer whatever fonts it has;
+text stays selectable. A page is about 20-45 KB.
 
 **Page 1 — Overview.** Hybrid Cortex-X925/A725 clusters, unified memory split
 into process/GPU/cache segments, both GPUs side by side, RDMA-aware NIC

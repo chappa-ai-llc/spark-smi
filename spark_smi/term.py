@@ -159,14 +159,20 @@ def _ansi_for_slot(slot):
 class VirtualCurses:
     """In-memory character grid standing in for a curses window in snapshot
     mode. Implements the same duck-typed interface real curses windows use:
-    addstr(y, x, text, attr), getmaxyx(), erase()."""
-    def __init__(self):
+    addstr(y, x, text, attr), getmaxyx(), erase(). `size=(cols, rows)`
+    fixes the grid size (--size, --shot, the live `S` key); without it the
+    grid follows the terminal."""
+    def __init__(self, size=None):
+        self.size = size
         self.update_dims()
         self.grid = [[(" ", None) for _ in range(self.cols)] for _ in range(self.rows)]
         self.colors = {s: _ansi_for_slot(s) for s in PALETTE_256}
         self.colors[0] = "\033[0m"
 
     def update_dims(self):
+        if self.size:
+            self.cols, self.rows = self.size
+            return
         try:
             self.cols, self.rows = shutil.get_terminal_size()
         except Exception:

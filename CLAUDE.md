@@ -19,6 +19,7 @@ python spark-smi.py --theme nord  # one of 10 themes; `c` cycles them in live mo
 python spark-smi.py --serve       # read-only sample agent on :8817 (GET /sample, /healthz)
 python spark-smi.py -l --cluster a,b,c   # pages 3 (fleet) and 4 (fabric tests) need this
 python spark-smi.py --json        # one sample as JSON to stdout, then exit
+python spark-smi.py --page 2 --size 130 --warmup 5 --shot p2.svg   # page as SVG
 ```
 
 The monitor's rendering has no tests and no linter is configured — verification is by
@@ -125,6 +126,9 @@ spark_smi/
                   poller the render loop never blocks on. Also local-domain
                   inference (reverse-PTR first) so short cluster hostnames
                   resolve. Has NO code path that writes anything.
+  shot.py         SVG pictures of a VirtualCurses grid (--shot, live `S`):
+                  box/block/braille glyphs drawn as merged shapes, other
+                  text as selectable <text>. Stdlib only.
   ethtool.py      Physical-port MAC byte counters over ethtool generic
                   netlink (stdlib socket only); port_byte_reader(iface)
                   returns None wherever the kernel/driver can't report them.

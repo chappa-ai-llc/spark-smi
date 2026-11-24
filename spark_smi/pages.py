@@ -381,6 +381,7 @@ def build_help_overlay(term_w, term_h):
         ("  t            toggle °C / °F", 3),
         ("  u            toggle GiB / GB (decimal units)", 3),
         (f"  c            cycle color theme  (now: {term.ACTIVE_THEME})", 3),
+        ("  S            save this screen as SVG (current folder)", 3),
         ("  ?            toggle this help", 3),
         ("", 3),
         ("Page 1 -- overview", 9),

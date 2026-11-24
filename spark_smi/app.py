@@ -5,6 +5,7 @@ through the duck-typed screen interface shared by VirtualCurses and real
 curses windows.
 """
 import os
+import shutil
 import sys
 import time
 from collections import deque
@@ -16,6 +17,7 @@ from . import knobs
 from . import node
 from . import pages
 from . import panels
+from . import shot
 from . import term
 
 try:
@@ -41,6 +43,13 @@ Usage: spark-smi [options]
   --theme <name>   color theme (default: spark; or $SPARK_SMI_THEME)
   --theme list     print the available theme names, one per line, and exit
   --ascii          force plain-ASCII bars/frames (no UTF-8 box drawing)
+  --shot FILE.svg  snapshot mode: write the page as an SVG picture instead of
+                   printing it (complete page, any width; see --size)
+  --size COLS[xROWS]
+                   snapshot mode: render at this size instead of the
+                   terminal's (with --shot, ROWS defaults to the whole page)
+  --warmup SECS    snapshot mode: sample once a second for SECS first, so
+                   history graphs have data (0-120, default 0)
   --json           print one sample as JSON (+ node/model/version/ts) and exit
   --serve [PORT]   read-only HTTP sample server (default port {cluster.DEFAULT_PORT});
                    GET /sample, GET /healthz. A token in the file named by
@@ -70,7 +79,7 @@ members) prints a short "needs --cluster" note instead of a fabric panel.
 
 Live-mode keys: q quit  ·  t toggle C/F  ·  u toggle GiB/GB  ·  1/2 page
                 n active-NICs-only  ·  s sort NICs by rate  ·  c cycle theme
-                ? help overlay
+                S save this screen as SVG (current folder)  ·  ? help overlay
                 page 2: tab select GPU  ·  P/C/M/R/X knobs
                 page 3 (--cluster only): up/down select · enter drill into
                 node · esc back · a alerts only (fleet) · o sort col (fleet)
@@ -112,7 +121,8 @@ def _pcie_stuck_from_history(history, gen_max):
 def _parse_args(argv):
     opts = {"loop": False, "rate": DEFAULT_REFRESH_RATE, "help": False, "page": 1,
             "theme": None, "theme_list": False, "json": False, "serve": None,
-            "serve_verbose": False, "cluster": _UNSET, "node_name": None}
+            "serve_verbose": False, "cluster": _UNSET, "node_name": None,
+            "shot": None, "size": None, "warmup": 0.0}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -161,6 +171,15 @@ def _parse_args(argv):
             if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
                 i += 1
                 opts["cluster"] = argv[i]
+        elif a == "--shot":
+            opts["shot"] = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 1
+        elif a == "--size":
+            opts["size"] = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 1
+        elif a == "--warmup":
+            opts["warmup"] = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 1
         elif a in ("-h", "--help"):
             opts["help"] = True
         # --ascii is read directly from sys.argv by term._detect_bar_style()
@@ -555,6 +574,7 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
     show_help = False
     theme_toast_text = None
     theme_toast_ticks = 0
+    shot_pending = False
     THEME_TOAST_TICKS = knobs.KnobUI.TOAST_TICKS
     # Phase 4: page 2's interactive power/clock knobs. Constructed here (not
     # in State, which the snapshot path also uses) so the write-capable UI
@@ -590,14 +610,28 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
         in_remote = bool(cluster_ui and cluster_ui.drilldown)
         try:
             stdscr.erase()
-            h, _ = stdscr.getmaxyx()
-            render_dashboard(stdscr, colors, state, active_nics_only, height_hint=h, page_num=state.page,
+            h, w = stdscr.getmaxyx()
+            screen = stdscr
+            if shot_pending:
+                screen = _TeeScreen(stdscr, term.VirtualCurses(size=(w, h)), colors)
+            render_dashboard(screen, colors, state, active_nics_only, height_hint=h, page_num=state.page,
                               knob_ui=knob_ui, sort_nics=sort_nics, show_help=show_help,
                               theme_toast=theme_toast, cluster_ctx=cluster_ctx,
                               fab_ui=fab_ui, fab_engine=fab_engine)
             stdscr.refresh()
         except Exception:
             pass
+        if shot_pending:
+            # `S`: the frame just drawn, as SVG in the current folder. The
+            # toast shows on the next frame, so it is not in the picture.
+            shot_pending = False
+            name = _live_shot_name(state.page)
+            try:
+                shot.write_svg(name, screen.virtual.grid)
+                theme_toast_text = f"saved {name}"
+            except Exception as e:
+                theme_toast_text = f"save failed: {getattr(e, 'strerror', None) or e}"
+            theme_toast_ticks = THEME_TOAST_TICKS
 
         start_wait = time.time()
         while time.time() - start_wait < rate:
@@ -703,6 +737,9 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
                 break
             elif state.page == 4 and cluster_ctx and ch == curses.KEY_DOWN:
                 fab_ui.move_pair(1)
+                break
+            if ch == ord('S'):
+                shot_pending = True
                 break
             if ch == ord('s'):
                 sort_nics = not sort_nics
@@ -817,6 +854,47 @@ def _token_or_exit(flag):
         print(f"{flag}: {e}", file=sys.stderr)
         sys.exit(1)
 
+def parse_size(text):
+    """(cols, rows or None) from "COLS" or "COLSxROWS". Raises ValueError
+    with the reason. The floor is render_dashboard's own minimum (40x8)."""
+    parts = text.lower().split("x")
+    if len(parts) not in (1, 2) or not all(p.isdigit() for p in parts):
+        raise ValueError(f"'{text}' is not COLS or COLSxROWS, e.g. 140 or 140x45")
+    cols = int(parts[0])
+    rows = int(parts[1]) if len(parts) == 2 else None
+    if not 40 <= cols <= 400 or (rows is not None and not 8 <= rows <= 500):
+        raise ValueError("COLS must be 40-400 and ROWS 8-500")
+    return cols, rows
+
+
+SHOT_ROWS = 500  # --shot without ROWS: tall enough for any page, then trimmed
+
+
+class _TeeScreen:
+    """Draws one frame to the live curses window and to a VirtualCurses grid
+    at once, so the live `S` key saves exactly the frame on screen without
+    a second render (which would take a second, near-zero-interval sample)."""
+
+    def __init__(self, screen, virtual, colors):
+        self.screen, self.virtual = screen, virtual
+        self.slot_of = {attr: slot for slot, attr in colors.items()}
+
+    def getmaxyx(self):
+        return self.screen.getmaxyx()
+
+    def erase(self):
+        self.screen.erase()
+        self.virtual.erase()
+
+    def addstr(self, y, x, text, attr=0):
+        self.virtual.addstr(y, x, text, self.slot_of.get(attr))
+        return self.screen.addstr(y, x, text, attr)
+
+
+def _live_shot_name(page):
+    return time.strftime(f"spark-smi-page{page}-%Y%m%d-%H%M%S.svg")
+
+
 def main():
     argv = sys.argv[1:]
     opts = _parse_args(argv)
@@ -847,6 +925,24 @@ def main():
     except ValueError as e:
         source = "--node-name" if opts["node_name"] is not None else "$" + node.ENV_VAR
         print(f"{source}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    size = None
+    if opts["size"] is not None:
+        try:
+            size = parse_size(opts["size"])
+        except ValueError as e:
+            print(f"--size: {e}", file=sys.stderr)
+            sys.exit(1)
+    if opts["shot"] is not None and not opts["shot"].lower().endswith(".svg"):
+        print("--shot: give a file name ending in .svg", file=sys.stderr)
+        sys.exit(1)
+    try:
+        warmup = float(opts["warmup"])
+        if not 0 <= warmup <= 120:
+            raise ValueError
+    except (TypeError, ValueError):
+        print("--warmup: give a number of seconds from 0 to 120", file=sys.stderr)
         sys.exit(1)
 
     state = State(opts["rate"])
@@ -917,9 +1013,25 @@ def main():
             # ever DISPLAYS results (fab_ui/fab_engine are never constructed
             # below) -- this poll is just for the header/MATRIX node list.
             cluster_ctx["aggregator"].poll_once_sync(budget=2.0)
-        v = term.VirtualCurses()
+        # --warmup: fill the history ring buffers the way live mode does, one
+        # sample a second, so the single render below can draw its graphs.
+        for _ in range(int(warmup)):
+            state.sample()
+            time.sleep(1.0)
+        if opts["shot"] is not None:
+            cols = size[0] if size else shutil.get_terminal_size((140, 50)).columns
+            size = (max(40, min(cols, 400)), (size[1] if size and size[1] else SHOT_ROWS))
+        v = term.VirtualCurses(size=size)
         colors = {i: i for i in term.PALETTE_256}
         render_dashboard(v, colors, state, page_num=state.page, cluster_ctx=cluster_ctx)
+        if opts["shot"] is not None:
+            try:
+                shot.write_svg(opts["shot"], v.grid)
+            except OSError as e:
+                print(f"--shot: cannot write {opts['shot']}: {e.strerror or e}", file=sys.stderr)
+                sys.exit(1)
+            print(f"wrote {opts['shot']}")
+            return
         output = v.render()
         # Some Windows consoles/pipes report a non-UTF-8 stdout encoding
         # (cp1252/cp437) even when BAR_STYLE picked "ascii" for the bars --

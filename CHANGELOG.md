@@ -4,6 +4,18 @@ All notable changes to SPARK-SMI are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `--shot FILE.svg` writes a page as an SVG picture instead of printing it:
+  the complete page at any width (`--size COLS[xROWS]`), with frames, bars
+  and braille graphs drawn as shapes so they line up in any viewer, and text
+  left selectable. `--warmup SECS` samples first so history graphs have
+  data. In live mode, `S` saves the current screen to the current folder.
+  Standard library only; a page is about 20-45 KB. Idea from tuios's
+  screenshot export (MIT, ideas only, no code copied).
+
 ## [4.1.1] — 2026-11-24
 
 TCP and RDMA on one port at the same time now read as their sum.
