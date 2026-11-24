@@ -13,6 +13,7 @@ from . import cluster
 from . import collectors
 from . import fabtest
 from . import knobs
+from . import node
 from . import pages
 from . import panels
 from . import term
@@ -20,7 +21,7 @@ from . import term
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "4.0.4"
+    VERSION = "4.1.0"
 DEFAULT_REFRESH_RATE = 1.0
 HIST_LEN = 60
 
@@ -33,7 +34,7 @@ Usage: spark-smi [options]
   -p, --page <n>   which page to render in snapshot mode: 1 overview (default),
                    2 advanced (GPU detail, PCIE LINKS -- every PCIe endpoint's
                    negotiated link state, regardless of occupant --
-                   NIC/thermal/SMART panels), or
+                   NIC/thermal/SMART panels), 3 cluster (--cluster), or
                    4 fabric validation (--cluster with 2+ members; renders
                    the last recorded run only -- snapshot mode never starts
                    a test)
@@ -46,6 +47,10 @@ Usage: spark-smi [options]
                    $SPARK_SMI_TOKEN_FILE (or, older setups, $SPARK_SMI_TOKEN)
                    is required as the X-Spark-Token header on /sample
   --serve-verbose  log one line per request to stderr (--serve only)
+  --node-name NAME show NAME instead of this machine's hostname: in the
+                   header, in --json and --serve's payload, and so on every
+                   cluster page (or $SPARK_SMI_NODE_NAME; 1-63 letters,
+                   digits, '-' or '_')
   --cluster HOSTS  cluster mode: page 3 shows every node in HOSTS (comma-
                    separated "host"/"host:port"/"ssh:host" entries, or
                    "@file" -- one entry per line, # comments). Bare
@@ -107,7 +112,7 @@ def _pcie_stuck_from_history(history, gen_max):
 def _parse_args(argv):
     opts = {"loop": False, "rate": DEFAULT_REFRESH_RATE, "help": False, "page": 1,
             "theme": None, "theme_list": False, "json": False, "serve": None,
-            "serve_verbose": False, "cluster": _UNSET}
+            "serve_verbose": False, "cluster": _UNSET, "node_name": None}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -146,6 +151,11 @@ def _parse_args(argv):
                 opts["serve"] = int(argv[i])
         elif a == "--serve-verbose":
             opts["serve_verbose"] = True
+        elif a == "--node-name":
+            # Taken as given (even "-x"), so main() rejects a bad value with
+            # its reason rather than silently reading the next flag as a name.
+            opts["node_name"] = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 1
         elif a == "--cluster":
             opts["cluster"] = ""  # sentinel: try ~/.config/spark-smi/cluster
             if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
@@ -828,6 +838,15 @@ def main():
         term.set_theme(theme_name)
     except ValueError as e:
         print(str(e), file=sys.stderr)
+        sys.exit(1)
+
+    # --node-name wins over $SPARK_SMI_NODE_NAME; neither means the hostname.
+    # Set before anything builds a payload or a header (issue #9).
+    try:
+        node.set_display_name(node.resolve(opts["node_name"]))
+    except ValueError as e:
+        source = "--node-name" if opts["node_name"] is not None else "$" + node.ENV_VAR
+        print(f"{source}: {e}", file=sys.stderr)
         sys.exit(1)
 
     state = State(opts["rate"])

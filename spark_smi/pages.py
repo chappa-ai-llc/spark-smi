@@ -12,11 +12,12 @@ import psutil
 
 from . import panels
 from . import term
+from . import node
 
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "4.0.4"
+    VERSION = "4.1.0"
 
 # The header shows the major.minor series ("4.0"). Derived from VERSION rather
 # than written out, because a hardcoded literal here silently drifted a whole
@@ -206,7 +207,7 @@ def _build_header(x0, width, tier, page=1, cluster_tabs=False, cluster_summary=N
     the selected node's name -- shown in place of the local hostname, with
     a dim " · remote" tag appended so it's never confused with the local
     node's own page 1/2."""
-    host = remote or (_safe(platform.node, "host") or "host")
+    host = remote or node.display_name(fallback=_safe(platform.node, "host") or "host")
     # model/arch/uptime are LOCAL machine probes (device-tree/DMI, uname,
     # psutil.boot_time()) -- meaningless (actively misleading) for a remote
     # drilldown node, since nothing about that data travels over the wire

@@ -132,6 +132,10 @@ spark_smi/
                   ~/.local/share/spark-smi/fabric-tests.jsonl. Measurements
                   come from HCA counters sampled during the run (median of
                   steady state), never from perftest's own summary line.
+  node.py         Node identity: hostname() (real short hostname — local-
+                  member detection and fabtest's local-vs-ssh choice) and
+                  display_name() (--node-name / $SPARK_SMI_NODE_NAME, else
+                  the hostname — header, --json/--serve payload "node").
   app.py          main(), hand-rolled CLI parsing, the State class (owns the
                   long-lived collectors + history ring buffers), the snapshot
                   render path, and the curses main_loop/key handling. The

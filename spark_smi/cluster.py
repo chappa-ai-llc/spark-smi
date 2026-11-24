@@ -27,10 +27,12 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
+from . import node
+
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "4.0.4"
+    VERSION = "4.1.0"
 
 DEFAULT_PORT = 8817
 POLL_TIMEOUT = 0.75          # per-member urllib timeout (spec)
@@ -42,7 +44,10 @@ DEFAULT_CONFIG_PATH = os.path.expanduser(os.path.join("~", ".config", "spark-smi
 
 
 def local_hostname():
-    return (_safe(platform.node) or "localhost").split(".")[0]
+    """The machine's real short hostname -- used to recognise this node's
+    own cluster-list entry and by fabtest to choose local vs ssh. Never the
+    display name: see node.py."""
+    return node.hostname()
 
 
 def _safe(fn, default=None):
@@ -124,7 +129,7 @@ def build_json_payload(state):
     one flat dict."""
     sample = state.sample()
     payload = to_wire(sample)
-    payload["node"] = local_hostname()
+    payload["node"] = node.display_name()
     payload["model"] = machine_model()
     payload["version"] = VERSION
     payload["ts"] = time.time()
@@ -194,7 +199,7 @@ def _make_handler(cache, token, verbose):
             try:
                 path = self.path.split("?", 1)[0]
                 if path == "/healthz":
-                    self._send_json(200, {"ok": True, "node": local_hostname(), "version": VERSION})
+                    self._send_json(200, {"ok": True, "node": node.display_name(), "version": VERSION})
                     return
                 if path == "/sample":
                     if not self._authorized():
@@ -264,7 +269,7 @@ def run_server(state, port=DEFAULT_PORT, verbose=False, host="", token=None,
     handler = _make_handler(cache, token, verbose)
     httpd = http.server.ThreadingHTTPServer((host, port), handler)
     httpd.daemon_threads = True
-    print(f"spark-smi --serve: listening on :{port} (node {local_hostname()})"
+    print(f"spark-smi --serve: listening on :{port} (node {node.display_name()})"
           + (" [token required]" if token else " [no token -- open on this port]"), file=sys.stderr)
     if token_source == "env":
         print("spark-smi --serve: token read from $SPARK_SMI_TOKEN; prefer "
@@ -516,7 +521,13 @@ def _poll_ssh(member):
 
 def _poll_local(member, local_state):
     try:
-        member.set_ok(local_state.sample())
+        # Tag the local sample with the display name, as a remote node's
+        # payload is, so page 3/4 and drilldown show --node-name here too.
+        # Unset, it is the short hostname -- the same name the member's
+        # cluster-list entry matched on, so nothing changes.
+        sample = dict(local_state.sample())
+        sample["node"] = node.display_name()
+        member.set_ok(sample)
     except Exception as e:
         member.set_err(str(e))
 

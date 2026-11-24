@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.1.0] — 2026-11-24
+
+A display name in place of the hostname, so shared screenshots need not show
+real host names.
+
+### Added
+
+- `--node-name NAME` and `$SPARK_SMI_NODE_NAME` show NAME instead of the
+  machine's hostname in page 1's header, in the `node` field of `--json` and
+  `--serve`'s `/sample` and `/healthz`, and so on every node's row on pages 3
+  and 4. The flag wins over the variable; with neither, the hostname shows as
+  before. A name is 1-63 letters, digits, `-` or `_`; anything else stops
+  spark-smi with the reason. The cluster list, local-node detection and
+  fabric-test connections keep using real host names (#9).
+
+### Fixed
+
+- `--help` lists page 3 under `--page`, as the README already did.
+
 ## [4.0.4] — 2026-11-24
 
 A fix for network rates that read 0 on some DGX Spark builds.
@@ -228,6 +247,7 @@ is still there, on page 1.
 
 - Initial public release.
 
+[4.1.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.1.0
 [4.0.4]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.0.4
 [4.0.3]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.0.3
 [4.0.2]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.0.2
