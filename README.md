@@ -16,10 +16,11 @@
 
 ![spark-smi live demo](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/spark-smi-demo.gif)
 
-Live mode on a DGX Spark with an RTX 3090 attached — paging through the
-overview, the advanced panels, the cluster fleet view, and a fabric
-bandwidth test, then cycling color themes. Everything on screen is real
-hardware telemetry; nothing in this project is mocked or simulated.
+Live mode on a DGX Spark with an RTX 3090 attached: the overview, three of
+the color themes (one `c` keypress each), then the two-node cluster view,
+with an iperf3 run on the first ConnectX-7 port. Everything on screen is
+real hardware telemetry; nothing in this project is mocked or simulated. The
+node names are set with `--node-name` (see [Display names](#display-names)).
 
 ---
 
@@ -485,8 +486,9 @@ spark-smi -l --cluster node-1,node-2,node-3,node-4
 
 ## Screenshots
 
-All four captured on a DGX Spark with an RTX 3090 attached, mid-workload —
-and each in a different color theme, since that's a `c` keypress away.
+Captured on two DGX Sparks, one with an RTX 3090 attached, in the `nord`
+theme, with an iperf3 run on the first ConnectX-7 port and the node names
+set with `--node-name`.
 
 **Page 1 — Overview.** Hybrid Cortex-X925/A725 clusters, unified memory split
 into process/GPU/cache segments, both GPUs side by side, RDMA-aware NIC
@@ -505,22 +507,18 @@ fleet summary and per-node totals in the section headers.
 
 ![Page 3 cluster](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page3-cluster.png)
 
-Nothing about that view is DGX-specific. Here is the same page across a
-deliberately mismatched fleet — an x86_64 AMD EPYC server with no usable
-NVIDIA driver alongside two aarch64 Sparks — 72 cores and 998 GiB summed
-across three machines, ConnectX-4 and ConnectX-7 on the same fabric row, and
-a GPU section that counts `1× RTX 3090 · 2× GB10` rather than assuming
-they're all alike:
-
-![Heterogeneous 3-node cluster](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/cluster-3node-heterogeneous.png)
+Nothing about that view is DGX-specific. It has run across a deliberately
+mismatched fleet — an x86_64 AMD EPYC server with no usable NVIDIA driver
+alongside two aarch64 Sparks — with 72 cores and 998 GiB summed across three
+machines, ConnectX-4 and ConnectX-7 on the same fabric row, and a GPU
+section that counts `1× RTX 3090 · 2× GB10` rather than assuming they're all
+alike.
 
 **Page 4 — Fabric validation.** Four rails driven concurrently, charted live,
 with ASIC temperature tracked across the run and an all-pairs
-bandwidth/latency matrix. The 53 Gb/s-per-rail figure here is real: four
-rails sharing one PCIe gen5 ×4 uplink, which is exactly the kind of ceiling
-this page exists to expose.
-
-![Page 4 fabric validation](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page4-fabric.png)
+bandwidth/latency matrix. Between two Sparks it measured about 53 Gb/s per
+rail: four rails sharing one PCIe gen5 ×4 uplink, which is exactly the kind
+of ceiling this page exists to expose.
 
 ---
 

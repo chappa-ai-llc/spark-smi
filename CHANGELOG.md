@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- README images re-captured with spark-smi 4.1.0 and placeholder node names
+  (`--node-name`), so none shows a real host name: the demo and resize GIFs
+  and the page 1, 2 and 3 screenshots (#9). The page 4 and three-node
+  screenshots are removed until they can be re-captured the same way; their
+  descriptions stay.
+
 ## [4.1.0] — 2026-11-24
 
 A display name in place of the hostname, so shared screenshots need not show
