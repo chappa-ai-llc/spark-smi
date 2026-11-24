@@ -32,7 +32,7 @@ from . import node
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "4.1.1"
+    VERSION = "4.2.0"
 
 DEFAULT_PORT = 8817
 POLL_TIMEOUT = 0.75          # per-member urllib timeout (spec)

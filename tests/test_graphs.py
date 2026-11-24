@@ -160,3 +160,11 @@ class MirrorLayoutTest(unittest.TestCase):
         self.assertEqual(pages._peak_avg([1e9, 3e9], "bit"), "peak 3.0 · avg 2.0 Gb/s")
         self.assertEqual(pages._peak_avg([1e6, 3e6], "bit"), "peak 3 · avg 2 Mb/s")
         self.assertEqual(pages._peak_avg([5e8, 0], "byte"), "peak 0.50 · avg 0.25 GB/s")
+
+
+class IdlePeakTest(unittest.TestCase):
+    def test_no_peak_label_for_an_idle_window(self):
+        with mock.patch.object(term, "BAR_STYLE", "eighths"):
+            f = pages._Flow(40)
+            pages._add_graded_spark(f, [0, 0, 0, 0], 30)
+            self.assertNotIn("peak", "".join(t for _, t, _ in f.segs))

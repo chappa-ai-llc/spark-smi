@@ -17,7 +17,7 @@ from . import node
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "4.1.1"
+    VERSION = "4.2.0"
 
 # The header shows the major.minor series ("4.0"). Derived from VERSION rather
 # than written out, because a hardcoded literal here silently drifted a whole
@@ -89,9 +89,11 @@ def _add_graded_spark(f, history, max_cells, lead="  "):
         cells = min(room - label_w, 20)
         runs = term.sparkline_runs(hist, cells)
         if runs:
-            # the peak of the samples drawn, not of the whole ring buffer
-            peak = f" peak {max(hist[-2 * cells:]):.0f}%"
-            f.try_add_multi([(lead, 3)] + runs + [(peak, 6)])
+            # the peak of the samples drawn, not of the whole ring buffer;
+            # none for an all-idle window, whose graph is blank anyway
+            top = max(hist[-2 * cells:])
+            label = [(f" peak {top:.0f}%", 6)] if round(top) > 0 else []
+            f.try_add_multi([(lead, 3)] + runs + label)
         return
     runs = term.sparkline_runs(hist, room)
     if runs:
