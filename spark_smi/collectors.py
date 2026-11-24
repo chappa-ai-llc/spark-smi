@@ -50,6 +50,20 @@ ARM_PART_NAMES = {
     (0x4e, 0x004): "Carmel",
 }
 
+def _netdev_sysfs_bytes(iface):
+    """(rx_bytes, tx_bytes) from /sys/class/net/<iface>/statistics, or None
+    off Linux or for a vanished interface."""
+    base = f"/sys/class/net/{iface}/statistics/"
+    try:
+        with open(base + "rx_bytes") as f:
+            rx = int(f.read())
+        with open(base + "tx_bytes") as f:
+            tx = int(f.read())
+        return (rx, tx)
+    except (OSError, ValueError):
+        return None
+
+
 def _read_int(path, base=10):
     try:
         with open(path) as f:
@@ -1007,8 +1021,12 @@ class NetCollector:
         self._rdma_dev_map = {}  # iface -> (ib_device_name, port_str), filled by _map_rdma_counters
         self.rdma_counters = self._map_rdma_counters()
         self.groups = self._group_physical()
+        # "rdma_counting" flips to True the first time any HCA byte counter
+        # reads non-zero. Some driver/firmware builds leave every counter
+        # under ports/N/counters at 0 forever (issue #10); until one moves,
+        # page 1 must not claim RDMA traffic is being counted.
         self.caps = {"rdma": bool(self.rdma_counters), "interfaces": len(self.interfaces),
-                     "pf_detail": bool(self._rdma_dev_map)}
+                     "pf_detail": bool(self._rdma_dev_map), "rdma_counting": False}
         try:
             netdev_stats = psutil.net_io_counters(pernic=True)
         except Exception:
@@ -1032,7 +1050,7 @@ class NetCollector:
         self.prev_bytes_pf = {}
         self.prev_hw = {}
         for iface in self._rdma_dev_map:
-            b = self._read_byte_counters(iface, {})
+            b = self._read_byte_counters(iface, None)
             if b is not None:
                 self.prev_bytes_pf[iface] = b
             self.prev_hw[iface] = self._hw_counter_snapshot(iface)
@@ -1093,9 +1111,13 @@ class NetCollector:
             return ports[0]
 
     def _read_byte_counters(self, iface, netdev_stats):
-        """Total (rx, tx) bytes for one netdev. Prefers the RDMA port
-        counters -- which are in 4-byte-word units per the InfiniBand spec --
-        falling back to kernel netdev counters (blind to RDMA)."""
+        """Both byte-counter sources for one netdev, as (hca, netdev), each
+        a (rx, tx) tuple or None. The HCA port counters (4-byte-word units
+        per the InfiniBand spec) count RDMA traffic that bypasses the kernel;
+        the netdev counters count only kernel traffic. Some driver/firmware
+        builds leave the HCA counters at 0 forever (issue #10), so neither
+        source is trusted alone: _rates() takes the larger delta."""
+        hca = None
         paths = self.rdma_counters.get(iface)
         if paths:
             try:
@@ -1103,11 +1125,36 @@ class NetCollector:
                     rx = int(f.read()) * 4
                 with open(paths[1]) as f:
                     tx = int(f.read()) * 4
-                return (rx, tx)
+                hca = (rx, tx)
+                if rx or tx:
+                    self.caps["rdma_counting"] = True
             except (OSError, ValueError):
                 pass
-        s = netdev_stats.get(iface)
-        return (s.bytes_recv, s.bytes_sent) if s else None
+        s = netdev_stats.get(iface) if netdev_stats else None
+        if s is not None:
+            nd = (s.bytes_recv, s.bytes_sent)
+        else:
+            nd = _netdev_sysfs_bytes(iface)
+        if hca is None and nd is None:
+            return None
+        return (hca, nd)
+
+    @staticmethod
+    def _rates(cur, prev, dt):
+        """(rx_bps, tx_bps) from two _read_byte_counters() readings: per
+        direction, the larger of the HCA and netdev deltas. A working HCA
+        counts kernel traffic too, so it wins; a stuck one reads 0 and the
+        netdev delta shows through. Negative deltas (a counter reset on a
+        driver reload) clamp to 0."""
+        out = []
+        for d in (0, 1):
+            best = 0
+            for src in (0, 1):
+                c, p = cur[src], prev[src] if prev else None
+                if c is not None and p is not None:
+                    best = max(best, c[d] - p[d])
+            out.append(best * 8 / dt)
+        return tuple(out)
 
     def _phys_port_key(self, iface):
         """(switch_id, port_name) identity of the physical port behind a
@@ -1256,10 +1303,7 @@ class NetCollector:
             b = self._read_byte_counters(name, netdev_stats)
             if b is None:
                 continue
-            p = self.prev_bytes.get(name, b)
-            drx = max(b[0] - p[0], 0)  # negative delta = counter reset
-            dtx = max(b[1] - p[1], 0)
-            rate[name] = (drx * 8 / dt, dtx * 8 / dt)
+            rate[name] = self._rates(b, self.prev_bytes.get(name, b), dt)
             self.prev_bytes[name] = b
 
         nics = []
@@ -1363,7 +1407,7 @@ class NetCollector:
         for iface in sorted(self._rdma_dev_map):
             ib = self._rdma_dev_map[iface][0]
 
-            b = self._read_byte_counters(iface, {})
+            b = self._read_byte_counters(iface, None)
             rx_bps = tx_bps = 0.0
             if b is not None:
                 # NOT `.get(iface, b)` -- that fallback-to-current-value
@@ -1372,9 +1416,7 @@ class NetCollector:
                 # snapshot mode). Both prev_bytes_pf and prev_hw are always
                 # pre-seeded at construction, so a genuinely missing entry
                 # here would mean a newly-appeared iface, not the common case.
-                prev_b = self.prev_bytes_pf.get(iface, b)
-                rx_bps = max(b[0] - prev_b[0], 0) * 8 / dt
-                tx_bps = max(b[1] - prev_b[1], 0) * 8 / dt
+                rx_bps, tx_bps = self._rates(b, self.prev_bytes_pf.get(iface, b), dt)
                 self.prev_bytes_pf[iface] = b
 
             raw = self._hw_counter_snapshot(iface)

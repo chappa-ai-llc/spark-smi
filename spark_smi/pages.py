@@ -16,7 +16,7 @@ from . import term
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "4.0.3"
+    VERSION = "4.0.4"
 
 # The header shows the major.minor series ("4.0"). Derived from VERSION rather
 # than written out, because a hardcoded literal here silently drifted a whole
@@ -791,13 +791,19 @@ def _build_network_compact_rows(p, inner, nics):
     return p
 
 
-def _build_network_panel(y, x0, width, nics, collapse, tier, has_rdma=True):
+def _build_network_panel(y, x0, width, nics, collapse, tier, has_rdma=True,
+                         rdma_counting=True):
     inner = width - 2
     # Only advertise the HCA-counter path when there's actually an RDMA
-    # device behind one of these NICs; on a plain box the rates come from
-    # netdev counters and saying otherwise is just wrong.
-    caption = (" physical ports · RDMA read from HCA counters" if has_rdma
-               else " physical ports")
+    # device behind one of these NICs AND its counters have moved at least
+    # once; on a plain box, or where the driver leaves the HCA counters at 0
+    # (issue #10), the rates come from netdev counters, which miss RDMA.
+    if has_rdma and rdma_counting:
+        caption = " physical ports · RDMA read from HCA counters"
+    elif has_rdma:
+        caption = " physical ports · HCA counters read 0, kernel traffic only"
+    else:
+        caption = " physical ports"
     p = panels.Panel(y, x0, width,
                       title=[("NETWORK", 9), (caption, 3)],
                       kind="top")
@@ -1018,8 +1024,12 @@ def build_page1(state, tier, width, x0=0, height=None, sort_nics=False, theme_to
     out.extend(gpu_panels)
     y += gpu_h
 
-    has_rdma = bool(((state.get("caps") or {}).get("net") or {}).get("rdma"))
-    net_panel = _build_network_panel(y, x0, width, nics, collapse_nics, tier, has_rdma)
+    net_caps = (state.get("caps") or {}).get("net") or {}
+    has_rdma = bool(net_caps.get("rdma"))
+    # Older --serve agents send no "rdma_counting": keep their old caption.
+    rdma_counting = bool(net_caps.get("rdma_counting", True))
+    net_panel = _build_network_panel(y, x0, width, nics, collapse_nics, tier, has_rdma,
+                                     rdma_counting)
     out.append(net_panel)
     if disks:
         y += net_panel.total_height  # no +1: STORAGE continues this same frame
@@ -1386,10 +1396,10 @@ def _nic_panel_title(nics, nics_pf, nic_fw):
 
 
 _NIC_COLS = [("PORT", 5), ("RDMA DEV", 16), ("NETDEV", 16), ("STATE", 7), ("SPEED", 7),
-             ("RDMA RX", 12), ("RDMA TX", 12), ("CNP S/H", 11), ("ECN MARK", 11), ("DISCARD", 9)]
+             ("RX", 12), ("TX", 12), ("CNP S/H", 11), ("ECN MARK", 11), ("DISCARD", 9)]
 # Column ladder: at narrow widths, drop whole trailing columns in this order
 # (least essential first) rather than let panels.render's per-row clip cut
-# them off mid-token ("RDMA TX     C..."). PORT..RDMA TX are never dropped.
+# them off mid-token ("TX          C..."). PORT..TX are never dropped.
 _NIC_DROPPABLE = ["DISCARD", "ECN MARK", "CNP S/H"]
 
 def _nic_columns_for_width(inner):
@@ -1428,8 +1438,8 @@ def _build_nic_panel(y, x0, width, nics_pf, title_extra, asic_temp):
             "PORT": (row.get("port", "-"), 3), "RDMA DEV": (row.get("rdma_dev", "-"), 8),
             "NETDEV": (row.get("netdev", "-"), 3), "STATE": (state_txt, state_slot),
             "SPEED": (row.get("speed_str", "-"), 3),
-            "RDMA RX": (term.fmt_rate(row.get("rx_bps", 0), "bit"), 2),
-            "RDMA TX": (term.fmt_rate(row.get("tx_bps", 0), "bit"), 2),
+            "RX": (term.fmt_rate(row.get("rx_bps", 0), "bit"), 2),
+            "TX": (term.fmt_rate(row.get("tx_bps", 0), "bit"), 2),
             "CNP S/H": (cnp, 3), "ECN MARK": (ecn if ecn is not None else "n/a", 3),
             "DISCARD": (disc if disc is not None else "n/a", 3),
         }

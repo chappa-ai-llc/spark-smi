@@ -25,7 +25,7 @@ The monitor's rendering has no tests and no linter is configured — verificatio
 rendering against real hardware over ssh (see `scratchpad/`, gitignored, for
 the deploy/record helpers). Unit tests cover only the release script and
 the cluster token reader: `python3 -m unittest discover -s deploy` and
-`python3 -m unittest discover -s tests`. Packaging is setuptools via
+`python3 -m unittest discover -s tests` (the second needs psutil installed). Packaging is setuptools via
 `pyproject.toml`; the pip entry point is `spark-smi = spark_smi.__main__:main`.
 
 Note for anything user-facing: the DGX Spark's own Ubuntu 24.04 marks system
@@ -243,12 +243,16 @@ info is cached after first fetch to avoid shelling out every tick.
   `max(rx_bps, tx_bps)` descending, recomputed fresh every frame, toggling
   back to detection order.
   - **Byte counters**: netdevs with an RDMA device (matched via
-    `/sys/class/infiniband/<hca>/device/net/`) are read from the HCA's
+    `/sys/class/infiniband/<hca>/device/net/`) are read from BOTH the HCA's
     per-port `port_rcv_data`/`port_xmit_data` counters — these are in
     **4-byte-word units** (IB spec, so ×4) and, unlike kernel netdev stats,
-    they count RoCE/RDMA traffic (NCCL, GPUDirect) that bypasses the CPU.
-    Everything else falls back to psutil netdev counters. Negative deltas
-    (counter reset on driver reload) clamp to 0. Rate math uses its own
+    they count RoCE/RDMA traffic (NCCL, GPUDirect) that bypasses the CPU —
+    and the netdev counters; `NetCollector._rates()` takes the larger delta
+    per direction, because some driver/firmware builds leave every HCA
+    counter at 0 (issue #10). `caps["net"]["rdma_counting"]` turns True once
+    any HCA counter reads non-zero; until then page 1's caption says only
+    kernel traffic is counted. Everything else uses psutil netdev counters.
+    Negative deltas (counter reset on driver reload) clamp to 0. Rate math uses its own
     `time.time()` delta each collector keeps internally — it is NOT derived
     from `-n`'s configured refresh rate, so an inaccurate `-n` value never
     skews a rate reading, only how often one is taken.
@@ -258,7 +262,8 @@ info is cached after first fetch to avoid shelling out every tick.
     (or the single port speed when PFs share one port). A down port drops out
     of the capacity sum; "Link Down" appears only when every port in the
     group is down. Non-PCI devices (USB NICs) group by themselves.
-  - Page 2 adds per-PF detail (`NetCollector.sample_pf_detail`): RDMA RX/TX,
+  - Page 2 adds per-PF detail (`NetCollector.sample_pf_detail`): RX/TX (same
+    two-source rule),
     CNP sent/handled, ECN marks, buffer discards from each HCA's
     `hw_counters`, and ASIC temperature from the NIC's own hwmon device.
 - **Storage** (`DiskCollector`): every physical block device under
