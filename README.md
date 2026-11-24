@@ -2,7 +2,7 @@
 
 > A terminal-based system monitor (TUI) built for **NVIDIA Grace Blackwell (GB10)** and hybrid ARM architectures — because `nvidia-smi` alone doesn't tell the full story.
 
-![Version](https://img.shields.io/badge/version-4.1.0-blue)
+![Version](https://img.shields.io/badge/version-4.1.1-blue)
 ![Python](https://img.shields.io/badge/python-3.8%2B-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Linux%20aarch64-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -213,28 +213,46 @@ entirely — it never touches the netdev's `rx_bytes`/`tx_bytes` counters that
 `psutil`, `ifconfig`, or `ip -s link` read. A monitor that only reads netdev
 counters will show near-zero traffic on a link that's actually saturated.
 
-SPARK-SMI reads the **HCA's own hardware counters** as well, wherever an
-RDMA device is present: `/sys/class/infiniband/<hca>/ports/<n>/counters/`
-exposes `port_rcv_data`/`port_xmit_data` in **4-byte-word units** (per the
-InfiniBand spec — multiplied by 4 to get bytes), and these count RoCE traffic
-that the kernel netdev stats miss. Every tick, each direction takes the
-larger of the HCA delta and the netdev delta, so traffic shows whichever
-counter sees it. Every
-other NIC uses the normal psutil netdev counters. RX and TX are kept as
-separate rates throughout (never summed into one "throughput" number), and
-a counter reset from a driver reload is clamped to zero instead of showing a
-giant negative-delta spike.
+SPARK-SMI uses three counter sources and takes the best one available:
 
-On some driver and firmware builds the HCA counters count only RDMA traffic,
-never traffic sent through the kernel. On a DGX Spark with kernel
-`7.0.0-1025-nvidia` and ConnectX-7 firmware 28.50, a 109 Gb/s iperf3 run
-left them at 0, while a 109 Gb/s `ib_write_bw` run raised them by the same
-byte count as the NIC's physical-port counter. There, TCP traffic (iperf3,
-ssh, NFS) shows through the netdev counter and RDMA traffic through the HCA
-counter, and page 4's RDMA tests measure correctly. TCP and RDMA on one port
-in the same second read as the larger of the two, not the sum (#11). Until
-an HCA counter has moved since boot, the NETWORK panel's caption reads
-**HCA counters read 0, kernel traffic only**.
+| Source | Counts | Where |
+|:---|:---|:---|
+| Physical-port MAC counters (`OctetsReceivedOK` / `OctetsTransmittedOK`, read over ethtool netlink) | every frame on the wire, RDMA and kernel alike | NICs whose driver reports the IEEE 802.3 MAC counters (mlx5 does), Linux 5.13 or later |
+| HCA port counters (`/sys/class/infiniband/<hca>/ports/<n>/counters/port_rcv_data`, `port_xmit_data`) | RoCE/RDMA traffic; on some builds kernel traffic too | any RDMA device |
+| netdev counters (psutil, `/sys/class/net/<if>/statistics`) | kernel traffic only | every NIC |
+
+The HCA counters are in **4-byte-word units** (per the InfiniBand spec),
+multiplied by 4 to get bytes. The MAC counters are the same numbers
+`ethtool -S <if> --groups eth-mac` prints, and reading them needs no root.
+
+Every tick, per netdev, each direction takes the larger of the HCA delta and
+the netdev delta. Per physical port, page 1 then takes the larger of the MAC
+counter delta and the sum of its netdevs' rates. PFs that share one physical
+port (the DGX Spark's ConnectX-7 exposes two per port) read the same MAC
+counter, so a port counts once, never once per PF. RX and TX stay separate
+rates throughout, and a counter reset from a driver reload is clamped to zero
+instead of showing a giant negative-delta spike.
+
+Why all three: on some driver and firmware builds the HCA counters count
+only RDMA traffic, never traffic sent through the kernel. On a DGX Spark with
+kernel `7.0.0-1025-nvidia` and ConnectX-7 firmware 28.50, a 109 Gb/s iperf3
+run left them at 0, while a 109 Gb/s `ib_write_bw` run raised them by the
+same byte count as the port's MAC counter. With TCP (49 Gb/s) and RDMA
+(61 Gb/s) on one port at once, the per-netdev rule alone reads about
+60 Gb/s; the MAC counter reads the full 112 Gb/s (#11).
+
+The NETWORK panel's caption says which case applies:
+
+| Caption | Meaning |
+|:---|:---|
+| **port counters, RDMA + kernel** | every RDMA-backed port has MAC counters: mixed traffic reads in full |
+| **RDMA read from HCA counters** | no MAC counters; TCP alone and RDMA alone read right, both at once read as the larger |
+| **HCA counters read 0, kernel traffic only** | no MAC counters, and no HCA counter has moved since boot |
+
+Page 2's per-PF rows use a port's MAC counter only when that PF is the
+port's sole PF; a shared port's counter is the sum of all its PFs, so those
+rows keep the per-netdev rule. Page 4's fabric tests sample these per-PF
+rates, so a test's RDMA traffic is measured either way.
 
 Page 2's NIC panel goes further: per-PF congestion/ECN counters (CNP sent/
 handled, ECN marks, buffer discards) straight from the same `hw_counters`

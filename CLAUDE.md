@@ -23,8 +23,9 @@ python spark-smi.py --json        # one sample as JSON to stdout, then exit
 
 The monitor's rendering has no tests and no linter is configured — verification is by
 rendering against real hardware over ssh (see `scratchpad/`, gitignored, for
-the deploy/record helpers). Unit tests cover only the release script and
-the cluster token reader: `python3 -m unittest discover -s deploy` and
+the deploy/record helpers). Unit tests cover the release script and a few
+pure pieces (cluster token reader, node names, the network counter rules and
+the ethtool netlink codec): `python3 -m unittest discover -s deploy` and
 `python3 -m unittest discover -s tests` (the second needs psutil installed). Packaging is setuptools via
 `pyproject.toml`; the pip entry point is `spark-smi = spark_smi.__main__:main`.
 
@@ -124,6 +125,9 @@ spark_smi/
                   poller the render loop never blocks on. Also local-domain
                   inference (reverse-PTR first) so short cluster hostnames
                   resolve. Has NO code path that writes anything.
+  ethtool.py      Physical-port MAC byte counters over ethtool generic
+                  netlink (stdlib socket only); port_byte_reader(iface)
+                  returns None wherever the kernel/driver can't report them.
   fabtest.py      Page-4 fabric validation: rail discovery + subnet-matched
                   src<->dst pairing, FabricEngine (drives ib_write_bw/-lat
                   over BatchMode ssh, or iperf3 where there's no RDMA
@@ -253,15 +257,26 @@ info is cached after first fetch to avoid shelling out every tick.
     they count RoCE/RDMA traffic (NCCL, GPUDirect) that bypasses the CPU —
     and the netdev counters; `NetCollector._rates()` takes the larger delta
     per direction, because some driver/firmware builds count only RDMA in
-    the HCA counters, never kernel traffic (issues #10, #11; mixed traffic
-    on one port then reads as the larger, not the sum). `caps["net"]["rdma_counting"]` turns True once
-    any HCA counter reads non-zero; until then page 1's caption says only
-    kernel traffic is counted. Everything else uses psutil netdev counters.
-    Negative deltas (counter reset on driver reload) clamp to 0. Rate math uses its own
+    the HCA counters, never kernel traffic (issues #10, #11).
+    `caps["net"]["rdma_counting"]` turns True once any HCA counter reads
+    non-zero. Everything else uses psutil netdev counters.
+  - **Port MAC counters** (issue #11, `ethtool.py`): per physical port, the
+    IEEE 802.3 `OctetsReceivedOK`/`OctetsTransmittedOK` read over ethtool
+    generic netlink (`ETHTOOL_MSG_STATS_GET`, eth-mac group; stdlib socket,
+    no subprocess, no root, ~0.2 ms) count RDMA and kernel traffic alike.
+    PFs sharing a `phys_switch_id`+`phys_port_name` report the SAME counter,
+    so readers are keyed by port ("unit"), read once per port, and
+    `NetCollector._combine()` counts each port once as max(MAC delta, sum of
+    its PFs' per-netdev rates). Page 2 uses a port's MAC counter only for a
+    PF that is that port's sole PF. `caps["net"]["port_counting"]` is True
+    when every RDMA-backed port has one; page 1's caption picks from
+    port_counting → rdma_counting → "kernel traffic only".
+  - Negative deltas (counter reset on driver reload) clamp to 0. Rate math uses its own
     `time.time()` delta each collector keeps internally — it is NOT derived
     from `-n`'s configured refresh rate, so an inaccurate `-n` value never
     skews a rate reading, only how often one is taken.
-  - **Physical grouping**: netdevs are grouped by PCI slot (address minus the
+  - **Physical grouping**: netdevs are grouped by physical port
+    (`phys_switch_id`+`phys_port_name`), else by PCI slot (address minus the
     function digit), so a multi-port card renders as one row per physical
     port with a `×N PF` marker, throughput summed against summed link speed
     (or the single port speed when PFs share one port). A down port drops out

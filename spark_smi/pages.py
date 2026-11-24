@@ -17,7 +17,7 @@ from . import node
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "4.1.0"
+    VERSION = "4.1.1"
 
 # The header shows the major.minor series ("4.0"). Derived from VERSION rather
 # than written out, because a hardcoded literal here silently drifted a whole
@@ -793,13 +793,16 @@ def _build_network_compact_rows(p, inner, nics):
 
 
 def _build_network_panel(y, x0, width, nics, collapse, tier, has_rdma=True,
-                         rdma_counting=True):
+                         rdma_counting=True, port_counting=False):
     inner = width - 2
-    # Only advertise the HCA-counter path when there's actually an RDMA
+    # Port MAC counters see RDMA and kernel traffic alike (issue #11). Else
+    # only advertise the HCA-counter path when there's actually an RDMA
     # device behind one of these NICs AND its counters have moved at least
     # once; on a plain box, or where the driver leaves the HCA counters at 0
     # (issue #10), the rates come from netdev counters, which miss RDMA.
-    if has_rdma and rdma_counting:
+    if has_rdma and port_counting:
+        caption = " physical ports · port counters, RDMA + kernel"
+    elif has_rdma and rdma_counting:
         caption = " physical ports · RDMA read from HCA counters"
     elif has_rdma:
         caption = " physical ports · HCA counters read 0, kernel traffic only"
@@ -1029,8 +1032,9 @@ def build_page1(state, tier, width, x0=0, height=None, sort_nics=False, theme_to
     has_rdma = bool(net_caps.get("rdma"))
     # Older --serve agents send no "rdma_counting": keep their old caption.
     rdma_counting = bool(net_caps.get("rdma_counting", True))
+    port_counting = bool(net_caps.get("port_counting", False))
     net_panel = _build_network_panel(y, x0, width, nics, collapse_nics, tier, has_rdma,
-                                     rdma_counting)
+                                     rdma_counting, port_counting)
     out.append(net_panel)
     if disks:
         y += net_panel.total_height  # no +1: STORAGE continues this same frame
