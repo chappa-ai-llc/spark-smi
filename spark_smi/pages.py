@@ -18,7 +18,7 @@ from . import topomap
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "5.2.0"
+    VERSION = "5.3.0"
 
 # The header shows the major.minor series ("4.0"). Derived from VERSION rather
 # than written out, because a hardcoded literal here silently drifted a whole

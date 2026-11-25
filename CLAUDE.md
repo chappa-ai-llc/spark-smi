@@ -183,12 +183,16 @@ spark_smi/
                   shape). Dial strip, charts with axes, POWER & THERMAL
                   and per-core heatmap at xl. Reads State's sample["long"]
                   (up to HIST_LONG samples, never sent over the wire).
-  clusterpage.py  Page 3's big layout (#14 step 3): build_page3_large()
-                  at bigpage.layout_for() large/xl, up to MAX_NODES (8):
+  clusterpage.py  Page 3's big layout (#14 step 3, 5.3 for ultrawide/4K):
+                  build_page3_large() at bigpage.layout_for() large/xl, up
+                  to MAX_NODES (16) in grid_for()'s rows (up to 4):
                   CLUSTER dials, topomap at the largest height that fits,
-                  a chart column per node (GPU, CPU, power, fabric mirror,
-                  top process), GPU UTIL heat grid. Heights are pure
-                  arithmetic (column_rows) and fill the terminal exactly;
+                  a chart column per node (GPU, CPU, MEM, HOTTEST, power,
+                  fabric mirror, top 3 processes), GPU UTIL / HEAT grid
+                  (heat_levels: GPU, + fabric, + CPU rows). The GPU height
+                  is a per-node budget split among its GPUs (gpu_heights).
+                  Heights are pure arithmetic (column_rows) and fill the
+                  terminal exactly;
                   None falls back to pages.build_page3. Shares
                   pages.page3_prepare (sort/filter/selection/summary).
   topomap.py      Page 3's TOPOLOGY map: build_graph() finds links from

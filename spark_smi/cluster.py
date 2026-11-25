@@ -33,7 +33,7 @@ from . import node
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "5.2.0"
+    VERSION = "5.3.0"
 
 DEFAULT_PORT = 8817
 POLL_TIMEOUT = 0.75          # per-member urllib timeout (spec)
@@ -377,8 +377,9 @@ def node_power(sample):
 
 def history_point(sample):
     """{series key: value} for one poll of one node: "cpu" and "mem" (%),
-    "rx"/"tx" (fabric bits/s), "pwr" (W) and "gpu:<id>" (util %) -- each
-    only when the sample has it."""
+    "rx"/"tx" (fabric bits/s), "pwr" (W), "temp" (the hottest of CPU, GPUs
+    and NIC ASIC, °C) and "gpu:<id>" (util %) -- each only when the sample
+    has it."""
     out = {}
     try:
         clusters = ((sample.get("cpu") or {}).get("clusters")) or []
@@ -396,6 +397,11 @@ def history_point(sample):
         watts, _ = node_power(sample)
         if watts is not None:
             out["pwr"] = watts
+        temps = [(sample.get("cpu") or {}).get("temp"), sample.get("nic_asic_temp")]
+        temps += [g.get("temp") for g in sample.get("gpus") or []]
+        temps = [float(t) for t in temps if isinstance(t, (int, float))]
+        if temps:
+            out["temp"] = max(temps)
         for g in sample.get("gpus") or []:
             if isinstance(g.get("util"), (int, float)):
                 out[f"gpu:{g.get('id')}"] = float(g["util"])
