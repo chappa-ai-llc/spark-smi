@@ -2,7 +2,7 @@
 
 > A terminal-based system monitor (TUI) built for **NVIDIA Grace Blackwell (GB10)** and hybrid ARM architectures — because `nvidia-smi` alone doesn't tell the full story.
 
-![Version](https://img.shields.io/badge/version-5.3.0-blue)
+![Version](https://img.shields.io/badge/version-5.4.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8%2B-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Linux%20aarch64-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -80,7 +80,8 @@ GPU — regardless of what's actually plugged into a given slot (see "PCIe
 link monitoring" below), per-PF NIC detail (RDMA counters, CNP/ECN marks,
 discards, ASIC temperature), every thermal zone and named hwmon device, and
 NVMe SMART health. This is also where the interactive power/clock knobs
-live (see below).
+live (see below). On a big terminal it adds history charts for all of it
+(see "Big screens" below).
 
 **Page 3 — Cluster** (`3`, needs `--cluster`): every node in the cluster on
 one screen, each section (CPU / MEMORY / GPU / FABRIC / STORAGE) stacking one
@@ -190,6 +191,24 @@ columns, when it fits), and **compact** (the normal page at any size).
 `--graphs` and `--history` set the same from the command line. spark-smi
 remembers your last `g` and `+`/`-` choice in
 `~/.config/spark-smi/settings.json` (or under `$XDG_CONFIG_HOME`).
+
+Page 2 has one too (a live capture is under "Screenshots"):
+
+- **One column per GPU**: the same detail as the normal page, knobs
+  included, then charts beneath it: SM clock against its maximum, power
+  against its limit, temperature, and PCIe traffic in and out. A chart
+  appears only for a number this GPU reports.
+- **NIC** and **PORTS** side by side: the per-PF table, and a mirrored
+  in/out chart for each physical port (its PFs summed) with a
+  **CONGESTION** chart of CNP and ECN marks per second.
+- **THERMALS** as a heat grid: one row per sensor over time, so a sensor
+  that warms up shows as a brightening streak. When the page is short, the
+  sensors wrap into side-by-side columns.
+- **POWER RAILS** with a wall-power chart (with the `spbm` driver), then
+  **PCIE LINKS** and **NVME SMART**.
+
+Page 2's big layout needs this machine's own history, so a drilldown into a
+remote node keeps the normal page 2.
 
 Page 5 has a big layout at the same sizes: one card per GPU across the top,
 each charting **SM by process** (the three busiest) and **GPU memory by
@@ -322,7 +341,7 @@ resize the window and it adapts live, no restart needed:
 | `compact` | < 84 cols | Condensed layout: two NIC/disk entries per cell-row, GPU fields folded onto fewer lines. |
 | `standard` | 84–110 cols | Full field set, but GPU cards and THERMALS/SMART stack full-width instead of side-by-side. |
 | `wide` | > 110 cols | The full multi-column layout; content is capped at 160 columns and centered on wider terminals. |
-| `large` | ≥ 200 cols, ≥ 45 rows | Pages 1, 3 and 5: dial strips, charts with axes and minutes of history across the full width (see "Big screens"). |
+| `large` | ≥ 200 cols, ≥ 45 rows | Pages 1, 2, 3 and 5: dial strips, charts with axes and minutes of history across the full width (see "Big screens"). |
 | `xl` | ≥ 300 cols, ≥ 45 rows | `large` plus, on page 1, a POWER & THERMAL column and a per-core heatmap. |
 
 Resizing is live — the same running process, no restart, reflowing between
@@ -785,6 +804,15 @@ every thermal zone, NVMe SMART, and the `spbm` power rails with their knobs.
 
 ![Page 2 advanced](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page2-advanced.png)
 
+**Page 2 on an ultrawide screen.** The same Spark at 380 × 75, with the
+RTX 3090 and the GB10 both busy and one rail carrying a two-way RDMA run at
+108 Gb/s: clock, power, temperature and PCIe charts under each GPU's
+detail, the port's mirrored chart, every sensor's heat row and the wall
+power. Captured live with 5.4 and the `S` key; the host name was replaced
+before publishing.
+
+![Page 2 on an ultrawide screen](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page2-ultrawide.png)
+
 **Page 3 — Cluster.** The TOPOLOGY map on top: two Sparks cabled directly
 over four rails, one carrying an RDMA run. Below it, the two nodes compared
 down each column, with a mixed-GPU fleet summary and per-node totals in the
@@ -1102,6 +1130,7 @@ all fixed in 4.0 — see the [changelog](CHANGELOG.md).
 - [X] **Big-screen page 1** — dials, charts with axes and up to an hour of history on terminals of 200+ columns (5.0)
 - [X] **Fuller GPU task manager** — per-process SM %, encoder/decoder, a detail pane, history charts, a recently-ended list, sort and filter on page 5 (5.1)
 - [X] **Big-screen cluster page** — cluster dials, a telemetry column per node and a GPU heat grid on page 3 (5.2); up to 16 nodes with memory and temperature charts for ultrawide and 4K (5.3)
+- [X] **Big-screen advanced page** — clock, power, temperature, PCIe, per-port fabric and congestion charts, a thermal heat grid and wall power on page 2 (5.4)
 - [ ] **Other nodes' GPU tasks** — page 5 for a remote node, opt-in on its agent, arguments hidden by default ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14))
 
 ---

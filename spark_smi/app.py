@@ -11,6 +11,7 @@ import sys
 import time
 from collections import deque
 
+from . import advpage
 from . import bigpage
 from . import cluster
 from . import clusterpage
@@ -28,7 +29,7 @@ from . import term
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "5.3.0"
+    VERSION = "5.4.0"
 DEFAULT_REFRESH_RATE = 1.0
 HIST_LEN = 60
 # Local history kept for the big-screen layouts (#14): up to an hour at 1 s.
@@ -287,6 +288,7 @@ class State:
         self.core_hist = {}
         self.rail_hist = {}
         self.temp_hist = {}
+        self.adv_hist = {}       # page 2's big layout: per-GPU and per-PF series
 
     def _push(self, store, key, value):
         hist = store.get(key)
@@ -298,7 +300,7 @@ class State:
             hist.append(0.0)
         return hist
 
-    def _long_history(self, cpu, gpus, nics, disks, thermal, power_rails):
+    def _long_history(self, cpu, gpus, nics, disks, thermal, power_rails, nic_pf=None):
         """Up to HIST_LONG samples per series for the big-screen layouts
         (#14), as plain lists. Local only: cluster.to_wire() drops it."""
         out = {"cpu": [list(h) for h in self.cluster_hist], "mem": list(self.mem_hist),
@@ -327,6 +329,36 @@ class State:
             key = f"{t.get('hwname') or t.get('kind')}:{t.get('label')}"
             if t.get("temp_c") is not None:
                 out["temp"][key] = list(self._push(self.temp_hist, key, t["temp_c"]))
+        out["adv"] = self._adv_history(gpus, nic_pf)
+        return out
+
+    def _adv_history(self, gpus, nic_pf):
+        """Page 2's series (#14): per GPU its SM clock (MHz), temperature
+        (°C) and PCIe rx/tx (bytes/s); per PF (by netdev) rx/tx (bits/s)
+        and congestion (CNP sent + handled + ECN marks, per second). A
+        series starts when its value first reads as a number."""
+        out = {"gpu": {}, "pf": {}}
+
+        def num(v):
+            return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+        for g in gpus or []:
+            gid = g.get("id")
+            vals = {"clk": num(g.get("clk_sm")), "temp": num(g.get("temp"))}
+            rx, tx = num(g.get("pcie_rx_kbs")), num(g.get("pcie_tx_kbs"))
+            if rx is not None and tx is not None:
+                vals["pcie_rx"], vals["pcie_tx"] = rx * 1024, tx * 1024
+            out["gpu"][gid] = {k: list(self._push(self.adv_hist, ("gpu", gid, k), v))
+                               for k, v in vals.items() if v is not None}
+        for r in nic_pf or []:
+            name = r.get("netdev")
+            if not name:
+                continue
+            cong = [num(r.get(k)) for k in ("cnp_sent", "cnp_handled", "ecn_marked")]
+            vals = {"rx": num(r.get("rx_bps")), "tx": num(r.get("tx_bps")),
+                    "cong": sum(c for c in cong if c is not None) if any(c is not None for c in cong) else None}
+            out["pf"][name] = {k: list(self._push(self.adv_hist, ("pf", name, k), v))
+                               for k, v in vals.items() if v is not None}
         return out
 
     def sample(self):
@@ -480,7 +512,7 @@ class State:
             driver, cuda = "Unknown", "Unknown"
 
         # Only the screen pays for the long copies; --serve/--json don't.
-        long = self._long_history(cpu, gpus, nics, disks, thermal, power_rails) if self.want_long else None
+        long = self._long_history(cpu, gpus, nics, disks, thermal, power_rails, nic_pf) if self.want_long else None
         if self.want_long:
             try:
                 self.proc_track.update(gpus)
@@ -723,9 +755,19 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
 
     try:
         if page_num == 2:
-            built = pages.build_page2(sample, tier, draw_w, x0, height=height_hint or h, knob_ui=knob_ctx,
-                                       theme_toast=theme_toast, remote=remote_name, cluster_tabs=has_cluster,
-                                       has_perf=has_perf)
+            built = None
+            layout = bigpage.layout_for(w, height_hint or h, getattr(state, "graphs", "auto"))
+            if layout in ("large", "xl"):
+                # The big layout (#14) needs the local long history, so a
+                # remote drilldown keeps the normal page.
+                built = advpage.build_page2_large(sample, w, height_hint or h, 0, layout,
+                                                  history=getattr(state, "history", None), knob_ui=knob_ctx,
+                                                  theme_toast=theme_toast, remote=remote_name,
+                                                  cluster_tabs=has_cluster, has_perf=has_perf)
+            if built is None:
+                built = pages.build_page2(sample, tier, draw_w, x0, height=height_hint or h, knob_ui=knob_ctx,
+                                           theme_toast=theme_toast, remote=remote_name, cluster_tabs=has_cluster,
+                                           has_perf=has_perf)
         else:
             built = None
             layout = bigpage.layout_for(w, height_hint or h, getattr(state, "graphs", "auto"))

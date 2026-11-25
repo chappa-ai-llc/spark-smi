@@ -26,7 +26,7 @@ from . import term
 try:
     from . import VERSION
 except Exception:  # pragma: no cover
-    VERSION = "5.3.0"
+    VERSION = "5.4.0"
 
 
 _KIND_SLOT = {"orphan": 5, "tmux": 2, "screen": 2, "zellij": 2, "docker": 2,

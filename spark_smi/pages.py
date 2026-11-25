@@ -18,7 +18,7 @@ from . import topomap
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "5.3.0"
+    VERSION = "5.4.0"
 
 # The header shows the major.minor series ("4.0"). Derived from VERSION rather
 # than written out, because a hardcoded literal here silently drifted a whole
@@ -1858,6 +1858,44 @@ def _build_nvme_smart_panel(y, x0, width, smart, kind="top"):
     return p
 
 
+def page2_footer(state, x0, width, y, knob_ui=None, theme_toast=None, remote=None):
+    """Page 2's footer (both layouts): the knob key hints, the confirm
+    prompt or toast while one is live, the theme toast."""
+    gpus = state.get("gpus") or []
+    driver, cuda = state.get("driver", "Unknown"), state.get("cuda", "Unknown")
+    has_nvml = (state.get("caps") or {}).get("has_nvml", False)
+    rate = state.get("rate", 1.0)
+
+    extra_keys = None
+    if knob_ui is not None:
+        registry = knob_ui.get("registry") or []
+        has_power_knob = any(k["kind"] in ("gpu_power", "rail_power") for k in registry)
+        has_clock_knob = any(k["kind"] in ("clk_sm", "clk_mem") for k in registry)
+        has_reset = any(k["kind"] == "reset_clocks" for k in registry)
+        has_persist = any(k["kind"] == "persist" for k in registry)
+        bits = []
+        if len(gpus) > 1 or has_power_knob or has_clock_knob:
+            bits.append("tab gpu")
+        if has_power_knob:
+            bits.append("P pwr limit")
+        if has_clock_knob:
+            bits.append("C/M clock locks")
+        if has_reset:
+            bits.append("R reset")
+        if has_persist:
+            bits.append("X persist")
+        extra_keys = (" · " + " · ".join(bits)) if bits else None
+
+    footer_knob_ui = knob_ui
+    if theme_toast and not (knob_ui and knob_ui.get("confirming")):
+        footer_knob_ui = dict(knob_ui) if knob_ui else {}
+        footer_knob_ui["toast"] = theme_toast
+
+    remote_note = "knobs are local-only" if remote else None
+    return _build_footer(x0, width, y, driver, cuda, rate, has_nvml,
+                         extra_keys=extra_keys, knob_ui=footer_knob_ui, remote_note=remote_note)
+
+
 def build_page2(state, tier, width, x0=0, height=None, knob_ui=None, theme_toast=None,
                  remote=None, cluster_tabs=False, has_perf=False):
     """Builds page 2: header (ADVANCED tab active), one full-width detail
@@ -1986,37 +2024,7 @@ def build_page2(state, tier, width, x0=0, height=None, knob_ui=None, theme_toast
     except Exception:
         pass
 
-    has_nvml = (state.get("caps") or {}).get("has_nvml", False)
-    rate = state.get("rate", 1.0)
-
-    extra_keys = None
-    if knob_ui is not None:
-        registry = knob_ui.get("registry") or []
-        has_power_knob = any(k["kind"] in ("gpu_power", "rail_power") for k in registry)
-        has_clock_knob = any(k["kind"] in ("clk_sm", "clk_mem") for k in registry)
-        has_reset = any(k["kind"] == "reset_clocks" for k in registry)
-        has_persist = any(k["kind"] == "persist" for k in registry)
-        bits = []
-        if len(gpus) > 1 or has_power_knob or has_clock_knob:
-            bits.append("tab gpu")
-        if has_power_knob:
-            bits.append("P pwr limit")
-        if has_clock_knob:
-            bits.append("C/M clock locks")
-        if has_reset:
-            bits.append("R reset")
-        if has_persist:
-            bits.append("X persist")
-        extra_keys = (" · " + " · ".join(bits)) if bits else None
-
-    footer_knob_ui = knob_ui
-    if theme_toast and not (knob_ui and knob_ui.get("confirming")):
-        footer_knob_ui = dict(knob_ui) if knob_ui else {}
-        footer_knob_ui["toast"] = theme_toast
-
-    remote_note = "knobs are local-only" if remote else None
-    out.append(_build_footer(x0, width, y, driver, cuda, rate, has_nvml,
-                              extra_keys=extra_keys, knob_ui=footer_knob_ui, remote_note=remote_note))
+    out.append(page2_footer(state, x0, width, y, knob_ui, theme_toast, remote))
     return out
 
 
