@@ -6,6 +6,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.3.0] — 2026-11-25
+
+Page 3 for ultrawide and 4K screens ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14)).
+
+### Added
+
+- **Up to 16 nodes** on the big page 3 (was 8). Node columns go in the
+  fewest rows, up to four, that keep each column wide enough for its
+  charts; a short last row gets wider columns.
+- **Memory and HOTTEST charts** in each node column when the terminal has
+  room (HOTTEST is the hottest of the node's CPU, GPUs and NIC).
+- **Up to three GPU processes** per node column instead of one.
+- **HEAT grid levels**: on a taller terminal the GPU UTIL grid becomes HEAT
+  and adds a row per node for fabric use (as a % of link speed), then one
+  for CPU.
+
+### Fixed
+
+- A node with two or more GPUs paid double for every row of GPU chart, so
+  on a 380 × 75 terminal the memory and HOTTEST charts never opened for any
+  node. A node's GPU chart height is now split among its GPUs.
+
 ## [5.2.0] — 2026-11-25
 
 Page 3 on big screens ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14), step 3).
@@ -507,6 +529,7 @@ is still there, on page 1.
 
 - Initial public release.
 
+[5.3.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.3.0
 [5.2.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.2.0
 [5.1.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.1.0
 [5.0.1]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.0.1

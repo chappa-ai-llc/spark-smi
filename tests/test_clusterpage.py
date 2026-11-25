@@ -172,6 +172,24 @@ class LayoutTest(unittest.TestCase):
         self.assertIn("HOTTEST", text)
         self.assertTrue(any((p.title or [("", 0)])[0][0] == "HEAT" for p in built))
 
+    def test_gpu_budget_is_per_node(self):
+        self.assertEqual(clusterpage.gpu_heights(1, 8), [8])
+        self.assertEqual(clusterpage.gpu_heights(2, 8), [4, 3])        # 2 titles + 7 = 1 + 8 rows
+        self.assertEqual(clusterpage.gpu_heights(4, 6), [3, 3, 3, 3])  # never below the least
+        self.assertEqual(clusterpage.gpu_heights(0, 8), [])
+
+    def test_two_gpu_node_keeps_the_optional_charts(self):
+        # Live 380x75, 2026-11-25: a node with an eGPU paid double for every
+        # GPU row, so MEM and HOTTEST never opened in any column.
+        for gpus, h in ((2, 67), (3, 75)):
+            built = _build(_views(2, gpus=gpus), 380, h, "xl")
+            cols = [p for p in built if len(p.title or []) > 1 and p.title[1][0].startswith("node-")]
+            self.assertEqual(len(cols), 2)
+            for p in cols:
+                heads = [row[0][0][1] for row in p.rows if isinstance(row, tuple) and row[0]
+                         and len(row[0][0]) == 3 and isinstance(row[0][0][1], str)]
+                self.assertTrue(any(x.startswith("HOTTEST") for x in heads), (gpus, h, p.title))
+
     def test_top_processes(self):
         s = _sample(gpus=2)
         s["gpus"][0]["procs"] = [{"pid": 1, "name": "a", "mem": 1 * G}, {"pid": 2, "name": "b", "mem": 5 * G}]

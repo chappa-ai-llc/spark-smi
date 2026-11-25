@@ -132,12 +132,23 @@ def _has_pwr_chart(info):
     return _enough(info.get("pwr_hist"))
 
 
+def gpu_heights(n_g, budget):
+    """Chart heights for a node's `n_g` GPUs from the layout's GPU budget:
+    the node's GPU rows, titles included, stay at 1 + budget whatever the
+    count (each chart at least _MIN's), so a node with an eGPU does not pay
+    double for every row and starve the optional charts."""
+    if n_g <= 0:
+        return []
+    each, rest = divmod(max(0, budget - (n_g - 1)), n_g)
+    return [max(_MIN["gpu"], each + (1 if i < rest else 0)) for i in range(n_g)]
+
+
 def column_rows(info, v):
     """Content rows of a node's column at chart heights `v` -- the same
     count _build_column adds, so the fitting search needs no drawing."""
     if not info["up"]:
         return 2
-    r = sum(1 + v["gpu"] for _ in info["gpus"]) or 1
+    r = sum(1 + h for h in gpu_heights(len(info["gpus"]), v["gpu"])) or 1
     r += 1 + v["cpu"]
     if v["mem"] and _enough(info.get("mem_hist")):
         r += 1 + v["mem"]
@@ -307,8 +318,9 @@ def _build_column(y, x, w, info, v, span, selected, alerts, extra=0):
         return p
     W = bigpage._w(span)
     n_g = len(info["gpus"])
+    heights = gpu_heights(n_g, v["gpu"])
     for gi, g in enumerate(info["gpus"]):
-        gh = v["gpu"] + extra // n_g + (1 if gi < extra % n_g else 0)
+        gh = heights[gi] + extra // n_g + (1 if gi < extra % n_g else 0)
         win = bigpage._window(g["hist"], span)
         vals = _vals(win)
         avg = sum(vals) / len(vals) if vals else 0.0

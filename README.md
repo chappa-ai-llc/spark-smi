@@ -2,7 +2,7 @@
 
 > A terminal-based system monitor (TUI) built for **NVIDIA Grace Blackwell (GB10)** and hybrid ARM architectures — because `nvidia-smi` alone doesn't tell the full story.
 
-![Version](https://img.shields.io/badge/version-5.2.0-blue)
+![Version](https://img.shields.io/badge/version-5.3.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8%2B-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Linux%20aarch64-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -197,7 +197,7 @@ process**, stacked, so a steady climb shows a leak; below them the task tree
 with its SM sparklines, and the PROCESS pane with its charts on the right
 (a live capture is under "Screenshots").
 
-Page 3 (cluster mode, up to 8 nodes) has one too:
+Page 3 (cluster mode, up to 16 nodes) has one too:
 
 - **CLUSTER**: dials for the GPUs' average and the slowest GPU, the
   cluster's power (wall power with the `spbm` driver, otherwise the GPUs'
@@ -205,18 +205,24 @@ Page 3 (cluster mode, up to 8 nodes) has one too:
   agents answering, and the fullest disk.
 - **TOPOLOGY**: the map from the normal page, at the largest size that
   still leaves the charts room.
-- **One column per node** (four across; two rows for 5-8 nodes): each GPU's
-  utilization chart, CPU with memory, the node's power and its fabric
-  traffic as a mirrored in/out chart, all on one time axis, then the GPU
-  process using the most memory. A node that stops answering keeps its
-  column, saying how long it has been silent.
+- **One column per node**, in the fewest rows (up to four) that keep each
+  column wide enough for its charts: each GPU's utilization chart, CPU with
+  memory, the node's power and its fabric traffic as a mirrored in/out
+  chart, all on one time axis, then the GPU processes using the most memory
+  (up to three). With room to spare, a column adds a memory chart and a
+  HOTTEST chart (the hottest of its CPU, GPUs and NIC). A node with several
+  GPUs splits its GPU chart height among them, so it keeps the same charts
+  as its neighbours. A node that stops answering keeps its column, saying
+  how long it has been silent.
 - **GPU UTIL**: a heat grid with one row per GPU in the cluster, so a GPU
-  that lags the others stands out.
+  that lags the others stands out. On a taller terminal it becomes **HEAT**
+  and adds a row per node for fabric use (as a % of link speed), then one
+  for CPU.
 
 The cluster history is kept by the machine drawing the page, from its own
 polls. Until it has more than a minute, the charts show the minute each
 node's sample already carries. The map or the heat grid is left out when the
-terminal is too short for them; with more than 8 nodes, page 3 keeps its
+terminal is too short for them; with more than 16 nodes, page 3 keeps its
 fleet matrix.
 
 Below 200 columns, and in a node drilldown on a smaller terminal, page 1 is
@@ -597,7 +603,7 @@ spark-smi --cluster node-1,node-2 --page 3            # one-shot snapshot (2s po
 - The TOPOLOGY map (sections view only) uses the rows the sections leave
   free; in a terminal too short for it, the page is the sections alone. See
   "Topology map" below.
-- On 200+ columns and 45+ rows, up to 8 nodes get the big layout: dials,
+- On 200+ columns and 45+ rows, up to 16 nodes get the big layout: dials,
   the map, a chart column per node and a GPU heat grid, with up to an hour
   of history kept by the viewer (see "Big screens" above).
 - A node that stops answering is marked stale (dim "unreachable Ns" row with
@@ -1084,7 +1090,7 @@ all fixed in 4.0 — see the [changelog](CHANGELOG.md).
 - [X] **Multi-node Support** — Monitor clustered DGX Spark nodes from a single dashboard (cluster mode, pages 3-4)
 - [X] **Big-screen page 1** — dials, charts with axes and up to an hour of history on terminals of 200+ columns (5.0)
 - [X] **Fuller GPU task manager** — per-process SM %, encoder/decoder, a detail pane, history charts, a recently-ended list, sort and filter on page 5 (5.1)
-- [X] **Big-screen cluster page** — cluster dials, a telemetry column per node and a GPU heat grid on page 3 (5.2)
+- [X] **Big-screen cluster page** — cluster dials, a telemetry column per node and a GPU heat grid on page 3 (5.2); up to 16 nodes with memory and temperature charts for ultrawide and 4K (5.3)
 - [ ] **Other nodes' GPU tasks** — page 5 for a remote node, opt-in on its agent, arguments hidden by default ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14))
 
 ---
