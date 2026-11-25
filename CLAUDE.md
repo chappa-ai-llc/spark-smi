@@ -14,7 +14,7 @@ python spark-smi.py               # snapshot mode: render once, print ANSI to st
 python spark-smi.py -l            # live mode: curses TUI, 1s refresh (q=quit, t=°C/°F, u=GiB/GB, ?=help)
 python spark-smi.py -n 2 -l       # live mode at a 2s refresh rate instead of the 1s default
 python spark-smi.py --page 2      # snapshot the advanced page instead of the overview
-python spark-smi.py --page 5      # GPU tasks page (read-only here; live mode adds open/end/kill)
+python spark-smi.py --page 5      # GPU tasks page (read-only here; live mode adds open/end/kill, s/f// view keys)
 python spark-smi.py --ascii       # force plain-ASCII bars/frames regardless of terminal detection
 python spark-smi.py --theme nord  # one of 10 themes; `c` cycles them in live mode
 python spark-smi.py --serve       # read-only sample agent on :8817 (GET /sample, /healthz)
@@ -29,7 +29,8 @@ rendering against real hardware over ssh (see `scratchpad/`, gitignored, for
 the deploy/record helpers). Unit tests cover the release script and a few
 pure pieces (cluster token reader, node names, the network counter rules,
 the ethtool netlink codec, themes, graphs, SVG shots, page 3's topology map,
-page 5's session grouping and confirm gate, and the big-screen page 1): `python3 -m unittest discover -s deploy` and
+page 5's session grouping and confirm gate, page 5's tracker/sort/filter/
+layouts, and the big-screen page 1): `python3 -m unittest discover -s deploy` and
 `python3 -m unittest discover -s tests` (the second needs psutil installed). Packaging is setuptools via
 `pyproject.toml`; the pip entry point is `spark-smi = spark_smi.__main__:main`.
 
@@ -112,8 +113,8 @@ spark_smi/
   pages.py        build_page1(state, tier, width, x0, height, sort_nics) and
                   build_page2(state, tier, width, x0, height, knob_ui) turn a
                   sampled state dict into a list of positioned panels.Panel
-                  objects (build_page5 draws the tasks tree it is handed;
-                  pages 3-4 have their own builders). build_help_overlay(term_w, term_h) builds the `?`
+                  objects (pages 3-4 have their own builders here; page 5
+                  lives in taskpage.py). build_help_overlay(term_w, term_h) builds the `?`
                   key's overlay panel, appended after the page so it paints
                   on top.
   knobs.py        Phase-4 page-2 power/clock knobs: build_registry(sample) is
@@ -150,10 +151,24 @@ spark_smi/
                   NVML/nvidia-smi, optional /dev/nvidia* holders, each
                   grouped by session: docker > tmux/screen/zellij pane >
                   systemd unit > ssh > orphan > tty), flatten() (tree ->
-                  rows), TaskUI (pure state transitions + y-only confirm,
-                  the knobs.py shape), and end_process()/end_group()/
-                  open_group_argv() -- the only code that signals or runs
-                  a session manager. Live mode only constructs TaskUI.
+                  rows; sort/flat/filter), TaskUI (pure state transitions
+                  + y-only confirm, the knobs.py shape; also the s/f//
+                  view state), ProcTracker (per-process SM/memory/CPU
+                  history + the recently-ended list, fed by State.sample()
+                  from the GPU sample's procs while a screen is drawn;
+                  memory only, never on the wire), proc_detail(pid) (the
+                  detail pane's facts; environment limited to DETAIL_ENV),
+                  and end_process()/end_group()/open_group_argv() -- the
+                  only code that signals or runs a session manager. Live
+                  mode only constructs TaskUI.
+  taskpage.py     Page 5's drawing (#4, #14 step 2): build_page5() takes
+                  the tree, rows, TaskUI ctx, ProcTracker snapshot and
+                  proc_detail; normal layout (tree, PROCESS pane, recently
+                  ended) or, at bigpage.layout_for() large/xl, GPU cards
+                  with SM-by-process and stacked-memory charts. Columns
+                  follow caps: SM% only with GpuCollector caps proc_util
+                  (collectors._proc_util, NVML per-process utilization;
+                  NotFound there means idle, not unsupported).
   bigpage.py      Page 1's big-screen layouts (#14): layout_for(w, h,
                   graphs) picks large (200+ cols) / xl (300+) / tall (`g`
                   large, 120+), build_page1_large() fills the terminal
@@ -231,7 +246,7 @@ the already-built page.
 
 Each collector probes hardware support **once**, into a `.caps` dict, e.g.
 `GpuCollector` per GPU: `{fan, power_draw, power_limit, mem_local, pcie,
-clocks}`. `mem_local=False` means unified memory (GB10 today: any GPU name
+clocks, proc_util}`. `mem_local=False` means unified memory (GB10 today: any GPU name
 matching `_is_unified_soc()`'s `GB\d{2,3}` heuristic) — GPU memory is
 replaced with `psutil.virtual_memory()`, "(Unified)" is appended to the name,
 and `fan` is forced off. Pages consult `.caps` to include/exclude fields

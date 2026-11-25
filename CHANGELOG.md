@@ -6,6 +6,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.1.0] — 2026-11-25
+
+Page 5 becomes a fuller GPU task manager ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14), step 2).
+
+### Added
+
+- **Per-process GPU use.** Page 5 shows each process's own SM %, and its
+  encoder and decoder %, where the driver reports them per process (NVML's
+  process utilization: verified on an RTX 3090 and, under load, on the
+  GB10). A GPU that cannot report them gets no such column.
+- **PROCESS detail pane** for the selected process: full command line,
+  session, user and parent, start time and threads, working folder, the
+  GPU-selection variables (`CUDA_VISIBLE_DEVICES`, `NVIDIA_VISIBLE_DEVICES`,
+  `CUDA_DEVICE_ORDER`, `NCCL_IB_HCA`, `NCCL_SOCKET_IFNAME`; no other variable
+  is read out), the GPU and RDMA device files it holds open, and charts of
+  its SM, GPU memory and CPU.
+- **History per process**, kept in memory from start-up on every page and
+  never sent over the network: a two-minute SM sparkline column on wide
+  terminals, and the detail pane's charts.
+- **RECENTLY ENDED**: the last hour of processes that left a GPU, with run
+  time and peak SM and memory.
+- **Sort, flat view and filter**: `s` sorts by GPU memory, SM, CPU, run time
+  or PID; `f` switches between the session tree and one flat list per GPU;
+  `/` filters by PID, name, command line, user or session.
+- **Big-screen page 5** (200+ columns, 45+ rows): a card per GPU charting SM
+  by process and GPU memory by process (stacked), the tree with sparklines,
+  and the detail pane with its charts. `g` and `+`/`-` work as on page 1.
+
+### Fixed
+
+- The GB10's processes were missing from the sample (`--json` and the
+  `--serve` agent's `procs`): NVML has no memory figure for unified memory,
+  and that refusal skipped the process query too. The list is now read on
+  its own.
+- Page 4's "GPU jobs active" warning no longer counts the desktop's own
+  processes (Xorg, gnome-shell and the like) as a job.
+
 ## [5.0.1] — 2026-11-25
 
 ### Added
@@ -449,6 +486,7 @@ is still there, on page 1.
 
 - Initial public release.
 
+[5.1.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.1.0
 [5.0.1]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.0.1
 [5.0.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.0.0
 [4.4.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.4.0
