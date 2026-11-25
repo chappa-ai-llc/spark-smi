@@ -261,12 +261,35 @@ def _sort_title(ui):
     return out
 
 
+def collapse_ended(ended):
+    """Repeats of one command (a health check every 30 s) as one entry,
+    newest first, with a count, the longest run and the highest peaks."""
+    out, seen = [], {}
+    for e in ended:
+        key = (e.get("user"), e.get("cmd") or e.get("name"), tuple(e.get("gpus") or []))
+        if key in seen:
+            m = seen[key]
+            m["count"] += 1
+            m["ran"] = max(m.get("ran") or 0, e.get("ran") or 0)
+            if e.get("peak_sm") is not None:
+                m["peak_sm"] = max(m.get("peak_sm") or 0, e["peak_sm"])
+            m["peak_mem"] = max(m.get("peak_mem") or 0, e.get("peak_mem") or 0)
+            continue
+        m = dict(e, count=1)
+        seen[key] = m
+        out.append(m)
+    return out
+
+
 def _ended_rows(ended, inner, now):
     rows = [[(1, "▾ " if term.BAR_STYLE != "ascii" else "* ", 9), (None, "RECENTLY ENDED", 9),
              (None, "  this node, last hour · kept in memory only", 6)]]
-    for e in ended:
+    for e in collapse_ended(ended):
         ago = _fmt_age(max(0, now - e.get("ended", now)))
-        bits = f"ran {_fmt_age(e.get('ran'))} · {e.get('how', 'ended')} {ago} ago"
+        if e.get("count", 1) > 1:
+            bits = f"×{e['count']}, longest {_fmt_age(e.get('ran'))} · last {e.get('how', 'ended')} {ago} ago"
+        else:
+            bits = f"ran {_fmt_age(e.get('ran'))} · {e.get('how', 'ended')} {ago} ago"
         if e.get("peak_sm") is not None:
             bits += f" · peak SM {e['peak_sm']}%"
         if e.get("peak_mem"):
@@ -433,7 +456,7 @@ def detail_fields(row, detail, now):
         ctx += f" · on GPUs {','.join(str(i) for i in p['on_gpus'])}"
     out.append(("gpu", ctx))
     if d.get("denied"):
-        out.append(("", "another user's process: cwd, environment and open files need root"))
+        out.append(("", "another user's: cwd, environment, open files need root"))
     return out
 
 
@@ -490,7 +513,12 @@ def _detail_charts(row, track, width, height, span, rate, cc, mem_total):
         charts.append(([("SM ", 6), (f"{row['proc'].get('sm', 0)}%", 8), (f"   peak {peak:.0f}%  avg {avg:.0f}%", 6)],
                        h["sm"], 100.0, "pct", 3))
     mem = h["mem"]
-    top = mem_total or (max(mem) * 1.25 if max(mem) else 1.0)
+    # The process's own peak with headroom (at least 1 GiB), never above
+    # the GPU's memory: a 174 MiB job on 122 GiB of unified memory would
+    # otherwise draw as an empty chart. Fixed per window, so a leak climbs.
+    top = max(max(mem[-window:] or [0]) * 1.5, float(1024 ** 3))
+    if mem_total:
+        top = min(top, mem_total)
     old = mem[-window] if len(mem) >= window else mem[0]
     grew = mem[-1] - old
     trend = f"   {'grew' if grew >= 0 else 'fell'} {term.fmt_mem(abs(grew))} in {term.fmt_span(min(span, len(mem) * rate))}" \
@@ -775,7 +803,7 @@ def build_page5(sample, tree, rows, tier, width, x0=0, height=None, ui=None, the
     cols = task_cols(tier, cc, spark_w=12 if track and width >= 140 else 0)
     # lines between the header and the footer; panels stack with no gap
     room = max(5, height - 2)
-    n_ended = len((track or {}).get("ended") or [])
+    n_ended = len(collapse_ended((track or {}).get("ended") or []))
     want_detail = sel_row is not None and width >= 70
     det_h = 0
     if want_detail:

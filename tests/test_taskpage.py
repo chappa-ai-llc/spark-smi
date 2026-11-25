@@ -209,6 +209,17 @@ class ProcTrackerTest(unittest.TestCase):
         self.assertEqual(t.snapshot()["ended"], [])
 
 
+class CollapseEndedTest(unittest.TestCase):
+    def test_repeats_fold_into_one_line(self):
+        hc = {"user": "svc", "cmd": "check --gpu", "gpus": ["1"], "peak_mem": GiB, "how": "ended"}
+        ended = [dict(hc, pid=3, ran=2, ended=30, peak_sm=1), {"user": "ml", "cmd": "eval", "gpus": ["0"], "pid": 2,
+                                                                 "ran": 60, "ended": 20, "peak_sm": 90, "peak_mem": GiB},
+                 dict(hc, pid=1, ran=5, ended=10, peak_sm=7)]
+        out = taskpage.collapse_ended(ended)
+        self.assertEqual([(e["pid"], e["count"]) for e in out], [(3, 2), (2, 1)])
+        self.assertEqual((out[0]["ran"], out[0]["peak_sm"]), (5, 7))
+
+
 class ProcDetailTest(unittest.TestCase):
     def test_only_the_allow_listed_environment(self):
         tasks._detail_cache.clear()

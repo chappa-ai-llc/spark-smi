@@ -191,7 +191,8 @@ remembers your last `g` and `+`/`-` choice in
 Page 5 has a big layout at the same sizes: one card per GPU across the top,
 each charting **SM by process** (the three busiest) and **GPU memory by
 process**, stacked, so a steady climb shows a leak; below them the task tree
-with its SM sparklines, and the PROCESS pane with its charts on the right.
+with its SM sparklines, and the PROCESS pane with its charts on the right
+(a live capture is under "Screenshots").
 
 Below 200 columns, and in a node drilldown on a smaller terminal, page 1 is
 the same as before. A drilldown into a remote node on a big terminal uses
@@ -775,11 +776,21 @@ with 4.3 after a 10-second all-pairs sweep, saved with the live `S` key.
 
 **Page 5 — GPU tasks.** Every GPU process under its GPU, grouped by where it
 runs: a tmux server, a docker container, the desktop's terminal. The eGPU
-and the GB10 each get their own tree. Captured with 4.3 by `--shot`; account
-names, the model path and the container name were replaced with
-`[markers]` before publishing.
+and the GB10 each get their own tree, with each process's SM %, a
+two-minute SM sparkline, and the PROCESS pane below for the selected one (a
+test load here). RECENTLY ENDED folds a health check that runs every few
+seconds into one line. Captured live with 5.1 at 150 × 45 with the `S` key;
+host, account names, the model path, a command's arguments and the
+container name were replaced with `[markers]` before publishing.
 
 ![Page 5 GPU tasks](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page5-tasks.png)
+
+**Page 5 on a big screen.** The same machine at 240 × 67: SM by process and
+GPU memory by process for each GPU over the last 5 minutes, the task tree,
+and the PROCESS pane with its charts. Captured live with 5.1, redacted the
+same way.
+
+![Page 5 on a big screen](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page5-big.png)
 
 ---
 
