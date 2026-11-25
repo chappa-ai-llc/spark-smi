@@ -2,7 +2,7 @@
 
 > A terminal-based system monitor (TUI) built for **NVIDIA Grace Blackwell (GB10)** and hybrid ARM architectures — because `nvidia-smi` alone doesn't tell the full story.
 
-![Version](https://img.shields.io/badge/version-5.1.0-blue)
+![Version](https://img.shields.io/badge/version-5.2.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8%2B-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Linux%20aarch64-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -88,8 +88,11 @@ row per node so you compare members down a column instead of tabbing between
 hosts. When the terminal has rows to spare, a TOPOLOGY map opens above them:
 each node as a box, each fabric link as a line with its live traffic. Up to
 8 nodes it's a sections view; beyond that it becomes a compact fleet matrix
-plus an alerts panel. `↑`/`↓` selects a node and `Enter` drills into that
-node's page 1. See "Cluster mode" below.
+plus an alerts panel. `↑`/`↓` (or `←`/`→`) selects a node and `Enter`
+drills into that node's page 1. On a terminal of 200 columns or more, up to
+8 nodes get the whole screen: cluster dials, the map, a column of charts per
+node and a GPU heat grid (see "Big screens" below). See "Cluster mode"
+below.
 
 **Page 4 — Fabric validation** (`4`, needs `--cluster` with 2+ members): the
 one page that *actuates*. It runs real RDMA bandwidth and latency tests
@@ -194,6 +197,28 @@ process**, stacked, so a steady climb shows a leak; below them the task tree
 with its SM sparklines, and the PROCESS pane with its charts on the right
 (a live capture is under "Screenshots").
 
+Page 3 (cluster mode, up to 8 nodes) has one too:
+
+- **CLUSTER**: dials for the GPUs' average and the slowest GPU, the
+  cluster's power (wall power with the `spbm` driver, otherwise the GPUs'
+  draw), memory, fabric throughput, the hottest sensor and where it is,
+  agents answering, and the fullest disk.
+- **TOPOLOGY**: the map from the normal page, at the largest size that
+  still leaves the charts room.
+- **One column per node** (four across; two rows for 5-8 nodes): each GPU's
+  utilization chart, CPU with memory, the node's power and its fabric
+  traffic as a mirrored in/out chart, all on one time axis, then the GPU
+  process using the most memory. A node that stops answering keeps its
+  column, saying how long it has been silent.
+- **GPU UTIL**: a heat grid with one row per GPU in the cluster, so a GPU
+  that lags the others stands out.
+
+The cluster history is kept by the machine drawing the page, from its own
+polls. Until it has more than a minute, the charts show the minute each
+node's sample already carries. The map or the heat grid is left out when the
+terminal is too short for them; with more than 8 nodes, page 3 keeps its
+fleet matrix.
+
 Below 200 columns, and in a node drilldown on a smaller terminal, page 1 is
 the same as before. A drilldown into a remote node on a big terminal uses
 the big layout with that node's last minute of history; the long history is
@@ -291,8 +316,8 @@ resize the window and it adapts live, no restart needed:
 | `compact` | < 84 cols | Condensed layout: two NIC/disk entries per cell-row, GPU fields folded onto fewer lines. |
 | `standard` | 84–110 cols | Full field set, but GPU cards and THERMALS/SMART stack full-width instead of side-by-side. |
 | `wide` | > 110 cols | The full multi-column layout; content is capped at 160 columns and centered on wider terminals. |
-| `large` | ≥ 200 cols, ≥ 45 rows | Page 1 only: dial strip, CPU+MEMORY beside the GPUs, full-width charts with axes (see "Big screens"). |
-| `xl` | ≥ 300 cols, ≥ 45 rows | Page 1 only: `large` plus a POWER & THERMAL column and a per-core heatmap. |
+| `large` | ≥ 200 cols, ≥ 45 rows | Pages 1, 3 and 5: dial strips, charts with axes and minutes of history across the full width (see "Big screens"). |
+| `xl` | ≥ 300 cols, ≥ 45 rows | `large` plus, on page 1, a POWER & THERMAL column and a per-core heatmap. |
 
 Resizing is live — the same running process, no restart, reflowing between
 wide, standard, and compact as the window changes. Every width below shows a
@@ -384,8 +409,8 @@ directory, plus ASIC temperature from the NIC's own hwmon device.
 | `?` | all | Toggle the help overlay (any key dismisses it) |
 | `n` | 1 | Show active NICs only |
 | `s` | 1 | Sort NIC rows by current rate (max of RX/TX), descending — toggle back to detection order |
-| `g` | 1 / 5 | Graph size: auto / large / compact (see "Big screens"); remembered |
-| `+` / `-` | 1 / 5 | History window of the big layouts' charts: 1m, 5m, 10m, 30m, 1h; remembered |
+| `g` | 1 / 3 / 5 | Graph size: auto / large / compact (see "Big screens"); remembered |
+| `+` / `-` | 1 / 3 / 5 | History window of the big layouts' charts: 1m, 5m, 10m, 30m, 1h; remembered |
 | `Tab` | 2 | Select GPU (when more than one) |
 | `P` | 2 | Focus/cycle the power-limit knob (GPU limit → PL1 → PL2 → SYSPL1 → SYSPL2, as available) |
 | `C` / `M` | 2 | Focus the SM / memory clock-lock knob |
@@ -394,7 +419,7 @@ directory, plus ASIC temperature from the NIC's own hwmon device.
 | `←` / `→` | 2 | Step the focused knob's pending value |
 | `Enter` | 2 | Apply the focused knob (raises a `y`/`N` confirm) |
 | `Enter` | 3 | Drill into the selected node's page 1 (remote sample; knobs disabled) |
-| `↑` / `↓` | 3 | Select a node |
+| `↑` / `↓`, `←` / `→` | 3 | Select a node |
 | `a` | 3 | Fleet matrix (>8 nodes) only: show alerting nodes only |
 | `o` | 3 | Fleet matrix only: cycle sort column (name / GPU / power / alerts-first) |
 | `Esc` | 2 / 3 | Cancel the pending step or confirm (page 2) / back out of a node drilldown to the cluster page |
@@ -572,6 +597,9 @@ spark-smi --cluster node-1,node-2 --page 3            # one-shot snapshot (2s po
 - The TOPOLOGY map (sections view only) uses the rows the sections leave
   free; in a terminal too short for it, the page is the sections alone. See
   "Topology map" below.
+- On 200+ columns and 45+ rows, up to 8 nodes get the big layout: dials,
+  the map, a chart column per node and a GPU heat grid, with up to an hour
+  of history kept by the viewer (see "Big screens" above).
 - A node that stops answering is marked stale (dim "unreachable Ns" row with
   its last-seen values) after 3× the poll interval — the render loop never
   blocks on the network; it always draws whatever the background poller last
@@ -757,6 +785,15 @@ down each column, with a mixed-GPU fleet summary and per-node totals in the
 section headers.
 
 ![Page 3 cluster](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page3-cluster.png)
+
+**Page 3 on a big screen.** The same two Sparks at 240 × 67: the CLUSTER
+dials, the map with one rail carrying a two-way RDMA run at 108 Gb/s each
+way, then a column per node charting each GPU, CPU, wall power and fabric
+over the last 5 minutes, and the GPU UTIL grid showing when each GPU got
+busy. Both GB10s run a test load next to the RTX 3090's own job. Captured
+live with 5.2 and the `S` key; host names were replaced before publishing.
+
+![Page 3 on a big screen](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page3-big.png)
 
 Nothing about that view is DGX-specific. It has run across a deliberately
 mismatched fleet — an x86_64 AMD EPYC server with no usable NVIDIA driver
@@ -1047,7 +1084,8 @@ all fixed in 4.0 — see the [changelog](CHANGELOG.md).
 - [X] **Multi-node Support** — Monitor clustered DGX Spark nodes from a single dashboard (cluster mode, pages 3-4)
 - [X] **Big-screen page 1** — dials, charts with axes and up to an hour of history on terminals of 200+ columns (5.0)
 - [X] **Fuller GPU task manager** — per-process SM %, encoder/decoder, a detail pane, history charts, a recently-ended list, sort and filter on page 5 (5.1)
-- [ ] **Big-screen cluster page** — cluster dials, a telemetry column per node and a GPU heat grid on page 3 ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14))
+- [X] **Big-screen cluster page** — cluster dials, a telemetry column per node and a GPU heat grid on page 3 (5.2)
+- [ ] **Other nodes' GPU tasks** — page 5 for a remote node, opt-in on its agent, arguments hidden by default ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14))
 
 ---
 

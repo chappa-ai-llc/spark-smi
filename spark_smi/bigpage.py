@@ -202,7 +202,7 @@ def _watts(text):
         return None
 
 
-def _build_dial_strip(y, x0, width, dials, dial_w, title_right, measure=False):
+def _build_dial_strip(y, x0, width, dials, dial_w, title_right, measure=False, title="AT A GLANCE"):
     per = dial_w + 6
     fit = dials[:max(1, (width - 4) // per)]
     if not fit:
@@ -215,7 +215,7 @@ def _build_dial_strip(y, x0, width, dials, dial_w, title_right, measure=False):
     rendered = [term.dial(f, dial_w, v, s, lab, warn) for f, v, s, lab, warn in fit]
     if any(r is None for r in rendered):
         return None
-    p = panels.Panel(y, x0, width, title=[("AT A GLANCE", 9)], title_right=title_right, kind="top")
+    p = panels.Panel(y, x0, width, title=[(title, 9)], title_right=title_right, kind="top")
     slot_w = (width - 2) // len(fit)
     for r in range(term.dial_size(dial_w)):
         segs = []
