@@ -709,6 +709,27 @@ def load_last_run(path=None):
     return None
 
 
+def load_recent_runs(n=60, path=None):
+    """The newest `n` parseable results, newest first; [] when the file is
+    absent or unreadable. Feeds page 4's RUN HISTORY on big screens."""
+    path = path or RESULTS_PATH
+    try:
+        text = _tail_lines(path, min_lines=n + 1)
+    except Exception:
+        return []
+    out = []
+    for line in reversed([l for l in text.splitlines() if l.strip()]):
+        try:
+            run = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(run, dict):
+            out.append(run)
+        if len(out) >= n:
+            break
+    return out
+
+
 def load_matrix(path=None, max_lines=4000):
     """{(src, dst): {"gbps": best-rail Gb/s, "lat_us": ...}} from the most
     recent mode=="pair" result for each ordered pair found in a bounded tail

@@ -3172,15 +3172,19 @@ def build_page4(fab_ctx, tier, width, x0=0, height=None):
     matrix_panel = _build_matrix_panel(y, x0, width, fab_ctx, worst_only=matrix_worst_only)
     out.append(matrix_panel); y += matrix_panel.total_height + 1
 
+    out.append(page4_footer(fab_ctx, x0, width, y))
+    return out
+
+
+def page4_footer(fab_ctx, x0, width, y):
+    """Page 4's footer (both layouts): the keys, or the run's toast."""
     keys = " space start/stop · m mode · d duration · ↑↓ pair · 1-5 page"
     fab = fab_ctx.get("fab")
+    fp = panels.Panel(y, x0, width, kind="plain")
     if fab and fab.get("toast"):
         text, slot = fab["toast"]
-        fp = panels.Panel(y, x0, width, kind="plain")
         fp.rows.append(([(f" {text}", slot)], []))
     else:
-        fp = panels.Panel(y, x0, width, kind="plain")
         fp.rows.append(([(keys, 9)], [("saturates the fabric — confirm-gated", 6)]))
-    out.append(fp)
-    return out
+    return fp
 
