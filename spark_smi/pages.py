@@ -18,7 +18,7 @@ from . import topomap
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "4.4.0"
+    VERSION = "5.0.0"
 
 # The header shows the major.minor series ("4.0"). Derived from VERSION rather
 # than written out, because a hardcoded literal here silently drifted a whole
@@ -384,6 +384,7 @@ def _build_footer(x0, width, y, driver, cuda, rate, has_nvml, extra_keys=None, k
         ]
     else:
         variants = [
+            " q quit · 1 2 5 page · t °C/°F · u GiB/GB · c colors · n active NICs · s sort · g graphs · +/- history · ? help",
             " q quit · 1 2 5 page · t °C/°F · u GiB/GB · c colors · n active NICs · s sort · ? help",
             " q quit · 1 2 5 page · t °C/°F · u GiB/GB · c colors · n NICs",
             " q quit · 1 2 5 page · t temp · u units",
@@ -440,6 +441,9 @@ def build_help_overlay(term_w, term_h):
         ("Page 1 -- overview", 9),
         ("  n            show active NICs only", 3),
         ("  s            sort NIC rows by rate (toggle)", 3),
+        ("  g            graphs: auto / large / compact (big-screen", 3),
+        ("               layouts need 200+ columns, or large: 120+)", 3),
+        ("  + / -        history window: 1m 5m 10m 30m 1h", 3),
         ("", 3),
         ("Page 2 -- advanced (GPU knobs, root-gated)", 9),
         ("  Tab          select GPU", 3),

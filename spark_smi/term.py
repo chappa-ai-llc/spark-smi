@@ -6,6 +6,7 @@ renderers (bars, core strips, sparklines) that both the panel engine
 Everything here is screen-agnostic: it produces strings/slot-ints, never
 curses objects. `app.py` is the only module allowed to touch real curses.
 """
+import math
 import os
 import shutil
 import sys
@@ -814,3 +815,239 @@ def braille_chart(series, width_cells, height_cells, y_max):
             runs.append((cur_slot, "".join(buf)))
         rows.append([(text, slot) for slot, text in runs])
     return rows
+
+
+# --- Big-screen primitives (#14): filled area chart, dial, heat row, axis ---
+# All return (text, slot) runs, exactly the width asked for, so pages build
+# them into Panel rows like any other segment. Braille-only: callers check
+# for None/[] and fall back to the plain layouts outside the eighths tier.
+
+def resample(values, n, how=max):
+    """`values` squeezed or stretched to exactly n points. Squeezing keeps
+    each bucket's max by default, so a one-second spike survives a long
+    window instead of averaging away."""
+    vals = [0.0 if v is None else float(v) for v in values]
+    if not vals or n < 1:
+        return [0.0] * max(0, n)
+    if len(vals) >= n:
+        out = []
+        for i in range(n):
+            a = i * len(vals) // n
+            b = max(a + 1, (i + 1) * len(vals) // n)
+            out.append(how(vals[a:b]))
+        return out
+    return [vals[i * len(vals) // n] for i in range(n)]
+
+
+def fit_window(values, window, n):
+    """The newest `window` samples spread over exactly n points. A history
+    that hasn't filled the window yet is padded with zeros on the left
+    (older), so time runs at the same rate across the whole chart."""
+    vals = [0.0 if v is None else float(v) for v in list(values)[-window:]] if window > 0 else []
+    if len(vals) < window:
+        vals = [0.0] * (window - len(vals)) + vals
+    return resample(vals, n)
+
+
+def _group_runs(cells):
+    runs = []
+    for ch, slot in cells:
+        if runs and runs[-1][1] == slot:
+            runs[-1] = (runs[-1][0] + ch, slot)
+        else:
+            runs.append((ch, slot))
+    return runs
+
+
+def area_chart(values, width, height, y_max=100.0, window=None):
+    """Filled braille history, `height` rows of `width` cells, top row
+    first. The newest `window` samples (default: 2 per cell) fill the
+    width, so a long buffer squeezes instead of scrolling off. Rows are
+    graded by height on the ramp (dimmest at the base). A bare base row of
+    track dots marks where history has not filled yet. None outside the
+    eighths tier or with under 2 samples."""
+    if BAR_STYLE != "eighths" or width < 1 or height < 1 or len(values) < 2:
+        return None
+    n = width * 2
+    pts = fit_window(values, window or n, n)
+    top = float(y_max) if y_max else (max(pts) or 1.0)
+    dots = height * 4
+    hts = [0 if v <= 0 else max(1, min(dots, int(v / top * dots + 0.5))) for v in pts]
+    rows = []
+    for r in range(height):
+        dist = height - 1 - r
+        slot = ramp_slot((dist + 1) / height * 0.999)
+        cells = []
+        for cx in range(width):
+            bits = 0
+            for col in (0, 1):
+                h = hts[cx * 2 + col]
+                for dr in range(4):
+                    if dist * 4 + (3 - dr) < h:
+                        bits |= _CHART_BITS[dr][col]
+            if bits:
+                cells.append((chr(0x2800 + bits), slot))
+            elif dist == 0:
+                cells.append(("⣀", 7))
+            else:
+                cells.append(("⠀", 7))
+        rows.append(_group_runs(cells))
+    return rows
+
+
+def dial_size(width):
+    """Rows a dial of `width` cells needs, its label row included."""
+    radius = width - 0.5
+    cy = radius + 0.5
+    return (int(math.ceil(cy + radius * 0.7071)) + 3) // 4 + 1
+
+
+_DIAL_GEOMETRY = {}
+
+
+def _dial_geometry(width):
+    """Per arc row, per cell: [(braille bit, angle along the arc 0-270)]
+    for every dot on a dial `width` cells wide. Computed once per width."""
+    geo = _DIAL_GEOMETRY.get(width)
+    if geo is not None:
+        return geo
+    radius = width - 0.5
+    cx, cy = float(width), radius + 0.5
+    geo = []
+    for row in range(dial_size(width) - 1):
+        cells = []
+        for col in range(width):
+            dots = []
+            for dr in range(4):
+                for dc in range(2):
+                    px, py = col * 2 + dc + 0.5, row * 4 + dr + 0.5
+                    if not (radius - 2.6 <= math.hypot(px - cx, py - cy) <= radius):
+                        continue
+                    a = (225 - math.degrees(math.atan2(cy - py, px - cx))) % 360
+                    if a <= 270:
+                        dots.append((_CHART_BITS[dr][dc], a))
+            cells.append(dots)
+        geo.append(cells)
+    _DIAL_GEOMETRY[width] = geo
+    return geo
+
+
+def dial(frac, width, value_text="", sub_text="", label="", warn=None):
+    """A 270-degree braille gauge `width` cells wide: the arc fills
+    clockwise from lower left, graded along the ramp (or warn/critical
+    colours past `warn`=(w, c) fractions), unfilled arc in the track
+    colour. The value sits in the middle, `sub_text` under it, `label` on
+    the row below the arc. Returns dial_size(width) rows of runs, or None
+    outside the eighths tier."""
+    if BAR_STYLE != "eighths" or width < 8:
+        return None
+    try:
+        frac = max(0.0, min(1.0, float(frac)))
+    except Exception:
+        frac = 0.0
+    grid = []
+    for row_cells in _dial_geometry(width):
+        cells = []
+        for dots in row_cells:
+            filled = track = 0
+            best = 0.0
+            for bit, a in dots:
+                if a <= 270 * frac:
+                    filled |= bit
+                    best = max(best, a / 270)
+                else:
+                    track |= bit
+            if filled:
+                if warn and best >= warn[1]:
+                    slot = 4
+                elif warn and best >= warn[0]:
+                    slot = 5
+                else:
+                    slot = ramp_slot(best)
+                cells.append((chr(0x2800 + (filled | track)), slot))
+            elif track:
+                cells.append((chr(0x2800 + track), 7))
+            else:
+                cells.append((" ", 3))
+        grid.append(cells)
+    arc_rows = len(grid)
+
+    def put(row, text, slot):
+        if not text or row >= len(grid):
+            return
+        text = text[:max(0, width - 4)]
+        start = (width - len(text)) // 2
+        for i, ch in enumerate(text):
+            grid[row][start + i] = (ch, slot)
+
+    mid = arc_rows // 2
+    put(mid, value_text, 8)
+    put(mid + 1, sub_text, 6)
+    rows = [_group_runs(cells) for cells in grid]
+    lab = label[:width]
+    pad = (width - len(lab)) // 2
+    rows.append([(" " * pad + lab + " " * (width - pad - len(lab)), 2)])
+    return rows
+
+
+def heat_runs(values, width, y_max=100.0, window=None):
+    """One row of a heat grid: each cell the mean of its samples, a dot
+    when idle, otherwise a block shaded along the ramp. None outside the
+    eighths tier."""
+    if BAR_STYLE != "eighths" or width < 1 or not values:
+        return None
+    window = window or width
+    vals = [0.0 if v is None else float(v) for v in list(values)[-window:]]
+    missing = window - len(vals)
+    pts = []
+    for i in range(width):
+        a = i * window // width
+        b = max(a + 1, (i + 1) * window // width)
+        if b <= missing:
+            pts.append(None)            # history hasn't reached back here yet
+            continue
+        part = vals[max(0, a - missing):b - missing]
+        pts.append(sum(part) / len(part))
+    top = float(y_max) or 1.0
+    cells = []
+    for v in pts:
+        if v is None:
+            cells.append((" ", 7))
+        elif v / top < 0.12:
+            cells.append(("·", 7))
+        else:
+            cells.append(("▆", ramp_slot(v / top)))
+    return _group_runs(cells)
+
+
+def fmt_span(seconds):
+    s = int(seconds)
+    if s >= 3600 and s % 3600 == 0:
+        return f"{s // 3600}h"
+    if s >= 60 and s % 60 == 0:
+        return f"{s // 60}m"
+    return f"{s}s"
+
+
+def time_axis(width, span_s):
+    """The row under a chart: ticks at round intervals back from "now",
+    `width` cells, frame-coloured line with dim labels."""
+    if width < 8:
+        return [("─" * max(0, width), 10)]
+    step = next((s for s in (10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600)
+                 if span_s / s <= max(2, min(6, width // 12))), 3600)
+    cells = [("─", 10)] * width
+    cells[-1] = ("┘", 10)
+    now = "now"
+    for i, ch in enumerate(now):
+        cells[width - 1 - len(now) - 1 + i] = (ch, 6)
+    k = 1
+    while k * step <= span_s:
+        cx = int(round((span_s - k * step) / span_s * (width - 1)))
+        label = "-" + fmt_span(k * step)
+        if cx + 1 + len(label) < width - len(now) - 3:
+            cells[cx] = ("┴", 10)
+            for i, ch in enumerate(label):
+                cells[cx + 1 + i] = (ch, 6)
+        k += 1
+    return _group_runs(cells)
