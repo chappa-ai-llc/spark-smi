@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.4.0] — 2026-11-25
+
+Page 2 on big screens ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14)).
+
+### Added
+
+- **Big-screen page 2** (200+ columns, 45+ rows): one column per GPU with
+  the normal detail (knobs included) and charts for SM clock, power against
+  its limit, temperature and PCIe in/out; the per-PF NIC table beside
+  PORTS, a mirrored in/out chart per physical port and a CONGESTION chart
+  (CNP and ECN marks per second); THERMALS as a heat grid with one row per
+  sensor; POWER RAILS with a wall-power chart, PCIE LINKS and NVME SMART.
+  The page fills the terminal exactly; `g` and `+`/`-` work as on the other
+  big pages. Smaller terminals, a remote drilldown and terminals without
+  braille keep the normal page 2.
+- spark-smi keeps up to an hour of each GPU's SM clock, temperature and
+  PCIe traffic, and of each PF's traffic and congestion counters, in memory
+  for these charts. It never goes over the network.
+
 ## [5.3.0] — 2026-11-25
 
 Page 3 for ultrawide and 4K screens ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14)).
@@ -529,6 +548,7 @@ is still there, on page 1.
 
 - Initial public release.
 
+[5.4.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.4.0
 [5.3.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.3.0
 [5.2.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.2.0
 [5.1.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.1.0

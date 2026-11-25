@@ -30,7 +30,8 @@ the deploy/record helpers). Unit tests cover the release script and a few
 pure pieces (cluster token reader, node names, the network counter rules,
 the ethtool netlink codec, themes, graphs, SVG shots, page 3's topology map,
 page 5's session grouping and confirm gate, page 5's tracker/sort/filter/
-layouts, the big-screen page 1, and page 3's big layout and cluster history): `python3 -m unittest discover -s deploy` and
+layouts, the big-screen page 1, page 3's big layout and cluster history, and
+page 2's big layout): `python3 -m unittest discover -s deploy` and
 `python3 -m unittest discover -s tests` (the second needs psutil installed). Packaging is setuptools via
 `pyproject.toml`; the pip entry point is `spark-smi = spark_smi.__main__:main`.
 
@@ -195,6 +196,16 @@ spark_smi/
                   terminal exactly;
                   None falls back to pages.build_page3. Shares
                   pages.page3_prepare (sort/filter/selection/summary).
+  advpage.py      Page 2's big layout (#14, 5.4): build_page2_large() at
+                  bigpage.layout_for() large/xl: a column per GPU (pages.
+                  _build_gpu_detail_panel, knobs included, + SM clock/
+                  power/temp/PCIe chart cells), NIC table beside PORTS
+                  (mirror per physical port, CONGESTION), THERMALS heat
+                  grid (heat_cols wraps sensors), POWER RAILS (+ wall
+                  chart), PCIE LINKS, NVME SMART. Chart cells are rows of
+                  runs exactly w wide (area_cell/mirror_cell), laid out by
+                  _grid. Reads sample["long"]["adv"] (State._adv_history);
+                  None (normal page) without it, e.g. a remote drilldown.
   topomap.py      Page 3's TOPOLOGY map: build_graph() finds links from
                   the nodes' nic_pf networks (ip + prefix; 2 members = a
                   cable, 3+ = a switch bus), render() lays boxes out in one
@@ -282,8 +293,8 @@ grayed out otherwise (e.g. "root required" for an unwritable `spbm`
 `standard` (84–110), `wide` (>110, content capped at 160 and centered on
 wider terminals). On page 1, `bigpage.layout_for()` takes over at 200+
 columns and 45+ rows (the `g` key's graph mode can turn it off or extend
-it down to 120 columns); see `bigpage.py`. Pages 3 and 5 use the same gate at large/xl
-(`clusterpage.py`, `taskpage.py`). History: State keeps
+it down to 120 columns); see `bigpage.py`. Pages 2, 3 and 5 use the same gate at large/xl
+(`advpage.py`, `clusterpage.py`, `taskpage.py`). History: State keeps
 `HIST_LONG` (3600) samples per series but exposes only `HIST_LEN` (60) in
 the sample's own `*history` keys -- the long buffers ride in
 `sample["long"]`, built only when `state.want_long` (a screen is drawn),
