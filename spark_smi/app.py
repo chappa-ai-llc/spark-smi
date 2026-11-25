@@ -13,6 +13,7 @@ from collections import deque
 
 from . import bigpage
 from . import cluster
+from . import clusterpage
 from . import collectors
 from . import fabtest
 from . import knobs
@@ -27,7 +28,7 @@ from . import term
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "5.1.0"
+    VERSION = "5.2.0"
 DEFAULT_REFRESH_RATE = 1.0
 HIST_LEN = 60
 # Local history kept for the big-screen layouts (#14): up to an hour at 1 s.
@@ -572,10 +573,21 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
             views = []
         ctx = {"name": cluster_ctx.get("name", "cluster"), "views": views,
                "rate": state.rate, "ui": cluster_ui}
-        try:
-            built = pages.build_page3(ctx, tier, draw_w, x0, height=height_hint or h, has_perf=has_perf)
-        except Exception:
-            built = []
+        # Big terminals (#14 step 3): dials, topology and a chart column per
+        # node across the full width; None falls back to the normal page.
+        layout = bigpage.layout_for(w, height_hint or h, state.graphs) if term.BAR_STYLE == "eighths" else None
+        built = None
+        if layout in ("large", "xl"):
+            try:
+                built = clusterpage.build_page3_large(ctx, w, height_hint or h, 0, layout, history=state.history,
+                                                      theme_toast=theme_toast, has_perf=has_perf)
+            except Exception:
+                built = None
+        if built is None:
+            try:
+                built = pages.build_page3(ctx, tier, draw_w, x0, height=height_hint or h, has_perf=has_perf)
+            except Exception:
+                built = []
         try:
             panels.render(stdscr, built, colors_map)
         except Exception:
@@ -1076,10 +1088,11 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
                 stdscr.clear()
                 break
             if state.page == 3 and cluster_ctx:
-                if ch == curses.KEY_UP:
+                # ←/→ too: the big layout puts the nodes side by side
+                if ch in (curses.KEY_UP, curses.KEY_LEFT):
                     cluster_ui.move(-1, cluster_ui.last_n)
                     break
-                if ch == curses.KEY_DOWN:
+                if ch in (curses.KEY_DOWN, curses.KEY_RIGHT):
                     cluster_ui.move(1, cluster_ui.last_n)
                     break
                 if ch == ord('a'):

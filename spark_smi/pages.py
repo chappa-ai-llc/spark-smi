@@ -18,7 +18,7 @@ from . import topomap
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "5.1.0"
+    VERSION = "5.2.0"
 
 # The header shows the major.minor series ("4.0"). Derived from VERSION rather
 # than written out, because a hardcoded literal here silently drifted a whole
@@ -458,8 +458,9 @@ def build_help_overlay(term_w, term_h):
         ("    entirely at your own risk", 4),
         ("", 3),
         ("Page 3 -- cluster (--cluster)", 9),
-        ("  up / down    select node", 3),
+        ("  arrows       select node", 3),
         ("  Enter        drill into node (knobs stay local-only)", 3),
+        ("  g  + / -     graph size, history window (as page 1)", 3),
         ("  Esc          back out of a drilldown", 3),
         ("  a            fleet matrix: alerting nodes only", 3),
         ("  o            fleet matrix: cycle sort column", 3),
@@ -2600,20 +2601,14 @@ def _build_topology_panel(y, x0, width, topo, n_nodes):
 
 # --- Assembly --------------------------------------------------------
 
-def build_page3(cluster_ctx, tier, width, x0=0, height=None, has_perf=False):
-    """Builds page 3 (--cluster only): header (3-tab, cluster summary),
-    then either the SECTIONS compound frame (<=8 nodes, one row per node
-    per CPU/MEMORY/GPU/FABRIC/STORAGE panel) or the FLEET matrix + ALERTS
-    (>8 nodes), then the footer. `cluster_ctx` = {"name", "views", "rate",
-    "ui"} -- see the module-level comment above this section. `has_perf`
-    (Phase 7) is True once the cluster has >=2 members, adding the 4th
-    "PERF" tab to the header (page 4 itself is only reachable that way)."""
-    out = []
+def page3_prepare(cluster_ctx):
+    """What both page-3 layouts start from: the views (filtered and sorted
+    per ClusterUI), their _cluster_metrics, node counts, the header summary
+    and the selected index -- updating the ClusterUI's cached last_n and
+    selected_name, which the key handling reads between frames."""
     name = cluster_ctx.get("name", "cluster")
     views = list(cluster_ctx.get("views") or [])
     ui = cluster_ctx.get("ui")
-    rate = cluster_ctx.get("rate", 1.0)
-
     metrics = [_cluster_metrics(v.get("sample")) for v in views]
     pairs = list(zip(views, metrics))
 
@@ -2645,14 +2640,33 @@ def build_page3(cluster_ctx, tier, width, x0=0, height=None, has_perf=False):
         summary += f"  {_hdr_glyphs()[2]}  Σ wall {wall_w / 1000:.2f} kW" if wall_w >= 1000 else f"  {_hdr_glyphs()[2]}  Σ wall {wall_w:.0f} W"
     summary = f"{name} — {summary}"
 
-    out.append(_build_header(x0, width, tier, page=3, cluster_tabs=True, cluster_summary=summary, has_perf=has_perf))
-    y = 1
-
     if ui:
         ui.selected = 0 if n == 0 else max(0, min(n - 1, ui.selected))
         ui.last_n = n
         ui.selected_name = views[ui.selected].get("name") if n else None
     selected_idx = ui.selected if ui else -1
+    return {"views": views, "metrics": metrics, "n": n, "total": total_nodes, "up": up,
+            "summary": summary, "selected": selected_idx}
+
+
+def build_page3(cluster_ctx, tier, width, x0=0, height=None, has_perf=False):
+    """Builds page 3 (--cluster only): header (3-tab, cluster summary),
+    then either the SECTIONS compound frame (<=8 nodes, one row per node
+    per CPU/MEMORY/GPU/FABRIC/STORAGE panel) or the FLEET matrix + ALERTS
+    (>8 nodes), then the footer. `cluster_ctx` = {"name", "views", "rate",
+    "ui"} -- see the module-level comment above this section. `has_perf`
+    (Phase 7) is True once the cluster has >=2 members, adding the 4th
+    "PERF" tab to the header (page 4 itself is only reachable that way)."""
+    out = []
+    ui = cluster_ctx.get("ui")
+    rate = cluster_ctx.get("rate", 1.0)
+    pre = page3_prepare(cluster_ctx)
+    views, metrics, n = pre["views"], pre["metrics"], pre["n"]
+    total_nodes, up, summary = pre["total"], pre["up"], pre["summary"]
+
+    out.append(_build_header(x0, width, tier, page=3, cluster_tabs=True, cluster_summary=summary, has_perf=has_perf))
+    y = 1
+    selected_idx = pre["selected"]
 
     # Size the node column to the longest name actually present rather than a
     # flat 10, which sliced a 14-char hostname down to "resa-ai-no".

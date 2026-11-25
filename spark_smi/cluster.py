@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 import urllib.request
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -32,13 +33,15 @@ from . import node
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "5.1.0"
+    VERSION = "5.2.0"
 
 DEFAULT_PORT = 8817
 POLL_TIMEOUT = 0.75          # per-member urllib timeout (spec)
 SSH_CONNECT_TIMEOUT = 3.0    # ssh bootstrap fallback -- much slower than HTTP
 SSH_TOTAL_TIMEOUT = 5.0
 STALE_MULTIPLIER = 3         # a member is "stale" after 3 * rate seconds
+HIST_LONG = 3600             # page 3's per-node history, in polls (app.HIST_LONG)
+FABRIC_MIN_MBIT = 25000      # a NIC this fast or faster counts as cluster fabric
 CACHE_TTL = 0.5              # --serve response cache (spec: no poll-storm hammering)
 DEFAULT_CONFIG_PATH = os.path.expanduser(os.path.join("~", ".config", "spark-smi", "cluster"))
 
@@ -345,8 +348,101 @@ def parse_cluster_hosts(value):
 # Aggregator: background polling, never blocks the render thread
 # =========================================================================
 
+def fabric_nics(nics):
+    """The NICs that carry the cluster's traffic: every link-up port of
+    FABRIC_MIN_MBIT or more, else (a cluster on plain Ethernet) every
+    link-up port. Page 3's dials, columns and history all use this one
+    rule, so a management port never dilutes a fabric figure."""
+    up = [n for n in nics or [] if n.get("up")]
+    fast = [n for n in up if (n.get("speed_mbit") or 0) >= FABRIC_MIN_MBIT]
+    return fast or up
+
+
+def node_power(sample):
+    """(watts, source) for a node: the board's dc_input rail when the spbm
+    driver reports it ("wall"), else the GPUs' own power draw ("gpu"), else
+    (None, None)."""
+    for r in (sample or {}).get("power_rails") or []:
+        if r.get("label") == "dc_input" and isinstance(r.get("watts"), (int, float)):
+            return float(r["watts"]), "wall"
+    total, seen = 0.0, False
+    for g in (sample or {}).get("gpus") or []:
+        try:
+            total += float(str(g.get("pwr_str", "")).split()[0])
+            seen = True
+        except Exception:
+            pass
+    return (total, "gpu") if seen else (None, None)
+
+
+def history_point(sample):
+    """{series key: value} for one poll of one node: "cpu" and "mem" (%),
+    "rx"/"tx" (fabric bits/s), "pwr" (W) and "gpu:<id>" (util %) -- each
+    only when the sample has it."""
+    out = {}
+    try:
+        clusters = ((sample.get("cpu") or {}).get("clusters")) or []
+        n = sum(len(c.get("cores") or []) for c in clusters)
+        if n:
+            out["cpu"] = sum((c.get("avg") or 0) * len(c.get("cores") or []) for c in clusters) / n
+        vm = (sample.get("mem") or {}).get("vm")
+        pct = getattr(vm, "percent", None) if vm is not None else None
+        if isinstance(pct, (int, float)):
+            out["mem"] = float(pct)
+        fab = fabric_nics(sample.get("nics"))
+        if fab:
+            out["rx"] = float(sum(n.get("rx_bps") or 0 for n in fab))
+            out["tx"] = float(sum(n.get("tx_bps") or 0 for n in fab))
+        watts, _ = node_power(sample)
+        if watts is not None:
+            out["pwr"] = watts
+        for g in sample.get("gpus") or []:
+            if isinstance(g.get("util"), (int, float)):
+                out[f"gpu:{g.get('id')}"] = float(g["util"])
+    except Exception:
+        pass
+    return out
+
+
+class NodeHistory:
+    """Page 3's long history for one member, filled by the viewer from its
+    own polls (#14 step 3). It never goes on the wire: an agent's sample
+    carries 60 points per series, and this is how the viewer keeps the hour
+    behind them. A failed poll appends None to every series, so time keeps
+    its pace across an outage (the charts draw the gap as empty)."""
+
+    def __init__(self, maxlen=HIST_LONG):
+        self.maxlen = maxlen
+        self._s = {}
+        self._lock = threading.Lock()
+
+    def record(self, sample):
+        point = history_point(sample) if sample else {}
+        with self._lock:
+            for key in set(self._s) | set(point):
+                d = self._s.get(key)
+                if d is None:
+                    d = self._s[key] = deque(maxlen=self.maxlen)
+                d.append(point.get(key))
+
+    def series(self, key, n=None):
+        """The newest `n` points of one series (all of them when n is None),
+        as a list; [] for a series never seen."""
+        with self._lock:
+            d = self._s.get(key)
+            if not d:
+                return []
+            if n is None or n >= len(d):
+                return list(d)
+            return list(d)[-n:]
+
+    def __len__(self):
+        with self._lock:
+            return max((len(d) for d in self._s.values()), default=0)
+
+
 class ClusterMember:
-    def __init__(self, entry, is_local):
+    def __init__(self, entry, is_local, hist_len=HIST_LONG):
         self.entry = entry
         self.is_local = is_local
         self.name = entry["host"]
@@ -354,6 +450,7 @@ class ClusterMember:
         self.last_ok_ts = 0.0
         self.error = None
         self.last_seen_summary = None  # short text kept around after going stale
+        self.hist = NodeHistory(hist_len)
         self._lock = threading.Lock()
 
     def snapshot(self):
@@ -366,10 +463,12 @@ class ClusterMember:
             self.last_ok_ts = time.time()
             self.error = None
             self.last_seen_summary = _summarize(sample)
+        self.hist.record(sample)
 
     def set_err(self, msg):
         with self._lock:
             self.error = msg
+        self.hist.record(None)
 
 
 def _summarize(sample):
@@ -590,7 +689,8 @@ class ClusterAggregator:
 
     def get_views(self):
         """[{name, sample, last_ok_ts, error, stale, is_local,
-        last_seen_summary}, ...] in member order -- the only thing
+        last_seen_summary, hist}, ...] in member order (hist: the member's
+        NodeHistory, read by page 3's big layout) -- the only thing
         pages.build_page3 (and app.py's drilldown lookup) reads."""
         now = time.time()
         out = []
@@ -609,7 +709,8 @@ class ClusterAggregator:
                 # bare IP address on its dots
                 name = name.split(".")[0]
             out.append({"name": name, "sample": sample, "last_ok_ts": last_ok, "error": err,
-                        "stale": stale, "is_local": m.is_local, "last_seen_summary": last_seen})
+                        "stale": stale, "is_local": m.is_local, "last_seen_summary": last_seen,
+                        "hist": m.hist})
         return out
 
     def get_member_sample(self, name):

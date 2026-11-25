@@ -6,6 +6,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.2.0] — 2026-11-25
+
+Page 3 on big screens ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14), step 3).
+
+### Added
+
+- **Big-screen page 3** (cluster mode, 200+ columns, 45+ rows, up to 8
+  nodes): a CLUSTER dial strip (GPU average, slowest GPU, power, memory,
+  fabric, hottest sensor, agents answering, fullest disk), the TOPOLOGY map
+  at the largest size that leaves the charts room, a column per node
+  charting each GPU, CPU, node power and fabric in/out on one time axis with
+  its busiest GPU process, and a GPU UTIL heat grid with one row per GPU.
+  The page fills the terminal exactly; `g` and `+`/`-` work as on pages 1
+  and 5. Smaller terminals, more than 8 nodes, and terminals without
+  braille keep the normal page 3.
+- **Cluster history kept by the viewer**: up to an hour per node, filled
+  from its own polls and never sent over the network. A failed poll leaves
+  a gap rather than squeezing time. Until the viewer has more than a minute,
+  the charts use the minute each node's sample already carries.
+- `←` / `→` select a node on page 3, as `↑` / `↓` do.
+
 ## [5.1.0] — 2026-11-25
 
 Page 5 becomes a fuller GPU task manager ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14), step 2).
@@ -486,6 +507,7 @@ is still there, on page 1.
 
 - Initial public release.
 
+[5.2.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.2.0
 [5.1.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.1.0
 [5.0.1]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.0.1
 [5.0.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.0.0
