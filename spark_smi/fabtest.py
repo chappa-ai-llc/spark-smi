@@ -180,10 +180,20 @@ def assign_rail_labels(rails):
     return labels
 
 
+# Display servers and shells hold a GPU context on any desktop node; they
+# are not a job a fabric test would disturb.
+DESKTOP_PROCS = frozenset({"Xorg", "Xwayland", "gnome-shell", "kwin_wayland", "kwin_x11", "plasmashell",
+                           "mutter", "sway", "gdm-x-session", "gsd-xsettings"})
+
+
+def _desktop_proc(p):
+    return (p.get("name") or "").strip() in DESKTOP_PROCS
+
+
 def gpu_active_nodes(views):
     """Node names (from cluster.ClusterAggregator.get_views()) whose latest
-    sample shows an active GPU job -- >10% util on any GPU, or a nonempty
-    compute/graphics process list -- fed into the space-key confirm prompt's
+    sample shows an active GPU job -- >10% util on any GPU, or a process
+    on it other than the desktop's own (Xorg, gnome-shell, ...) -- fed into the space-key confirm prompt's
     "GPU jobs active on <nodes>" warning. Best-effort: a missing/malformed
     sample is just skipped, never a crash."""
     out = []
@@ -193,7 +203,8 @@ def gpu_active_nodes(views):
             if not sample:
                 continue
             gpus = sample.get("gpus") or []
-            busy = any((g.get("util") or 0) > 10 or g.get("procs") for g in gpus)
+            busy = any((g.get("util") or 0) > 10 or any(not _desktop_proc(p) for p in g.get("procs") or [])
+                       for g in gpus)
             if busy:
                 out.append(v.get("name"))
         except Exception:

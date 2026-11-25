@@ -14,8 +14,15 @@ Three layers, same shape knobs.py / fabtest.py use:
   TaskCollector.sample(gpus)   pure read: plain dicts, one tree root per
                                 GPU, session groups below it, processes
                                 below those. Never signals anything.
-  flatten(tree)                 pure: tree -> flat selectable row list the
-                                page builder renders and TaskUI moves over.
+  flatten(tree, sort, flat,     pure: tree -> flat selectable row list the
+          filt)                 page builder renders and TaskUI moves over.
+  ProcTracker                   per-process history (SM, GPU memory, CPU)
+                                and the recently-ended list, fed every tick
+                                by State while a screen is drawn. Memory
+                                only, never on the cluster wire.
+  proc_detail(pid)              pure read of one process's facts for the
+                                detail pane (cwd, threads, device files,
+                                a fixed list of GPU environment variables).
   TaskUI                        live-mode-only session state (selection,
                                 confirm arm, toast); pure state transitions.
   end_process / end_group /     the ONLY functions that signal a process
@@ -30,6 +37,7 @@ import shutil
 import signal
 import subprocess
 import time
+from collections import deque
 
 import psutil
 
@@ -584,6 +592,13 @@ class TaskCollector:
         session dict above plus "procs": [proc,...] and "gpu_mem" (sum)."""
         gpus = list(gpus or [])
         per_gpu, src, holders = self._gpu_pids(len(gpus), include_holders)
+        # Per-process SM/ENC/DEC rides on the GPU sample's own procs list
+        # (collectors._proc_util), so the tree never asks NVML twice.
+        util = {}
+        for i, g in enumerate(gpus):
+            for pr in g.get("procs") or []:
+                if pr.get("pid") is not None and "sm" in pr:
+                    util[(i, pr["pid"])] = pr
         table = {}
         proc_cache = {}
         sess_cache = {}
@@ -598,7 +613,7 @@ class TaskCollector:
             g = gpus[idx] if idx < len(gpus) else {}
             root = {"idx": idx, "id": g.get("id", str(idx)), "name": g.get("name", f"GPU {idx}"),
                     "util": g.get("util"), "mem_used": g.get("mem_used"), "mem_total": g.get("mem_total"),
-                    "groups": []}
+                    "enc_util": g.get("enc_util"), "dec_util": g.get("dec_util"), "groups": []}
             groups = {}
             for pid, mem in sorted((per_gpu.get(idx) or {}).items()):
                 if pid not in proc_cache:
@@ -612,6 +627,10 @@ class TaskCollector:
                 p = dict(base)
                 p.update(facts)
                 p["gpu_mem"] = mem
+                u = util.get((idx, pid))
+                if u is not None:
+                    for k in ("sm", "membw", "enc", "dec"):
+                        p[k] = u.get(k, 0)
                 p["holder"] = (idx, pid) in holders
                 p["gpu_idx"] = idx
                 p["on_gpus"] = sorted(i for i, b in per_gpu.items() if pid in b)
@@ -648,21 +667,270 @@ class TaskCollector:
 # flatten: tree -> selectable rows. Pure.
 # =========================================================================
 
-def flatten(tree):
+SORTS = ("mem", "sm", "cpu", "age", "pid")
+SORT_LABELS = {"mem": "GPU MEM", "sm": "SM%", "cpu": "CPU%", "age": "TIME", "pid": "PID"}
+
+
+def _sort_key(sort):
+    """Process sort key: biggest first, except PID (ascending) and TIME
+    (longest-running first)."""
+    if sort == "sm":
+        return lambda p: (-(p.get("sm") or 0), -(p.get("gpu_mem") or 0), p["pid"])
+    if sort == "cpu":
+        return lambda p: (-(p.get("cpu") or 0), p["pid"])
+    if sort == "age":
+        return lambda p: (-(p.get("age") or 0), p["pid"])
+    if sort == "pid":
+        return lambda p: p["pid"]
+    return lambda p: (-(p.get("gpu_mem") or 0), p["pid"])
+
+
+def matches(proc, group, filt):
+    """The `/` filter: a case-insensitive substring of the pid, name,
+    command line, user or session label."""
+    if not filt:
+        return True
+    f = filt.lower()
+    hay = (str(proc.get("pid")), proc.get("name") or "", proc.get("cmd") or "", proc.get("user") or "",
+           (group or {}).get("label") or "")
+    return any(f in str(h).lower() for h in hay)
+
+
+def flatten(tree, sort="mem", flat=False, filt=""):
     """[{"type": "gpu"|"group"|"proc", ...}] in display order. Group and
-    proc rows carry `last` flags the renderer turns into tree glyphs."""
+    proc rows carry `last` flags the renderer turns into tree glyphs.
+    `sort` orders processes (and, unless it is the default "mem", the
+    session groups by their first process); `flat` drops the session rows
+    and lists each GPU's processes in one sorted run (each row still
+    carries its group, so Enter and e still act on the session); `filt`
+    keeps only matching processes and their groups."""
+    key = _sort_key(sort)
     rows = []
     for root in (tree or {}).get("gpus") or []:
         rows.append({"type": "gpu", "gpu": root, "gpu_idx": root["idx"]})
-        groups = root.get("groups") or []
-        for gi, grp in enumerate(groups):
+        groups = []
+        for grp in root.get("groups") or []:
+            procs = sorted((p for p in grp.get("procs") or [] if matches(p, grp, filt)), key=key)
+            if procs:
+                groups.append((grp, procs))
+        if flat:
+            procs = sorted(((p, grp) for grp, ps in groups for p in ps), key=lambda t: key(t[0]))
+            for pi, (p, grp) in enumerate(procs):
+                rows.append({"type": "proc", "gpu_idx": root["idx"], "group": grp, "proc": p,
+                             "last": pi == len(procs) - 1, "group_last": True, "flat": True})
+            continue
+        if sort != "mem":
+            groups.sort(key=lambda t: key(t[1][0]))
+        for gi, (grp, procs) in enumerate(groups):
             g_last = gi == len(groups) - 1
             rows.append({"type": "group", "gpu_idx": root["idx"], "group": grp, "last": g_last})
-            procs = grp.get("procs") or []
             for pi, p in enumerate(procs):
                 rows.append({"type": "proc", "gpu_idx": root["idx"], "group": grp, "proc": p,
                              "last": pi == len(procs) - 1, "group_last": g_last})
     return rows
+
+
+# =========================================================================
+# ProcTracker -- per-process history and the recently-ended list (#14
+# step 2). Fed by State.sample() each tick while a screen is drawn, from
+# the GPU sample's own procs lists, so the history runs on every page and
+# page 5 opens with charts already filled. Local memory only.
+# =========================================================================
+
+class ProcTracker:
+    ENDED_KEEP_S = 3600
+    ENDED_MAX = 30
+
+    def __init__(self, maxlen=3600):
+        self.maxlen = maxlen
+        self.live = {}       # (gpu id, pid) -> {"sm", "mem" deques, peaks, first}
+        self.cpu = {}        # pid -> deque of CPU percent
+        self.meta = {}       # pid -> {"name", "cmd", "user", "started"}
+        self.ended = deque(maxlen=self.ENDED_MAX)
+        self._ps = {}
+
+    def _meta(self, pid, name):
+        m = {"name": name or "", "cmd": "", "user": "", "started": None}
+        try:
+            p = psutil.Process(pid)
+            self._ps[pid] = p
+            with p.oneshot():
+                m["name"] = p.name() or m["name"]
+                try:
+                    args = p.cmdline() or []
+                    if args:
+                        m["cmd"] = " ".join([os.path.basename(args[0])] + [a for a in args[1:] if a])
+                except Exception:
+                    pass
+                try:
+                    m["user"] = (p.username() or "").rsplit("\\", 1)[-1]
+                except Exception:
+                    pass
+                m["started"] = p.create_time()
+            p.cpu_percent(None)
+        except Exception:
+            pass
+        return m
+
+    def update(self, gpus, now=None):
+        now = time.time() if now is None else now
+        seen, pids = set(), {}
+        for g in gpus or []:
+            gid = str(g.get("id"))
+            for pr in g.get("procs") or []:
+                pid = pr.get("pid")
+                if pid is None:
+                    continue
+                key = (gid, pid)
+                seen.add(key)
+                pids[pid] = pr.get("name")
+                rec = self.live.get(key)
+                if rec is None:
+                    rec = self.live[key] = {"sm": deque(maxlen=self.maxlen), "mem": deque(maxlen=self.maxlen),
+                                            "peak_sm": 0, "peak_mem": 0, "first": now, "gpu": gid}
+                mem = pr.get("mem") or 0
+                rec["mem"].append(float(mem))
+                rec["peak_mem"] = max(rec["peak_mem"], mem)
+                if "sm" in pr:
+                    sm = pr.get("sm") or 0
+                    rec["sm"].append(float(sm))
+                    rec["peak_sm"] = max(rec["peak_sm"], sm)
+        for pid, name in pids.items():
+            if pid not in self.meta:
+                self.meta[pid] = self._meta(pid, name)
+                self.cpu[pid] = deque(maxlen=self.maxlen)
+                continue
+            try:
+                self.cpu[pid].append(float(self._ps[pid].cpu_percent(None)))
+            except Exception:
+                self.cpu[pid].append(0.0)
+        gone = [k for k in self.live if k not in seen]
+        ended = {}
+        for key in gone:
+            rec = self.live.pop(key)
+            e = ended.setdefault(key[1], {"gpus": [], "peak_sm": None, "peak_mem": 0, "first": rec["first"]})
+            e["gpus"].append(key[0])
+            if rec["sm"]:
+                e["peak_sm"] = max(e["peak_sm"] or 0, rec["peak_sm"])
+            e["peak_mem"] = max(e["peak_mem"], rec["peak_mem"])
+            e["first"] = min(e["first"], rec["first"])
+        for pid, e in ended.items():
+            if pid in pids:            # still on another GPU
+                continue
+            m = self.meta.pop(pid, None) or {}
+            self.cpu.pop(pid, None)
+            ps = self._ps.pop(pid, None)
+            alive = False
+            try:
+                alive = ps is not None and ps.is_running()
+            except Exception:
+                pass
+            started = m.get("started") or e["first"]
+            self.ended.appendleft({"pid": pid, "name": m.get("name") or "", "cmd": m.get("cmd") or "",
+                                   "user": m.get("user") or "", "gpus": sorted(e["gpus"]),
+                                   "ran": max(0.0, now - started), "ended": now,
+                                   "peak_sm": e["peak_sm"], "peak_mem": e["peak_mem"],
+                                   "how": "left the GPU" if alive else "ended"})
+        while self.ended and now - self.ended[-1]["ended"] > self.ENDED_KEEP_S:
+            self.ended.pop()
+
+    def snapshot(self):
+        """Plain lists for the page builder: {"proc": {(gpu id, pid):
+        {"sm": [...], "mem": [...]}}, "cpu": {pid: [...]}, "ended": [...]}."""
+        return {"proc": {k: {"sm": list(r["sm"]), "mem": list(r["mem"]), "peak_sm": r["peak_sm"],
+                             "peak_mem": r["peak_mem"]} for k, r in self.live.items()},
+                "cpu": {pid: list(h) for pid, h in self.cpu.items()},
+                "ended": list(self.ended)}
+
+
+# =========================================================================
+# proc_detail -- the detail pane's facts for one process. Pure read.
+# =========================================================================
+
+# The only environment variables the detail pane shows: device and fabric
+# selection. Never the rest of the environment, which can hold secrets.
+DETAIL_ENV = ("CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER",
+              "NCCL_IB_HCA", "NCCL_SOCKET_IFNAME")
+_DEV_PREFIXES = ("/dev/nvidia", "/dev/infiniband/", "/dev/dri/")
+_DETAIL_TTL = 2.0
+_detail_cache = {}
+
+
+def _home_short(path, user_home):
+    if path and user_home and (path == user_home or path.startswith(user_home.rstrip("/") + "/")):
+        return "~" + path[len(user_home.rstrip("/")):]
+    return path
+
+
+def proc_detail(pid, now=None):
+    """{"threads", "ppid", "parent", "uid", "started", "cwd", "env": [(k, v)],
+    "devices": [names], "denied": bool} for one pid; fields that cannot be
+    read (another user's process) are None, and `denied` says why. Cached
+    for 2 s, since the device scan walks every open file."""
+    now = time.time() if now is None else now
+    hit = _detail_cache.get(pid)
+    if hit and now - hit[0] < _DETAIL_TTL:
+        return hit[1]
+    d = {"threads": None, "ppid": None, "parent": None, "uid": None, "started": None,
+         "cwd": None, "env": [], "devices": [], "denied": False}
+    try:
+        p = psutil.Process(pid)
+        with p.oneshot():
+            for k, fn in (("threads", p.num_threads), ("ppid", p.ppid), ("started", p.create_time)):
+                try:
+                    d[k] = fn()
+                except Exception:
+                    pass
+            try:
+                d["uid"] = p.uids().real
+            except Exception:
+                pass
+        try:
+            d["parent"] = psutil.Process(d["ppid"]).name() if d["ppid"] else None
+        except Exception:
+            pass
+        home = None
+        try:
+            import pwd
+            home = pwd.getpwuid(d["uid"]).pw_dir if d["uid"] is not None else None
+        except Exception:
+            pass
+        try:
+            d["cwd"] = _home_short(p.cwd(), home)
+        except psutil.AccessDenied:
+            d["denied"] = True
+        except Exception:
+            pass
+        try:
+            env = p.environ()
+            d["env"] = [(k, env[k]) for k in DETAIL_ENV if k in env]
+        except psutil.AccessDenied:
+            d["denied"] = True
+        except Exception:
+            pass
+        if _PROCFS:
+            names = []
+            try:
+                for fd in os.listdir(f"/proc/{pid}/fd"):
+                    try:
+                        tgt = os.readlink(f"/proc/{pid}/fd/{fd}")
+                    except OSError:
+                        continue
+                    if tgt.startswith(_DEV_PREFIXES):
+                        name = tgt.rsplit("/", 1)[-1]
+                        if name not in names:
+                            names.append(name)
+            except PermissionError:
+                d["denied"] = True
+            except Exception:
+                pass
+            d["devices"] = names
+    except Exception:
+        pass
+    if len(_detail_cache) > 64:
+        _detail_cache.clear()
+    _detail_cache[pid] = (now, d)
+    return d
 
 
 # =========================================================================
@@ -797,9 +1065,20 @@ class TaskUI:
         self.toast_ticks = 0
         self.include_holders = False
         self.last_rows = []
+        self.sort = "mem"            # `s` cycles tasks.SORTS
+        self.flat = False            # `f`: one sorted list per GPU
+        self.filter = ""             # `/` text
+        self.editing = False         # typing into the filter
 
     def set_rows(self, rows):
         self.last_rows = list(rows or [])
+        target = getattr(self, "_reselect", None)
+        self._reselect = None
+        if target is not None:
+            for i, r in enumerate(self.last_rows):
+                if self._same_row(target, r):
+                    self.selected = i
+                    break
         n = len(self.last_rows)
         if n == 0:
             self.selected = 0
@@ -839,6 +1118,48 @@ class TaskUI:
         self.confirm_text = None
         self.confirm_warn = None
         self.pending = None
+
+    def _keep_selection(self, fn):
+        """Runs a view change, then re-selects the same process or group
+        in the rebuilt rows on the next set_rows()."""
+        cur = self.current()
+        fn()
+        self._reselect = cur
+
+    def cycle_sort(self):
+        if self.confirming:
+            return
+        def step():
+            self.sort = SORTS[(SORTS.index(self.sort) + 1) % len(SORTS)] if self.sort in SORTS else SORTS[0]
+        self._keep_selection(step)
+
+    def toggle_flat(self):
+        if self.confirming:
+            return
+        def step():
+            self.flat = not self.flat
+        self._keep_selection(step)
+
+    def start_filter(self):
+        if self.confirming:
+            return
+        self.editing = True
+
+    def filter_key(self, ch):
+        """One key while typing the filter: printable text appends,
+        Backspace deletes, Enter keeps the filter, Esc clears it. Returns
+        True while still typing."""
+        if ch in (10, 13):
+            self.editing = False
+        elif ch == 27:
+            self.editing = False
+            self.filter = ""
+        elif ch in (8, 127, 263):     # BS, DEL, curses.KEY_BACKSPACE
+            self.filter = self.filter[:-1]
+        elif 32 <= ch < 127 and len(self.filter) < 40:
+            self.filter += chr(ch)
+        self._reselect = self.current()
+        return self.editing
 
     def toggle_holders(self):
         if self.confirming:
@@ -929,4 +1250,5 @@ class TaskUI:
             "selected": self.selected, "confirming": self.confirming,
             "confirm_text": self.confirm_text, "confirm_warn": self.confirm_warn,
             "toast": self.toast, "include_holders": self.include_holders,
+            "sort": self.sort, "flat": self.flat, "filter": self.filter, "editing": self.editing,
         }

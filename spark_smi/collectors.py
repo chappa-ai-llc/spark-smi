@@ -462,10 +462,51 @@ def _proc_name(pid):
     except Exception:
         return ""
 
-def _gpu_processes(handle):
+# Per-process utilization (#14 step 2): the time of the last read per GPU,
+# so each call asks NVML only for samples newer than the previous tick.
+_PUTIL_LAST = {}
+
+
+def _proc_util(handle, key):
+    """{pid: {"sm", "membw", "enc", "dec"}} from NVML's per-process
+    utilization samples since the last call for GPU `key`, newest sample
+    per pid. NVML answers NotFound when no process ran in the window: that
+    is "all idle" ({}), not "unsupported". None when the call is missing or
+    refused, so the caller leaves the columns out."""
+    fn = getattr(pynvml, "nvmlDeviceGetProcessUtilization", None)
+    if fn is None:
+        return None
+    now_us = int(time.time() * 1e6)
+    last = _PUTIL_LAST.get(key)
+    # A stale mark (page hidden, long -n) would return a burst of old
+    # samples; never look back more than 3 s.
+    since = last if last and now_us - last < 3_000_000 else now_us - 3_000_000
+    try:
+        samples = fn(handle, since)
+    except Exception as e:
+        if type(e).__name__ == "NVMLError_NotFound":
+            _PUTIL_LAST[key] = now_us
+            return {}
+        return None
+    _PUTIL_LAST[key] = now_us
+    out, stamp = {}, {}
+    for smp in samples or []:
+        pid = getattr(smp, "pid", None)
+        ts = getattr(smp, "timeStamp", 0) or 0
+        if pid is None or ts < stamp.get(pid, -1):
+            continue
+        stamp[pid] = ts
+        out[pid] = {k: int(getattr(smp, a, 0) or 0) for k, a in
+                    (("sm", "smUtil"), ("membw", "memUtil"), ("enc", "encUtil"), ("dec", "decUtil"))}
+    return out
+
+
+def _gpu_processes(handle, key=None):
     """Compute+graphics processes on this GPU, deduped by pid (a pid can
     appear in both lists on some drivers). Name via /proc/<pid>/comm,
-    falling back to the bare pid when that read fails (e.g. non-Linux)."""
+    falling back to the bare pid when that read fails (e.g. non-Linux).
+    With per-process utilization available, each also carries sm, membw,
+    enc and dec (percent); a process without a sample in the window is 0."""
     procs = {}
     for getter in (getattr(pynvml, "nvmlDeviceGetComputeRunningProcesses", None),
                    getattr(pynvml, "nvmlDeviceGetGraphicsRunningProcesses", None)):
@@ -484,7 +525,14 @@ def _gpu_processes(handle):
                     procs[pid] = used
         except Exception:
             pass
-    return [{"pid": pid, "name": _proc_name(pid), "mem": mem} for pid, mem in procs.items()]
+    util = _proc_util(handle, key) if key is not None and procs else None
+    out = []
+    for pid, mem in procs.items():
+        row = {"pid": pid, "name": _proc_name(pid), "mem": mem}
+        if util is not None:
+            row.update(util.get(pid) or {"sm": 0, "membw": 0, "enc": 0, "dec": 0})
+        out.append(row)
+    return out
 
 def _fmt_kbs(v):
     """KB/s (NVML's PCIe throughput unit) -> a short human string."""
@@ -606,11 +654,17 @@ def _cli_clock_available(idx):
     return False
 
 def _nvml_caps_probe(i, name):
-    caps = {"fan": False, "power_draw": False, "power_limit": False, "mem_local": True, "pcie": False, "clocks": False}
+    caps = {"fan": False, "power_draw": False, "power_limit": False, "mem_local": True, "pcie": False, "clocks": False,
+            "proc_util": False}
     try:
         h = pynvml.nvmlDeviceGetHandleByIndex(i)
     except Exception:
         return caps
+    try:
+        # NotFound (nothing ran lately) still proves the call works.
+        caps["proc_util"] = _proc_util(h, ("probe", i)) is not None
+    except Exception:
+        pass
     try:
         pynvml.nvmlDeviceGetFanSpeed(h)
         caps["fan"] = True
@@ -793,13 +847,21 @@ def _collect_gpus():
                     except Exception:
                         pass
                     try:
-                        gpu["procs"] = _gpu_processes(handle)
+                        gpu["procs"] = _gpu_processes(handle, i)
                     except Exception:
                         pass
 
                     nvml_success = True
                 except Exception:
                     nvml_success = False
+                # The block above stops at the first refused call. On the
+                # GB10 that is the memory query (unified memory), which used
+                # to drop its process list too; page 2 and page 5 need it.
+                if "procs" not in gpu:
+                    try:
+                        gpu["procs"] = _gpu_processes(pynvml.nvmlDeviceGetHandleByIndex(i), i)
+                    except Exception:
+                        pass
 
             # CLI fallback for the mostly-static STATE fields, only for
             # whatever NVML didn't come back with (verified need on GB10:

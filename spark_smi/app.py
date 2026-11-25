@@ -20,13 +20,14 @@ from . import node
 from . import pages
 from . import panels
 from . import shot
+from . import taskpage
 from . import tasks
 from . import term
 
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "5.0.1"
+    VERSION = "5.1.0"
 DEFAULT_REFRESH_RATE = 1.0
 HIST_LEN = 60
 # Local history kept for the big-screen layouts (#14): up to an hour at 1 s.
@@ -260,6 +261,10 @@ class State:
         # nothing for the /proc walk, and nothing about local pids ever
         # goes over the cluster wire format.
         self.tasks = tasks.TaskCollector()
+        # Page 5's per-process history and recently-ended list (#14 step 2):
+        # fed below from the GPU sample's own procs while a screen is drawn
+        # (want_long), so it runs on every page; read only by page 5.
+        self.proc_track = tasks.ProcTracker(HIST_LONG)
         self.cluster_hist = [deque(maxlen=HIST_LONG) for _ in self.cpu.clusters]
         self.gpu_hist = {}
         self.nic_hist = {}
@@ -475,6 +480,11 @@ class State:
 
         # Only the screen pays for the long copies; --serve/--json don't.
         long = self._long_history(cpu, gpus, nics, disks, thermal, power_rails) if self.want_long else None
+        if self.want_long:
+            try:
+                self.proc_track.update(gpus)
+            except Exception:
+                pass
 
         return {
             "long": long,
@@ -627,8 +637,10 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
             tree = state.tasks.sample(sample.get("gpus") or [], include_holders=include_holders)
         except Exception:
             tree = {"gpus": [], "n_procs": 0, "n_orphans": 0, "source": "none", "caps": {}}
+        view = task_ui.render_ctx() if task_ui is not None else {}
         try:
-            rows = tasks.flatten(tree)
+            rows = tasks.flatten(tree, sort=view.get("sort", "mem"), flat=view.get("flat", False),
+                                 filt=view.get("filter", ""))
         except Exception:
             rows = []
         task_ctx = None
@@ -637,9 +649,23 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
             task_ui.tick()
             task_ctx = task_ui.render_ctx()
         try:
-            built = pages.build_page5(sample, tree, rows, tier, draw_w, x0, height=height_hint or h,
-                                       ui=task_ctx, theme_toast=theme_toast, cluster_tabs=has_cluster,
-                                       has_perf=has_perf)
+            track = state.proc_track.snapshot()
+        except Exception:
+            track = None
+        sel = taskpage.selected_proc_row(rows, task_ctx)
+        try:
+            detail = tasks.proc_detail(sel["proc"]["pid"]) if sel else None
+        except Exception:
+            detail = None
+        # The big layout's charts are braille: other terminals keep the
+        # normal page, as page 1 does.
+        layout = bigpage.layout_for(w, height_hint or h, state.graphs) if term.BAR_STYLE == "eighths" else None
+        big = layout in ("large", "xl")
+        try:
+            built = taskpage.build_page5(sample, tree, rows, tier, w if big else draw_w, 0 if big else x0,
+                                         height=height_hint or h, ui=task_ctx, theme_toast=theme_toast,
+                                         cluster_tabs=has_cluster, has_perf=has_perf, track=track,
+                                         detail=detail, span=state.history, layout=layout)
         except Exception as e:
             err = panels.Panel(0, x0, draw_w, kind="plain")
             err.rows.append(([(f" page 5 render error: {type(e).__name__}: {str(e)[:80]}", 4)], []))
@@ -942,6 +968,14 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
                     break
                 time.sleep(0.05)
                 continue
+            # Page 5's `/` filter: while typing, every key is text (q
+            # included) until Enter keeps it or Esc clears it.
+            if state.page == 5 and task_ui.editing:
+                if ch != -1:
+                    task_ui.filter_key(ch)
+                    break
+                time.sleep(0.02)
+                continue
             if ch == ord('q'):
                 return
             if ch == ord('?'):
@@ -1007,6 +1041,16 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
                 task_ui.toggle_holders()
                 stdscr.clear()
                 break
+            elif state.page == 5 and ch == ord('s'):
+                task_ui.cycle_sort()
+                break
+            elif state.page == 5 and ch == ord('f'):
+                task_ui.toggle_flat()
+                stdscr.clear()
+                break
+            elif state.page == 5 and ch == ord('/'):
+                task_ui.start_filter()
+                break
             elif state.page == 5 and ch in (ord('o'), curses.KEY_ENTER, 10, 13):
                 spec = task_ui.open_spec()
                 if spec:
@@ -1021,7 +1065,9 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
                             pass
                     stdscr.clear()
                 break
-            elif state.page == 5 and ch == 27:  # Esc
+            elif state.page == 5 and ch == 27:  # Esc: cancel, else drop a kept filter
+                if not task_ui.confirming and task_ui.filter:
+                    task_ui.filter = ""
                 task_ui.cancel()
                 break
             if ch == 27 and cluster_ui and cluster_ui.drilldown:  # Esc: drilldown -> back to page 3

@@ -2,7 +2,7 @@
 
 > A terminal-based system monitor (TUI) built for **NVIDIA Grace Blackwell (GB10)** and hybrid ARM architectures — because `nvidia-smi` alone doesn't tell the full story.
 
-![Version](https://img.shields.io/badge/version-5.0.1-blue)
+![Version](https://img.shields.io/badge/version-5.1.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8%2B-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Linux%20aarch64-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -102,7 +102,26 @@ holding a GPU context, as a tree. Each GPU is a root; below it, processes are
 grouped by where they live — a tmux pane, a screen session, a docker
 container, a systemd unit, an ssh login or a plain terminal — and processes
 whose parent or login session is gone are flagged **orphaned**. Columns show
-the user, CPU, resident memory, GPU memory and age (fewer at narrow widths).
+the user, each process's own **SM %** and **encoder / decoder %**, CPU,
+resident memory, GPU memory and age (fewer at narrow widths), plus a
+two-minute SM sparkline on wide terminals. SM, ENC and DEC appear only where
+the driver reports them per process (NVML's process utilization). `s` sorts
+by GPU memory, SM, CPU, run time or PID; `f` switches between the session
+tree and one flat list per GPU; `/` filters by PID, name, command line, user
+or session (`Enter` keeps the filter, `Esc` clears it).
+
+Below the tree, a **PROCESS** pane describes the selected process: its full
+command line, session, user and parent, start time and threads, working
+folder, the GPU-selection variables `CUDA_VISIBLE_DEVICES`,
+`NVIDIA_VISIBLE_DEVICES`, `CUDA_DEVICE_ORDER`, `NCCL_IB_HCA` and
+`NCCL_SOCKET_IFNAME` (no other variable is ever read out), the GPU and RDMA
+device files it holds open, and charts of its SM, GPU memory and CPU. For
+another user's process the folder, variables and device files need root,
+and the pane says so. A **RECENTLY ENDED** list keeps the last hour of
+processes that left a GPU, with how long each ran and its peak SM and
+memory. The history behind the charts and that list is kept in memory from
+the moment spark-smi starts, on every page, and never goes over the network.
+
 `Enter` opens the selected session (attaches to the tmux pane or screen
 session, or tails the unit's journal or the container's log); `e` ends a
 process or a whole session through its own manager (`tmux kill-pane`,
@@ -168,6 +187,11 @@ columns, when it fits), and **compact** (the normal page at any size).
 `--graphs` and `--history` set the same from the command line. spark-smi
 remembers your last `g` and `+`/`-` choice in
 `~/.config/spark-smi/settings.json` (or under `$XDG_CONFIG_HOME`).
+
+Page 5 has a big layout at the same sizes: one card per GPU across the top,
+each charting **SM by process** (the three busiest) and **GPU memory by
+process**, stacked, so a steady climb shows a leak; below them the task tree
+with its SM sparklines, and the PROCESS pane with its charts on the right.
 
 Below 200 columns, and in a node drilldown on a smaller terminal, page 1 is
 the same as before. A drilldown into a remote node on a big terminal uses
@@ -359,8 +383,8 @@ directory, plus ASIC temperature from the NIC's own hwmon device.
 | `?` | all | Toggle the help overlay (any key dismisses it) |
 | `n` | 1 | Show active NICs only |
 | `s` | 1 | Sort NIC rows by current rate (max of RX/TX), descending — toggle back to detection order |
-| `g` | 1 | Graph size: auto / large / compact (see "Big screens"); remembered |
-| `+` / `-` | 1 | History window of the big layouts' charts: 1m, 5m, 10m, 30m, 1h; remembered |
+| `g` | 1 / 5 | Graph size: auto / large / compact (see "Big screens"); remembered |
+| `+` / `-` | 1 / 5 | History window of the big layouts' charts: 1m, 5m, 10m, 30m, 1h; remembered |
 | `Tab` | 2 | Select GPU (when more than one) |
 | `P` | 2 | Focus/cycle the power-limit knob (GPU limit → PL1 → PL2 → SYSPL1 → SYSPL2, as available) |
 | `C` / `M` | 2 | Focus the SM / memory clock-lock knob |
@@ -382,7 +406,10 @@ directory, plus ASIC temperature from the NIC's own hwmon device.
 | `e` | 5 | End the selected process (SIGTERM) or session (its manager's stop) — raises a `y`/`N` confirm |
 | `k` | 5 | Kill the selected process or session (SIGKILL / `docker kill` / `systemctl kill`) — raises a `y`/`N` confirm |
 | `a` | 5 | Also list processes that only hold `/dev/nvidia*` open |
-| `Esc` | 5 | Cancel the pending confirm |
+| `s` | 5 | Sort processes: GPU memory / SM % / CPU % / run time / PID |
+| `f` | 5 | Flat list per GPU (the session shows in brackets) / back to the session tree |
+| `/` | 5 | Filter by PID, name, command line, user or session; type, then `Enter` keeps it, `Esc` clears it |
+| `Esc` | 5 | Cancel the pending confirm, else clear the filter |
 
 Page 5 can end other people's work: `e` and `k` stop running GPU jobs, and
 unsaved work in them is lost. Nothing is signalled until you press `y` at the
@@ -1008,7 +1035,7 @@ all fixed in 4.0 — see the [changelog](CHANGELOG.md).
 - [X] **Page 2 advanced panels + power/clock knobs** — per-GPU detail, per-PF RDMA counters, thermal/SMART, interactive power/clock control
 - [X] **Multi-node Support** — Monitor clustered DGX Spark nodes from a single dashboard (cluster mode, pages 3-4)
 - [X] **Big-screen page 1** — dials, charts with axes and up to an hour of history on terminals of 200+ columns (5.0)
-- [ ] **Fuller GPU task manager** — per-process SM %, GPU memory, encoder/decoder and history on page 5 ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14))
+- [X] **Fuller GPU task manager** — per-process SM %, encoder/decoder, a detail pane, history charts, a recently-ended list, sort and filter on page 5 (5.1)
 - [ ] **Big-screen cluster page** — cluster dials, a telemetry column per node and a GPU heat grid on page 3 ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14))
 
 ---
