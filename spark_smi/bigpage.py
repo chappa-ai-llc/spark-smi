@@ -173,7 +173,7 @@ def _dials(state, long):
     if fab:
         cap = sum(n.get("speed_mbit") or 0 for n in fab) * 1e6
         rate = sum(max(n.get("rx_bps") or 0, n.get("tx_bps") or 0) for n in fab)
-        out.append((rate / cap if cap else 0, f"{rate / 1e9:.0f}G", f"of {cap / 1e9:.0f} Gb/s", "FABRIC", None))
+        out.append((rate / cap if cap else 0, term.fmt_rate(rate, "bit"), f"of {cap / 1e9:.0f} Gb/s", "FABRIC", None))
     temps = []
     for t in state.get("thermal") or []:
         if isinstance(t.get("temp_c"), (int, float)):
@@ -264,13 +264,27 @@ def _build_cpu(y, x0, w, state, long, cpu_h, mem_h, heat_rows, span, measure):
         p.add_row(_axis_row(inner - 1, span, measure))
     cores = (long or {}).get("core") or {}
     if heat_rows and cores:
+        # Every core or none: a partial list reads as missing sensors. Short
+        # on rows, the cores wrap into side-by-side columns, read downwards.
+        idxs = sorted(cores)
+        ncol = -(-len(idxs) // heat_rows)
+        cw = (inner - 1) // ncol
+        digits = len(str(idxs[-1]))
         p.add_row([(1, "per-core load", 6)], right=[("· idle ", 7), ("▆", 12), ("▆", 15), (" busy", 6)])
-        for idx in sorted(cores)[:heat_rows]:
+        for r in range(heat_rows):
             if measure:
                 p.add_row([])
                 continue
-            runs = term.heat_runs(_window(cores[idx], span), inner - 9, window=_w(span)) or []
-            p.add_row([(1, f"core {idx:>2} ", 6)] + _row(None, runs))
+            segs = []
+            for c in range(ncol):
+                k = c * heat_rows + r
+                if k >= len(idxs):
+                    break
+                x = 1 + c * cw
+                cells = (cw - 2 if c < ncol - 1 else inner - x) - (6 + digits)
+                runs = term.heat_runs(_window(cores[idxs[k]], span), cells, window=_w(span)) or []
+                segs += [(x, f"core {idxs[k]:>{digits}} ", 6)] + _row(None, runs)
+            p.add_row(segs)
     out.append(p)
     y += p.total_height
 
@@ -476,6 +490,34 @@ def _build_net(y, x0, w, state, long, net_half, disk_half, span, measure):
 
 # --- assembly -------------------------------------------------------------------
 
+def _columns(state, width, layout):
+    """(has_gpus, has_pt, column widths) of the body for this layout."""
+    has_gpus = bool(state.get("gpus"))
+    has_pt = layout == "xl" and bool(state.get("power_rails") or state.get("thermal"))
+    n_cols = 1 if layout == "tall" else (2 + (1 if has_pt else 0))
+    if not has_gpus and n_cols > 1:
+        n_cols -= 1
+    col_w = width // n_cols
+    return has_gpus, has_pt, [col_w] * (n_cols - 1) + [width - col_w * (n_cols - 1)]
+
+
+_HEAT_MIN_CELLS = 16   # history cells per core, the least that reads as a trend
+
+
+def _heat_steps(n_cores, col_w):
+    """Row counts the heatmap may take: each one shows every core, in as
+    few side-by-side columns as that many rows needs, each column at
+    least _HEAT_MIN_CELLS wide. Ascending; empty when none fits."""
+    inner = col_w - 2
+    digits = len(str(max(0, n_cores - 1)))
+    steps = set()
+    for ncol in range(1, n_cores + 1):
+        if (inner - 1) // ncol - 2 - (6 + digits) < _HEAT_MIN_CELLS:
+            break
+        steps.add(-(-n_cores // ncol))
+    return sorted(steps)
+
+
 def _assemble(state, width, height, x0, layout, span, v, measure, dials_on, header_kw, footer_kw, graphs, pad=0):
     """One pass: every panel at the chart heights in `v`. Returns (panels,
     rows used including header and footer)."""
@@ -489,15 +531,9 @@ def _assemble(state, width, height, x0, layout, span, v, measure, dials_on, head
         if strip is not None:
             out.append(strip)
             y += strip.total_height + 1
-    has_gpus = bool(state.get("gpus"))
-    want_pt = layout == "xl"
-    has_pt = want_pt and bool(state.get("power_rails") or state.get("thermal"))
-    n_cols = 1 if layout == "tall" else (2 + (1 if has_pt else 0))
-    if not has_gpus and n_cols > 1:
-        n_cols -= 1
-    col_w = width // n_cols
-    xs = [x0 + i * col_w for i in range(n_cols)]
-    widths = [col_w] * (n_cols - 1) + [width - col_w * (n_cols - 1)]
+    has_gpus, has_pt, widths = _columns(state, width, layout)
+    n_cols = len(widths)
+    xs = [x0 + i * widths[0] for i in range(n_cols)]
 
     cpu_p, cpu_h = _build_cpu(y, xs[0], widths[0], state, long, v["cpu"], v["mem"],
                               v["heat"] if layout == "xl" else 0, span, measure)
@@ -541,7 +577,7 @@ def _assemble(state, width, height, x0, layout, span, v, measure, dials_on, head
 
 _MIN = {"cpu": 3, "mem": 0, "gpu": 3, "pwr": 0, "net": 1, "disk": 1, "heat": 0, "rail": 0}
 _TALL_MIN = {"cpu": 2, "gpu": 2}
-_MAX = {"cpu": 12, "mem": 4, "gpu": 16, "pwr": 6, "net": 4, "disk": 3, "heat": 64, "rail": 10}
+_MAX = {"cpu": 12, "mem": 4, "gpu": 16, "pwr": 6, "net": 4, "disk": 3, "rail": 10}
 _GROW = ["gpu", "cpu", "net", "pwr", "heat", "heat", "heat", "heat", "mem", "rail", "gpu", "cpu", "disk"]
 
 
@@ -580,16 +616,26 @@ def build_page1_large(state, width, height, x0=0, layout="large", history=None, 
         if not fits(v, dials_on):
             _FIT_CACHE[key] = None
             return None
+    heat_steps = []
+    if layout == "xl":
+        cores = (state.get("long") or {}).get("core") or {}
+        heat_steps = _heat_steps(len(cores), _columns(state, width, layout)[2][0]) if cores else []
     grown = True
     while grown:
         grown = False
         for k in _GROW:
-            if v[k] >= _MAX[k]:
-                continue
-            step = 1
-            if k in ("mem", "pwr", "rail") and v[k] == 0:
-                step = 2   # a 1-row chart under its own label reads as noise
-            trial = dict(v, **{k: v[k] + step})
+            if k == "heat":
+                nxt = [r for r in heat_steps if r > v[k]]
+                if not nxt:
+                    continue
+                trial = dict(v, heat=nxt[0])
+            else:
+                if v[k] >= _MAX[k]:
+                    continue
+                step = 1
+                if k in ("mem", "pwr", "rail") and v[k] == 0:
+                    step = 2   # a 1-row chart under its own label reads as noise
+                trial = dict(v, **{k: v[k] + step})
             if fits(trial, dials_on):
                 v = trial
                 grown = True

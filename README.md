@@ -152,7 +152,9 @@ whole screen:
 - At **300 columns or more** (about a 1440p monitor), a third column,
   **POWER & THERMAL**, lists every power rail and temperature sensor with
   its own history, and the CPU panel adds a per-core heatmap: one row per
-  core, so a pinned core shows as a bright streak.
+  core, so a pinned core shows as a bright streak. It always lists every
+  core: when the column is short, the cores wrap into two or more
+  side-by-side columns, and with no room for all of them it is left out.
 
 Charts start at a few rows and grow until the page fills the terminal, so
 no row is left blank. They show the last **5 minutes** (10 at 300+

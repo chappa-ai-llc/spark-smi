@@ -6,6 +6,7 @@ import os
 import stat
 import sys
 import tempfile
+import re
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -175,6 +176,23 @@ class BuildTest(Eighths):
         self.assertIn("THERMAL", joined)
         self.assertIn("per-core load", joined)
 
+    def test_heatmap_lists_every_core(self):
+        """Live at 320x90 the heatmap stopped at core 8 of 20 (5.0.0)."""
+        for h in (60, 70, 90, 120):
+            built = bigpage.build_page1_large(sample(), 320, h, 0, "xl")
+            if built is None:
+                continue
+            joined = "\n".join(render(built, 320, h))
+            if "per-core load" not in joined:
+                continue
+            shown = {i for i in range(20) if re.search(rf"core {i:>2} ", joined)}
+            self.assertEqual(shown, set(range(20)), f"height {h}")
+
+    def test_heat_steps(self):
+        self.assertEqual(bigpage._heat_steps(20, 106), [7, 10, 20])
+        self.assertEqual(bigpage._heat_steps(20, 20), [])
+        self.assertEqual(bigpage._heat_steps(0, 106), [])
+
     def test_no_gpu_no_gpu_column(self):
         rows = self.check_fills(sample(gpus=False), 240, 67, "large")
         self.assertFalse(any("GPU 0" in r for r in rows))
@@ -192,6 +210,17 @@ class BuildTest(Eighths):
     def test_ascii_tier_returns_none(self):
         with mock.patch.object(term, "BAR_STYLE", "ascii"):
             self.assertIsNone(bigpage.build_page1_large(sample(), 240, 67, 0, "large"))
+
+    def test_fabric_dial_names_its_unit(self):
+        """A quiet fabric reads "0 Mb/s", not a unitless "0G" (found live, 5.0.0)."""
+        s = sample()
+        for n in s["nics"]:
+            n["rx_bps"] = n["tx_bps"] = 0
+        fab = [d for d in bigpage._dials(s, s["long"]) if d[3] == "FABRIC"]
+        self.assertEqual(fab[0][1], "0 Mb/s")
+        s["nics"][0]["rx_bps"] = 4e10
+        fab = [d for d in bigpage._dials(s, s["long"]) if d[3] == "FABRIC"]
+        self.assertEqual(fab[0][1], "40.0 Gb/s")
 
     def test_history_label_in_strip(self):
         built = bigpage.build_page1_large(sample(), 240, 67, 0, "large", history=1800)

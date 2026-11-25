@@ -20,7 +20,8 @@ Page 1 uses the whole screen on big terminals ([#14](https://github.com/chappa-a
   axis and a time axis, and charts grow until the page fills the terminal.
 - At 300 columns or more, a **POWER & THERMAL** column (every power rail
   and temperature sensor, each with its history) and a **per-core heatmap**
-  under the CPU charts.
+  under the CPU charts. The heatmap lists every core or none, wrapping into
+  side-by-side columns when the column is short.
 - **History windows:** the big layouts chart the last 5 minutes (10 at 300+
   columns). `+` and `-` step through 1, 5, 10, 30 minutes and 1 hour.
   spark-smi keeps up to an hour of history in memory.
