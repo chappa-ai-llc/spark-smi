@@ -26,7 +26,7 @@ from . import term
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "5.0.0"
+    VERSION = "5.0.1"
 DEFAULT_REFRESH_RATE = 1.0
 HIST_LEN = 60
 # Local history kept for the big-screen layouts (#14): up to an hour at 1 s.
@@ -91,6 +91,7 @@ Usage: spark-smi [options]
                    With 2+ members, page 4 (fabric validation) becomes
                    available too -- see README's "Fabric validation" section
   -h, --help       show this help and exit
+  -V, --version    print the version and exit
 
 Themes: {", ".join(term.THEMES)}, cycled live with the 'c' key.
 "terminal" uses your terminal's own 16 colours. $SPARK_SMI_THEME sets the
@@ -158,7 +159,7 @@ def _parse_args(argv):
             "theme": None, "theme_list": False, "json": False, "serve": None,
             "serve_verbose": False, "cluster": _UNSET, "node_name": None,
             "shot": None, "size": None, "warmup": 0.0, "background": None,
-            "graphs": None, "history": None}
+            "graphs": None, "history": None, "version": False, "unknown": None}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -227,8 +228,14 @@ def _parse_args(argv):
             i += 1
         elif a in ("-h", "--help"):
             opts["help"] = True
-        # --ascii is read directly from sys.argv by term._detect_bar_style()
-        # at import time; nothing to do with it here.
+        elif a in ("-V", "--version"):
+            opts["version"] = True
+        elif a == "--ascii":
+            pass  # read directly from sys.argv by term._detect_bar_style() at import
+        elif opts["unknown"] is None:
+            # The first thing not understood (a typo'd option, a stray
+            # word): main() refuses to run rather than guess (issue #15).
+            opts["unknown"] = a
         i += 1
     return opts
 
@@ -1265,6 +1272,13 @@ def _live_shot_name(page):
 def main():
     argv = sys.argv[1:]
     opts = _parse_args(argv)
+    if opts["unknown"] is not None:
+        what = "unknown option" if opts["unknown"].startswith("-") else "unexpected argument"
+        print(f"spark-smi: {what} {opts['unknown']!r}; spark-smi --help lists the options", file=sys.stderr)
+        sys.exit(1)
+    if opts["version"]:
+        print(f"spark-smi {VERSION}")
+        return
     if opts["theme_list"]:
         for name in term.THEMES:
             print(name)

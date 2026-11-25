@@ -2,7 +2,7 @@
 
 > A terminal-based system monitor (TUI) built for **NVIDIA Grace Blackwell (GB10)** and hybrid ARM architectures — because `nvidia-smi` alone doesn't tell the full story.
 
-![Version](https://img.shields.io/badge/version-5.0.0-blue)
+![Version](https://img.shields.io/badge/version-5.0.1-blue)
 ![Python](https://img.shields.io/badge/python-3.8%2B-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Linux%20aarch64-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -504,7 +504,11 @@ spark-smi [options]
                    "@file" -- one entry per line, # comments). Bare
                    --cluster (no value) tries ~/.config/spark-smi/cluster
   -h, --help       show this help and exit
+  -V, --version    print the version and exit
 ```
+
+An option spark-smi does not know, or a stray word, stops it with a one-line
+message naming it (exit code 1), so a typo never quietly runs another mode.
 
 Snapshot mode (no `-l`) renders once and prints ANSI to stdout — pipe it, log
 it, script it, same as `nvidia-smi`.
