@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.5.0] — 2026-11-25
+
+Page 4 on big screens ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14)).
+
+### Added
+
+- **Big-screen page 4** (200+ columns, 45+ rows, 2+ cluster members):
+  FABRIC TEST across the top; the per-rail BANDWIDTH chart as tall as the
+  page allows, beside RAILS and FABRIC NOW (every node's fabric traffic in
+  and out over the history window); the all-pairs MATRIX beside RUN
+  HISTORY (the newest results, newest first). The page fills the terminal
+  exactly. Smaller terminals and terminals without braille keep the normal
+  page 4. Runs stay behind the same confirm.
+
+### Changed
+
+- Page 4's footer shows the `c`, `g` and `+`/`-` settings toasts, as the
+  other pages do.
+
 ## [5.4.0] — 2026-11-25
 
 Page 2 on big screens ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14)).
@@ -548,6 +567,7 @@ is still there, on page 1.
 
 - Initial public release.
 
+[5.5.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.5.0
 [5.4.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.4.0
 [5.3.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.3.0
 [5.2.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.2.0
