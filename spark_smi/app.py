@@ -16,6 +16,7 @@ from . import bigpage
 from . import cluster
 from . import clusterpage
 from . import collectors
+from . import fabpage
 from . import fabtest
 from . import knobs
 from . import node
@@ -29,7 +30,7 @@ from . import term
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "5.4.0"
+    VERSION = "5.5.0"
 DEFAULT_REFRESH_RATE = 1.0
 HIST_LEN = 60
 # Local history kept for the big-screen layouts (#14): up to an hour at 1 s.
@@ -652,8 +653,24 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
         ctx = {"name": cluster_ctx.get("name", "cluster") if has_cluster else "cluster",
                "views": views, "rate": state.rate, "fab": fab_render_ctx,
                "engine_status": engine_status, "last_run": last_run, "matrix": matrix}
+        # Big terminals (#14): a tall bandwidth chart, every node's fabric
+        # traffic and the run history; None falls back to the normal page.
+        layout = bigpage.layout_for(w, height_hint or h, state.graphs) if term.BAR_STYLE == "eighths" else None
+        built = None
+        if layout in ("large", "xl"):
+            try:
+                runs = fabtest.load_recent_runs(60)
+            except Exception:
+                runs = []
+            try:
+                built = fabpage.build_page4_large(ctx, w, height_hint or h, 0, layout, history=state.history,
+                                                  runs=runs, theme_toast=theme_toast)
+            except Exception:
+                built = None
         try:
-            built = pages.build_page4(ctx, tier, draw_w, x0, height=height_hint or h)
+            if built is None:
+                built = pages.build_page4(ctx, tier, draw_w, x0, height=height_hint or h,
+                                          theme_toast=theme_toast)
         except Exception as e:
             # never a black screen: a build crash renders as one visible line
             # (the live-series shape bug hid behind a bare `built = []` here)

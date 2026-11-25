@@ -2,7 +2,7 @@
 
 > A terminal-based system monitor (TUI) built for **NVIDIA Grace Blackwell (GB10)** and hybrid ARM architectures — because `nvidia-smi` alone doesn't tell the full story.
 
-![Version](https://img.shields.io/badge/version-5.4.0-blue)
+![Version](https://img.shields.io/badge/version-5.5.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8%2B-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Linux%20aarch64-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -244,6 +244,21 @@ node's sample already carries. The map or the heat grid is left out when the
 terminal is too short for them; with more than 16 nodes, page 3 keeps its
 fleet matrix.
 
+Page 4 (fabric validation) has one too:
+
+- **FABRIC TEST** across the top, the same controls as the normal page.
+- **BANDWIDTH**, the per-rail chart of the running or last pair, as tall
+  as the page allows, beside **RAILS** (the last run's result per rail)
+  and **FABRIC NOW**: every node's fabric traffic in and out over the
+  history window, so a test's load, or anyone else's, shows on every node
+  at once.
+- **MATRIX**, the all-pairs grid, beside **RUN HISTORY**: the newest
+  results from the results file, newest first, with each run's total, its
+  slowest and fastest rail and its round trip.
+
+The page only displays, as before: a run still starts with `space` and a
+`y` at the confirm.
+
 Below 200 columns, and in a node drilldown on a smaller terminal, page 1 is
 the same as before. A drilldown into a remote node on a big terminal uses
 the big layout with that node's last minute of history; the long history is
@@ -341,7 +356,7 @@ resize the window and it adapts live, no restart needed:
 | `compact` | < 84 cols | Condensed layout: two NIC/disk entries per cell-row, GPU fields folded onto fewer lines. |
 | `standard` | 84–110 cols | Full field set, but GPU cards and THERMALS/SMART stack full-width instead of side-by-side. |
 | `wide` | > 110 cols | The full multi-column layout; content is capped at 160 columns and centered on wider terminals. |
-| `large` | ≥ 200 cols, ≥ 45 rows | Pages 1, 2, 3 and 5: dial strips, charts with axes and minutes of history across the full width (see "Big screens"). |
+| `large` | ≥ 200 cols, ≥ 45 rows | Pages 1 to 5: dial strips, charts with axes and minutes of history across the full width (see "Big screens"). |
 | `xl` | ≥ 300 cols, ≥ 45 rows | `large` plus, on page 1, a POWER & THERMAL column and a per-core heatmap. |
 
 Resizing is live — the same running process, no restart, reflowing between
@@ -856,6 +871,13 @@ with 4.3 after a 10-second all-pairs sweep, saved with the live `S` key.
 
 ![Page 4 fabric validation](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page4-fabric.png)
 
+**Page 4 on an ultrawide screen.** Two Sparks at 380 × 75 with one rail
+carrying a two-way RDMA run: the last pair's per-rail chart, every node's
+fabric traffic in and out, the matrix and the run history. Captured live
+with 5.5 and the `S` key; host names were replaced before publishing.
+
+![Page 4 on an ultrawide screen](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page4-ultrawide.png)
+
 **Page 5 — GPU tasks.** Every GPU process under its GPU, grouped by where it
 runs: a tmux server, a docker container, the desktop's terminal. The eGPU
 and the GB10 each get their own tree, with each process's SM %, a
@@ -1131,6 +1153,7 @@ all fixed in 4.0 — see the [changelog](CHANGELOG.md).
 - [X] **Fuller GPU task manager** — per-process SM %, encoder/decoder, a detail pane, history charts, a recently-ended list, sort and filter on page 5 (5.1)
 - [X] **Big-screen cluster page** — cluster dials, a telemetry column per node and a GPU heat grid on page 3 (5.2); up to 16 nodes with memory and temperature charts for ultrawide and 4K (5.3)
 - [X] **Big-screen advanced page** — clock, power, temperature, PCIe, per-port fabric and congestion charts, a thermal heat grid and wall power on page 2 (5.4)
+- [X] **Big-screen fabric page** — a tall per-rail chart, every node's fabric traffic and the run history on page 4 (5.5)
 - [ ] **Other nodes' GPU tasks** — page 5 for a remote node, opt-in on its agent, arguments hidden by default ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14))
 
 ---

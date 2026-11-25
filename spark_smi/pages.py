@@ -18,7 +18,7 @@ from . import topomap
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "5.4.0"
+    VERSION = "5.5.0"
 
 # The header shows the major.minor series ("4.0"). Derived from VERSION rather
 # than written out, because a hardcoded literal here silently drifted a whole
@@ -3114,7 +3114,7 @@ def _build_matrix_panel(y, x0, width, fab_ctx, worst_only=False):
     return p
 
 
-def build_page4(fab_ctx, tier, width, x0=0, height=None):
+def build_page4(fab_ctx, tier, width, x0=0, height=None, theme_toast=None):
     """Builds page 4: header (4-tab), FABRIC TEST control panel, BANDWIDTH
     chart, RAILS results, all-pairs MATRIX, footer. Requires >=2 cluster
     members to do anything useful (a single node has no peer to test
@@ -3172,17 +3172,19 @@ def build_page4(fab_ctx, tier, width, x0=0, height=None):
     matrix_panel = _build_matrix_panel(y, x0, width, fab_ctx, worst_only=matrix_worst_only)
     out.append(matrix_panel); y += matrix_panel.total_height + 1
 
-    out.append(page4_footer(fab_ctx, x0, width, y))
+    out.append(page4_footer(fab_ctx, x0, width, y, theme_toast))
     return out
 
 
-def page4_footer(fab_ctx, x0, width, y):
-    """Page 4's footer (both layouts): the keys, or the run's toast."""
+def page4_footer(fab_ctx, x0, width, y, theme_toast=None):
+    """Page 4's footer (both layouts): the keys, or the run's toast, or a
+    settings toast (theme, graphs, history)."""
     keys = " space start/stop · m mode · d duration · ↑↓ pair · 1-5 page"
     fab = fab_ctx.get("fab")
     fp = panels.Panel(y, x0, width, kind="plain")
-    if fab and fab.get("toast"):
-        text, slot = fab["toast"]
+    toast = (fab or {}).get("toast") or theme_toast
+    if toast:
+        text, slot = toast
         fp.rows.append(([(f" {text}", slot)], []))
     else:
         fp.rows.append(([(keys, 9)], [("saturates the fabric — confirm-gated", 6)]))

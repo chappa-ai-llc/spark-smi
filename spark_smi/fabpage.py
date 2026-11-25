@@ -20,8 +20,10 @@ from . import advpage, bigpage, pages, panels, term
 
 LEFT_SHARE = 0.62       # BANDWIDTH's and MATRIX's share of the width
 RIGHT_MIN = 72
+HISTORY_MIN = 10        # RUN HISTORY rows kept before the chart grows past its minimum
 _MIN = {"chart": 6, "now": 1}
-_MAX = {"chart": 40, "now": 4}
+_MAX = {"chart": 32, "now": 6}
+CHART_SHARE = 0.42      # on tall screens the chart may take this share of the height
 _GROW = ["chart", "now", "chart", "chart", "now", "chart", "now"]
 
 
@@ -105,7 +107,7 @@ def _build_history(y, x, w, runs, rows):
     return p
 
 
-def build_page4_large(fab_ctx, width, height, x0=0, layout="large", history=None, runs=None):
+def build_page4_large(fab_ctx, width, height, x0=0, layout="large", history=None, runs=None, theme_toast=None):
     """Page 4 for a big terminal, exactly `height` rows; None when it does
     not apply (fewer than two members, no braille) or nothing fits."""
     views = fab_ctx.get("views") or []
@@ -131,22 +133,34 @@ def build_page4_large(fab_ctx, width, height, x0=0, layout="large", history=None
         right = rails_rows + 2 + now_rows(len(members), right_w - 2, v["now"]) + 2
         return max(bw_rows(v) + 2, right)
 
-    def total(v):
-        return 1 + 1 + ft_rows + 2 + mid_rows(v) + matrix_rows + 2
+    bottom_min = max(matrix_rows, min(max(1, len(runs)), HISTORY_MIN))
 
+    def total(v):
+        return 1 + 1 + ft_rows + 2 + mid_rows(v) + bottom_min + 2
+
+    limit = dict(_MAX, chart=max(_MAX["chart"], int(height * CHART_SHARE)))
     v = dict(_MIN)
-    if total(v) > height:
+    if 1 + 1 + ft_rows + 2 + mid_rows(v) + matrix_rows + 2 > height:
         return None
+    if total(v) > height:          # short screen: the history gets what is left
+        bottom_min = matrix_rows
     grown = True
     while grown:
         grown = False
         for key in _GROW:
-            if v[key] >= _MAX[key]:
+            if v[key] >= limit[key]:
                 continue
             trial = dict(v, **{key: v[key] + 1})
             if total(trial) <= height:
                 v = trial
                 grown = True
+    # Rows the bottom row cannot use (few results recorded) go to the chart.
+    bottom_min = max(bottom_min, matrix_rows, len(runs))
+    while v["chart"] < height and total(dict(v, chart=v["chart"] + 1)) <= height:
+        v["chart"] += 1
+    # A chart taller than RAILS + FABRIC NOW: the node charts grow into the gap.
+    while v["now"] < height and mid_rows(dict(v, now=v["now"] + 1)) == mid_rows(v):
+        v["now"] += 1
 
     out = [pages._build_header(x0, width, "wide", page=4, cluster_tabs=True,
                                cluster_summary=f"{fab_ctx.get('name', 'cluster')} — fabric validation",
@@ -165,7 +179,7 @@ def build_page4_large(fab_ctx, width, height, x0=0, layout="large", history=None
     rp = _top(pages._build_rails_panel(y, rx, right_w, fab_ctx))
     out.append(rp)
     ny = y + rp.total_height + 1
-    np_ = panels.Panel(ny, rx, right_w, title=[("FABRIC NOW", 9), (" every node, in ▼ out ▲", 3)],
+    np_ = panels.Panel(ny, rx, right_w, title=[("FABRIC NOW", 9), (" every node · in ▼ above, out ▲ below", 3)],
                        title_right=[("history ", 6), (term.fmt_span(span), 3)], kind="top")
     advpage._grid(np_, _now_cells(members, span, v["now"]), right_w - 2, span)
     while ny + np_.total_height < y + mid_h:
@@ -179,5 +193,5 @@ def build_page4_large(fab_ctx, width, height, x0=0, layout="large", history=None
         mp.add_row([])
     out.append(mp)
     out.append(_build_history(y, rx, right_w, runs, bottom_h))
-    out.append(pages.page4_footer(fab_ctx, x0, width, height - 1))
+    out.append(pages.page4_footer(fab_ctx, x0, width, height - 1, theme_toast))
     return out
