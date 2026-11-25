@@ -138,7 +138,7 @@ before. A disk's usage bar moves under its name.
 
 On a terminal of **200 columns and 45 rows or more** (a full-screen terminal on
 a 1080p monitor is about 240 × 67), page 1 stops at no width cap and uses the
-whole screen:
+whole screen (a live capture is under "Screenshots"):
 
 - **AT A GLANCE**: a strip of dials across the top: CPU, memory, each GPU's
   utilization and power, system power (with the `spbm` driver), fabric
@@ -703,6 +703,15 @@ into process/GPU/cache segments, both GPUs side by side, and mirrored
 upload/download history for every NIC port and disk.
 
 ![Page 1 overview](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page1-overview.png)
+
+**Page 1 on a big screen.** The same page in a 240 × 67 terminal (full
+screen at 1080p): the AT A GLANCE dials, then each CPU cluster and each GPU
+charted over the last 10 minutes (`+` raised it from the default 5),
+with value and time axes, and a mirrored
+chart for every port and disk. Here the RTX 3090 eGPU runs a job near its
+350 W limit while the GB10 idles. Captured live with 5.0 and the `S` key.
+
+![Page 1 on a big screen](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page1-big.png)
 
 **Page 2 — Advanced.** Per-GPU clocks/PCIe/throttle/process detail, every
 PCIe endpoint's negotiated link state, per-PF RDMA and congestion counters,
