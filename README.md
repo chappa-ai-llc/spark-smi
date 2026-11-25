@@ -801,6 +801,17 @@ live with 5.2 and the `S` key; host names were replaced before publishing.
 
 ![Page 3 on a big screen](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page3-big.png)
 
+**Page 3 on an ultrawide screen.** The same two Sparks at 380 × 75, about
+a 3440 × 1440 monitor at full screen. Each column adds a memory chart, a
+HOTTEST chart and the three GPU processes using the most memory; node-1
+splits its GPU rows between the RTX 3090 and the GB10, so its column keeps
+the same charts as node-2's. The grid at the bottom is now HEAT, with a row
+per node for fabric use and for CPU under the GPU rows. Captured live with
+5.3 and the `S` key; host and process names were replaced before
+publishing.
+
+![Page 3 on an ultrawide screen](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page3-ultrawide.png)
+
 Nothing about that view is DGX-specific. It has run across a deliberately
 mismatched fleet — an x86_64 AMD EPYC server with no usable NVIDIA driver
 alongside two aarch64 Sparks — with 72 cores and 998 GiB summed across three
