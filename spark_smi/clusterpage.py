@@ -28,14 +28,22 @@ import time
 
 from . import bigpage, cluster, pages, panels, term, topomap
 
-MAX_NODES = 8
+MAX_NODES = 16
+MAX_GRID_ROWS = 4
 COL_MIN_W = 56          # a node column narrower than this cannot hold its charts
 DIAL_W = {"large": 16, "xl": 18}
+TOP_PROCS = 3
 
-_FLOOR = {"gpu": 6, "cpu": 3, "pwr": 2, "fab": 2}    # tried first
-_MIN = {"gpu": 3, "cpu": 2, "pwr": 0, "fab": 1}      # the least that still reads
-_MAX = {"gpu": 24, "cpu": 10, "pwr": 8, "fab": 6}
-_GROW = ["gpu", "cpu", "fab", "pwr", "gpu", "gpu", "cpu"]
+# Chart heights in rows ("fab" is each half of the mirror), the number of
+# process lines ("procs") and the heat grid's level ("heat": 0 none, 1 GPU
+# rows, 2 + fabric rows, 3 + CPU rows). Optional charts (pwr, mem, temp)
+# open at 2 rows: a one-row chart under its own label reads as noise.
+_FLOOR = {"gpu": 6, "cpu": 3, "pwr": 2, "fab": 2, "mem": 0, "temp": 0, "procs": 1, "heat": 1}
+_MIN = {"gpu": 3, "cpu": 2, "pwr": 0, "fab": 1, "mem": 0, "temp": 0, "procs": 1, "heat": 0}
+_MAX = {"gpu": 20, "cpu": 8, "pwr": 6, "fab": 6, "mem": 6, "temp": 6, "procs": TOP_PROCS, "heat": 3}
+_GROW = ["gpu", "cpu", "fab", "pwr", "gpu", "heat", "procs", "mem", "temp", "gpu", "heat", "fab", "cpu",
+         "procs", "gpu", "mem", "temp", "pwr"]
+_OPEN_AT_2 = ("pwr", "mem", "temp")
 
 _LW = bigpage._LABEL_W
 
@@ -70,13 +78,16 @@ def _sum_aligned(lists):
     return out
 
 
-def _top_proc(sample):
-    best = None
+def _top_procs(sample, n):
+    """The node's `n` GPU processes using the most GPU memory, busiest
+    first; a process on two GPUs counts once, with its larger figure."""
+    best = {}
     for g in sample.get("gpus") or []:
         for p in g.get("procs") or []:
-            if best is None or (p.get("mem") or 0) > (best.get("mem") or 0):
-                best = p
-    return best
+            pid = p.get("pid")
+            if pid not in best or (p.get("mem") or 0) > (best[pid].get("mem") or 0):
+                best[pid] = p
+    return sorted(best.values(), key=lambda p: -(p.get("mem") or 0))[:n]
 
 
 def node_info(view, m):
@@ -105,12 +116,20 @@ def node_info(view, m):
     info["fab_cap"] = sum((n.get("speed_mbit") or 0) for n in fab) * 1e6
     info["rx_hist"] = _series(view, "rx", _sum_aligned([n.get("rx_history") for n in fab]))
     info["tx_hist"] = _series(view, "tx", _sum_aligned([n.get("tx_history") for n in fab]))
-    info["proc"] = _top_proc(s)
+    info["procs"] = _top_procs(s, TOP_PROCS)
+    info["mem_hist"] = _series(view, "mem", m.get("mem_hist")) if m.get("mem_total") else []
+    temp = m.get("max_temp")
+    info["temp"] = temp if isinstance(temp, (int, float)) else None
+    info["temp_hist"] = _series(view, "temp", []) if info["temp"] is not None else []
     return info
 
 
+def _enough(series):
+    return len([v for v in series or [] if v is not None]) >= 2
+
+
 def _has_pwr_chart(info):
-    return len([v for v in info.get("pwr_hist") or [] if v is not None]) >= 2
+    return _enough(info.get("pwr_hist"))
 
 
 def column_rows(info, v):
@@ -120,30 +139,70 @@ def column_rows(info, v):
         return 2
     r = sum(1 + v["gpu"] for _ in info["gpus"]) or 1
     r += 1 + v["cpu"]
+    if v["mem"] and _enough(info.get("mem_hist")):
+        r += 1 + v["mem"]
+    if v["temp"] and _enough(info.get("temp_hist")):
+        r += 1 + v["temp"]
     if v["pwr"] and _has_pwr_chart(info):
         r += 1 + v["pwr"]
     if info["fab"]:
         r += 1 + 2 * v["fab"]
-    return r + 2     # time axis, top process
+    return r + 1 + max(1, min(v["procs"], len(info.get("procs") or [])))   # time axis, processes
 
 
 def grid_for(n, width):
-    """Node columns per row: everyone on one row up to four nodes (or when
-    each still gets 64 columns), else two rows; never under COL_MIN_W."""
-    per = n if (n <= 4 or width // max(1, n) >= 64) else math.ceil(n / 2)
-    while per > 1 and width // per < COL_MIN_W:
-        per -= 1
-    return max(1, per)
+    """Node columns per row: the fewest rows (up to MAX_GRID_ROWS) whose
+    columns are at least COL_MIN_W wide, nodes spread evenly over them. One
+    row of more than four nodes needs 64 columns each."""
+    for rows in range(1, MAX_GRID_ROWS + 1):
+        per = math.ceil(n / rows)
+        need = 64 if (rows == 1 and n > 4) else COL_MIN_W
+        if width // per >= need:
+            return per
+    return math.ceil(n / MAX_GRID_ROWS)
 
 
-def _heat_rows(infos):
+def _fabric_pct(info):
+    """Fabric use per poll as % of the node's fabric capacity (the busier
+    direction), for the heat grid."""
+    cap = info.get("fab_cap") or 0
+    if not cap:
+        return []
+    rx, tx = list(info.get("rx_hist") or []), list(info.get("tx_hist") or [])
+    n = max(len(rx), len(tx))
+    rx, tx = [None] * (n - len(rx)) + rx, [None] * (n - len(tx)) + tx
+    return [None if a is None and b is None else max(a or 0, b or 0) / cap * 100 for a, b in zip(rx, tx)]
+
+
+def heat_rows(infos, level):
+    """[(label, series), ...] for the heat grid: GPU rows (level 1+), then
+    one fabric row per node (2+), then one CPU row per node (3)."""
     rows = []
     for info in infos:
         multi = len(info["gpus"]) > 1
         for g in info["gpus"]:
-            label = f"{info['name']} {g['id']}" if multi else info["name"]
+            label = f"{info['name']} gpu{g['id']}" if multi else f"{info['name']} gpu"
             rows.append((label, g["hist"]))
-    return rows
+    if level >= 2:
+        rows += [(f"{i['name']} fab", _fabric_pct(i)) for i in infos if i["up"] and i.get("fab_cap")]
+    if level >= 3:
+        rows += [(f"{i['name']} cpu", i["cpu_hist"]) for i in infos if i["up"] and _enough(i.get("cpu_hist"))]
+    return rows if level else []
+
+
+def heat_levels(infos):
+    """The heat levels that add rows: GPU rows need two or more GPUs."""
+    out = [0]
+    gpu = heat_rows(infos, 1)
+    if len(gpu) >= 2:
+        out.append(1)
+        n = len(gpu)
+        for lvl in (2, 3):
+            k = len(heat_rows(infos, lvl))
+            if k > n:
+                out.append(lvl)
+                n = k
+    return out
 
 
 # --- dials ----------------------------------------------------------------------
@@ -276,11 +335,26 @@ def _build_column(y, x, w, info, v, span, selected, alerts, extra=0):
     if m.get("mem_total"):
         mr = [("MEM ", 6), (f"{m.get('mem_pct', 0):.0f}%", 8),
               (f" · {(m.get('mem_used') or 0) / 2**30:.0f}/{m['mem_total'] / 2**30:.0f} GiB", 3)]
-    p.add_row(bigpage._row(1, head), right=mr)
+    mem_chart = bool(v["mem"]) and _enough(info.get("mem_hist"))
+    p.add_row(bigpage._row(1, head), right=[] if mem_chart else mr)
     ch = v["cpu"] + (0 if n_g else extra)
     for r in bigpage._chart_rows(bigpage._window(info["cpu_hist"], span), cw, ch, 100, span,
                                  bigpage._pct_labels(ch), False):
         p.add_row(r)
+    if mem_chart:
+        win = bigpage._window(info["mem_hist"], span)
+        p.add_row(bigpage._row(1, mr), right=[("peak ", 6), (f"{max(_vals(win) or [0]):.0f}%", 3)])
+        for r in bigpage._chart_rows(win, cw, v["mem"], 100, span, bigpage._pct_labels(v["mem"]), False):
+            p.add_row(r)
+    if v["temp"] and _enough(info.get("temp_hist")):
+        win = bigpage._window(info["temp_hist"], span)
+        t = info["temp"]
+        p.add_row(bigpage._row(1, [("HOTTEST ", 6), (term.fmt_temp(t), 4 if t >= 90 else 5 if t >= 80 else 8),
+                                   ("  CPU, GPUs, NIC", 6)]),
+                  right=[("peak ", 6), (term.fmt_temp(max(_vals(win) or [t])), 3)])
+        for r in bigpage._chart_rows(win, cw, v["temp"], 100, span,
+                                     {0: term.fmt_temp(100).replace(" ", ""), v["temp"] - 1: "0"}, False):
+            p.add_row(r)
     if v["pwr"] and _has_pwr_chart(info):
         win = bigpage._window(info["pwr_hist"], span)
         vals = _vals(win) or [0.0]
@@ -315,24 +389,31 @@ def _build_column(y, x, w, info, v, span, selected, alerts, extra=0):
                 row += bigpage._row(None, chart[r])
             p.add_row(row)
     p.add_row(bigpage._axis_row(cw, span, False))
-    proc = info.get("proc")
-    if proc:
+    procs = (info.get("procs") or [])[:max(1, v["procs"])]
+    for k, proc in enumerate(procs):
         pname = (proc.get("name") or "").strip() or str(proc.get("pid", "?"))
-        row = [("top ", 6), (pname[:max(8, iw - 40)], 3), (f" · pid {proc.get('pid', '?')}", 6)]
+        row = [("top " if k == 0 else "    ", 6), (pname[:max(8, iw - 40)], 3), (f" · pid {proc.get('pid', '?')}", 6)]
         if proc.get("mem"):
             row.append((f"  {term.fmt_mem(proc['mem'])}", 3))
         if isinstance(proc.get("sm"), (int, float)) and proc.get("sm"):
             row.append((f"  SM {proc['sm']:.0f}%", 3))
         p.add_row(bigpage._row(1, row))
-    else:
+    if not procs:
         p.add_row([(1, "no GPU processes", 6)])
     return p
 
 
-def _build_heat(y, x0, width, rows, span, pad):
-    lw = min(22, max(len(lbl) for lbl, _ in rows)) + 1
+_HEAT_TITLES = {
+    1: [("GPU UTIL", 9), (" every GPU, one row each · a row that lags is a straggler", 3)],
+    2: [("HEAT", 9), (" GPU use, then fabric (% of link speed) · a row that lags is a straggler", 3)],
+    3: [("HEAT", 9), (" GPU use, fabric (% of link speed), CPU · a row that lags is a straggler", 3)],
+}
+
+
+def _build_heat(y, x0, width, rows, span, pad, level=1):
+    lw = min(24, max(len(lbl) for lbl, _ in rows)) + 1
     cells = width - 2 - 1 - lw
-    p = panels.Panel(y, x0, width, title=[("GPU UTIL", 9), (" every GPU, one row each · a row that lags is a straggler", 3)],
+    p = panels.Panel(y, x0, width, title=_HEAT_TITLES.get(level, _HEAT_TITLES[1]),
                      title_right=[("· idle ", 7), ("▆", 12), ("▆", 15), (" busy", 6)], kind="top")
     for label, hist in rows:
         runs = term.heat_runs(bigpage._window(hist, span), cells, window=bigpage._w(span)) or []
@@ -378,8 +459,9 @@ def _total(infos, per, v, dials_h, topo, heat_n):
         used += len(topo["rows"]) + 2
     for k in range(0, len(infos), per):
         used += max(column_rows(i, v) for i in infos[k:k + per]) + 2
-    if heat_n:
-        used += heat_n + 1 + 2
+    n = heat_n(v["heat"])
+    if n:
+        used += n + 1 + 2
     return used
 
 
@@ -403,30 +485,38 @@ def build_page3_large(cluster_ctx, width, height, x0=0, layout="large", history=
 
     infos = [node_info(vw, m) for vw, m in zip(views, metrics)]
     per = grid_for(n, width)
-    if math.ceil(n / per) > 2:
+    if math.ceil(n / per) > MAX_GRID_ROWS:
         return None
     dial_w = DIAL_W.get(layout, 16)
     dials = cluster_dials(infos, pre["total"])
     dials_h = term.dial_size(dial_w) + 2 if dials else 0
-    heat = _heat_rows(infos)
+    levels = heat_levels(infos)
+    heat_count = {lvl: len(heat_rows(infos, lvl)) for lvl in levels}
+
+    def heat_n(level):
+        return heat_count.get(level, 0)
+
     pairs_by_name = sorted(zip(views, metrics), key=lambda vm: vm[0].get("name") or "")
     topos = _topo_candidates(pairs_by_name, width, max(6, min(16, height // 5)),
                              ui.selected_name if ui else None, getattr(ui, "topo_cache", None) if ui else None)
 
+    # Keep the dials and the heat grid before the map's size, the map before
+    # nothing; first at comfortable chart heights, then at the least.
     choice = None
+    first_heat = 1 if 1 in levels else 0
     for floor in (_FLOOR, _MIN):
-        configs = [(d, h, t) for d, h in ((True, True), (True, False), (False, False)) for t in topos]
-        configs += [(d, h, None) for d, h in ((True, True), (True, False), (False, False))]
+        configs = [(d, h, t) for d, h in ((True, first_heat), (True, 0), (False, 0)) for t in topos]
+        configs += [(d, h, None) for d, h in ((True, first_heat), (True, 0), (False, 0))]
         for d, h, t in configs:
-            heat_n = len(heat) if (h and len(heat) >= 2) else 0
-            if _total(infos, per, floor, dials_h if d else 0, t, heat_n) <= height:
-                choice = (dict(floor), d, heat_n, t)
+            vv = dict(floor, heat=h)
+            if _total(infos, per, vv, dials_h if d else 0, t, heat_n) <= height:
+                choice = (vv, d, t)
                 break
         if choice:
             break
     if choice is None:
         return None
-    v, dials_on, heat_n, topo = choice
+    v, dials_on, topo = choice
 
     def total(vv):
         return _total(infos, per, vv, dials_h if dials_on else 0, topo, heat_n)
@@ -435,10 +525,18 @@ def build_page3_large(cluster_ctx, width, height, x0=0, layout="large", history=
     while grown:
         grown = False
         for k in _GROW:
-            if v[k] >= _MAX[k]:
-                continue
-            step = 2 if (k == "pwr" and v[k] == 0) else 1
-            trial = dict(v, **{k: v[k] + step})
+            if k == "heat":
+                if not v["heat"]:
+                    continue       # the grid was dropped to fit: do not bring it back half-way
+                nxt = [lvl for lvl in levels if lvl > v["heat"]]
+                if not nxt:
+                    continue
+                trial = dict(v, heat=nxt[0])
+            else:
+                if v[k] >= _MAX[k]:
+                    continue
+                step = 2 if (k in _OPEN_AT_2 and v[k] == 0) else 1
+                trial = dict(v, **{k: v[k] + step})
             if total(trial) <= height:
                 v = trial
                 grown = True
@@ -463,14 +561,15 @@ def build_page3_large(cluster_ctx, width, height, x0=0, layout="large", history=
     alerts = {}
     for vw, m in zip(views, metrics):
         alerts[vw.get("name")] = pages._cluster_alerts(vw, m)
-    col_w = width // per
     for k in range(0, n, per):
         chunk = infos[k:k + per]
+        # a short last row (16 nodes as 6, 6, 4) widens its columns to fill
+        col_w = width // len(chunk)
         row_h = max(column_rows(i, v) for i in chunk)
-        if not heat_n and k + per >= n:
+        if not v["heat"] and k + per >= n:
             row_h += pad            # no heat grid: the last row of columns takes the spare
         for j, info in enumerate(chunk):
-            w = col_w if j < per - 1 else width - col_w * (per - 1)
+            w = col_w if j < len(chunk) - 1 else width - col_w * (len(chunk) - 1)
             extra = row_h - column_rows(info, v) if info["up"] else 0
             cp = _build_column(y, x0 + j * col_w, w, info, v, span, (k + j) == pre["selected"],
                                alerts.get(info["view"].get("name")) or [], extra)
@@ -478,8 +577,8 @@ def build_page3_large(cluster_ctx, width, height, x0=0, layout="large", history=
                 cp.add_row([])
             out.append(cp)
         y += row_h + 2
-    if heat_n:
-        hp = _build_heat(y, x0, width, heat, span, pad)
+    if v["heat"]:
+        hp = _build_heat(y, x0, width, heat_rows(infos, v["heat"]), span, pad, v["heat"])
         out.append(hp)
         y += hp.total_height + 1
     out.append(_footer(x0, width, height - 1, pre["up"], pre["total"], rate, span, has_perf, theme_toast))

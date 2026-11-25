@@ -64,6 +64,7 @@ class HistoryTest(unittest.TestCase):
         self.assertEqual((p["rx"], p["tx"]), (5e9, 3e9))
         self.assertEqual(p["pwr"], 80.0)
         self.assertEqual(p["gpu:0"], 30.0)
+        self.assertEqual(p["temp"], 55)
 
     def test_failed_poll_keeps_time(self):
         h = cluster.NodeHistory(maxlen=5)
@@ -113,7 +114,8 @@ class LayoutTest(unittest.TestCase):
 
     def test_fills_the_terminal_exactly(self):
         for n, w, h, layout in ((2, 240, 67, "large"), (4, 240, 67, "large"), (3, 200, 45, "large"),
-                                (8, 320, 90, "xl"), (6, 300, 80, "xl"), (1, 220, 50, "large")):
+                                (8, 320, 90, "xl"), (6, 300, 80, "xl"), (1, 220, 50, "large"),
+                                (4, 380, 75, "xl"), (12, 420, 110, "xl"), (16, 420, 110, "xl")):
             with self.subTest(n=n, w=w, h=h):
                 self._assert_fills(_build(_views(n, gpus=2), w, h, layout), h)
 
@@ -127,7 +129,7 @@ class LayoutTest(unittest.TestCase):
         views = _views(1, gpus=2)
         m = clusterpage.pages._cluster_metrics(views[0]["sample"])
         info = clusterpage.node_info(views[0], m)
-        v = {"gpu": 5, "cpu": 3, "pwr": 2, "fab": 2}
+        v = {"gpu": 5, "cpu": 3, "pwr": 2, "fab": 2, "mem": 2, "temp": 2, "procs": 3, "heat": 0}
         p = clusterpage._build_column(0, 0, 100, info, v, 300, False, [])
         self.assertEqual(len(p.rows), clusterpage.column_rows(info, v))
 
@@ -147,17 +149,43 @@ class LayoutTest(unittest.TestCase):
         self.assertEqual(len(info["rx_hist"]), 60)
 
     def test_falls_back_to_normal_page(self):
-        self.assertIsNone(_build(_views(9), 320, 90, "xl"))     # fleet mode
+        self.assertIsNone(_build(_views(17), 420, 110, "xl"))   # fleet mode
         self.assertIsNone(_build([], 240, 67))
         self.assertIsNone(_build(_views(8), 200, 20))           # nothing fits
         term.BAR_STYLE = "ascii"
         self.assertIsNone(_build(_views(2), 240, 67))
 
+    def test_heat_levels_add_fabric_and_cpu_rows(self):
+        views = _views(3)
+        infos = [clusterpage.node_info(v, clusterpage.pages._cluster_metrics(v["sample"])) for v in views]
+        self.assertEqual(clusterpage.heat_levels(infos), [0, 1, 2, 3])
+        labels = [lbl for lbl, _ in clusterpage.heat_rows(infos, 3)]
+        self.assertEqual(labels[:4], ["node-1 gpu", "node-2 gpu", "node-3 gpu", "node-1 fab"])
+        self.assertEqual(labels[-1], "node-3 cpu")
+        fab = dict(clusterpage.heat_rows(infos, 2))["node-1 fab"]
+        self.assertAlmostEqual(fab[-1], 5e9 / 200e9 * 100)
+
+    def test_big_screen_opens_extras(self):
+        built = _build(_views(4), 380, 75, "xl")
+        text = " ".join(t for p in built for row in p.rows for seg in (row[0] if isinstance(row, tuple) else row)
+                        for t in ([seg[1]] if len(seg) == 3 else [seg[0]]) if isinstance(t, str))
+        self.assertIn("HOTTEST", text)
+        self.assertTrue(any((p.title or [("", 0)])[0][0] == "HEAT" for p in built))
+
+    def test_top_processes(self):
+        s = _sample(gpus=2)
+        s["gpus"][0]["procs"] = [{"pid": 1, "name": "a", "mem": 1 * G}, {"pid": 2, "name": "b", "mem": 5 * G}]
+        s["gpus"][1]["procs"] = [{"pid": 1, "name": "a", "mem": 3 * G}, {"pid": 3, "name": "c", "mem": 2 * G}]
+        top = clusterpage._top_procs(s, 3)
+        self.assertEqual([(p["pid"], p["mem"]) for p in top], [(2, 5 * G), (1, 3 * G), (3, 2 * G)])
+
     def test_grid(self):
         self.assertEqual(clusterpage.grid_for(4, 240), 4)
         self.assertEqual(clusterpage.grid_for(8, 320), 4)
         self.assertEqual(clusterpage.grid_for(6, 400), 6)
-        self.assertEqual(clusterpage.grid_for(4, 200), 3)       # 50-col columns are too narrow
+        self.assertEqual(clusterpage.grid_for(4, 200), 2)       # 50-col columns are too narrow: 2 x 2
+        self.assertEqual(clusterpage.grid_for(16, 420), 6)      # three rows: 6, 6, 4
+        self.assertEqual(clusterpage.grid_for(12, 380), 6)
 
     def test_dials(self):
         views = _views(2)
@@ -174,7 +202,7 @@ class LayoutTest(unittest.TestCase):
         vc = term.VirtualCurses(size=(240, 67))
         panels.render(vc, built, {s: s for s in range(16)})
         text = "\n".join("".join(c for c, _ in row) for row in vc.grid)
-        for word in ("CLUSTER", "TOPOLOGY", "GPU UTIL", "FABRIC", "node-4"):
+        for word in ("CLUSTER", "TOPOLOGY", "FABRIC", "node-4"):
             self.assertIn(word, text)
 
 
