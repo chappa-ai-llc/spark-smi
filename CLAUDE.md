@@ -28,7 +28,7 @@ rendering against real hardware over ssh (see `scratchpad/`, gitignored, for
 the deploy/record helpers). Unit tests cover the release script and a few
 pure pieces (cluster token reader, node names, the network counter rules,
 the ethtool netlink codec, themes, graphs, SVG shots, page 3's topology map,
-and page 5's session grouping and confirm gate): `python3 -m unittest discover -s deploy` and
+page 5's session grouping and confirm gate, and the big-screen page 1): `python3 -m unittest discover -s deploy` and
 `python3 -m unittest discover -s tests` (the second needs psutil installed). Packaging is setuptools via
 `pyproject.toml`; the pip entry point is `spark-smi = spark_smi.__main__:main`.
 
@@ -153,6 +153,14 @@ spark_smi/
                   the knobs.py shape), and end_process()/end_group()/
                   open_group_argv() -- the only code that signals or runs
                   a session manager. Live mode only constructs TaskUI.
+  bigpage.py      Page 1's big-screen layouts (#14): layout_for(w, h,
+                  graphs) picks large (200+ cols) / xl (300+) / tall (`g`
+                  large, 120+), build_page1_large() fills the terminal
+                  exactly -- every chart starts at a minimum height and
+                  grows a row at a time (search cached on the page's
+                  shape). Dial strip, charts with axes, POWER & THERMAL
+                  and per-core heatmap at xl. Reads State's sample["long"]
+                  (up to HIST_LONG samples, never sent over the wire).
   topomap.py      Page 3's TOPOLOGY map: build_graph() finds links from
                   the nodes' nic_pf networks (ip + prefix; 2 members = a
                   cable, 3+ = a switch bus), render() lays boxes out in one
@@ -238,7 +246,13 @@ grayed out otherwise (e.g. "root required" for an unwritable `spbm`
 
 `pages.tier_for_width(w)` re-evaluates every frame: `compact` (<84 cols),
 `standard` (84–110), `wide` (>110, content capped at 160 and centered on
-wider terminals). Height degradation, applied in `build_page1`/`build_page2`
+wider terminals). On page 1, `bigpage.layout_for()` takes over at 200+
+columns and 45+ rows (the `g` key's graph mode can turn it off or extend
+it down to 120 columns); see `bigpage.py`. History: State keeps
+`HIST_LONG` (3600) samples per series but exposes only `HIST_LEN` (60) in
+the sample's own `*history` keys -- the long buffers ride in
+`sample["long"]`, built only when `state.want_long` (a screen is drawn),
+and `cluster.to_wire()` drops them. Height degradation, applied in `build_page1`/`build_page2`
 when a `height` hint is given, drops content in this order: sparklines →
 memory legend row → NIC rows collapse to one summary line. The other way,
 spare height opens mirrored history rows (`term.mirror_chart`, 4 rows each,

@@ -2,7 +2,7 @@
 
 > A terminal-based system monitor (TUI) built for **NVIDIA Grace Blackwell (GB10)** and hybrid ARM architectures — because `nvidia-smi` alone doesn't tell the full story.
 
-![Version](https://img.shields.io/badge/version-4.4.0-blue)
+![Version](https://img.shields.io/badge/version-5.0.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8%2B-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Linux%20aarch64-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -68,7 +68,9 @@ the tool isn't there, the feature isn't shown, nothing crashes:
 segmented used/cache/free bar, one card per GPU (utilization, memory, clocks,
 power), NETWORK (physical ports, RX/TX bars, or mirrored RX/TX history when
 there is room), STORAGE (block devices, temperature, R/W rates, usage). This is the "glance at it and know the
-system's state" page.
+system's state" page. On a terminal of 200 columns or more it uses the whole
+screen: dials, charts with axes and minutes of history (see "Big screens"
+below).
 
 **Page 2 — Advanced** (`2`): per-GPU detail (clocks, PCIe generation/width/
 throughput, power vs. limit, thermal trip points, throttle reasons,
@@ -131,6 +133,44 @@ below 1% of the link speed (10 MB/s for disks), so an idle port stays flat
 instead of magnifying noise. A mirrored row takes four lines; NICs get them
 first, then disks, and on a short terminal the rows stay one line each, as
 before. A disk's usage bar moves under its name.
+
+### Big screens
+
+On a terminal of **200 columns and 45 rows or more** (a full-screen terminal on
+a 1080p monitor is about 240 × 67), page 1 stops at no width cap and uses the
+whole screen:
+
+- **AT A GLANCE**: a strip of dials across the top: CPU, memory, each GPU's
+  utilization and power, system power (with the `spbm` driver), fabric
+  throughput, the hottest sensor, the hottest disk and disk use. A dial
+  appears only for a number this machine reports.
+- **CPU + MEMORY** and the **GPUs** side by side, each with charts that have
+  a value axis and a time axis. GPUs with a power limit also chart their
+  power.
+- **NETWORK + STORAGE** across the full width, each port and disk with a
+  mirrored chart and its scale.
+- At **300 columns or more** (about a 1440p monitor), a third column,
+  **POWER & THERMAL**, lists every power rail and temperature sensor with
+  its own history, and the CPU panel adds a per-core heatmap: one row per
+  core, so a pinned core shows as a bright streak.
+
+Charts start at a few rows and grow until the page fills the terminal, so
+no row is left blank. They show the last **5 minutes** (10 at 300+
+columns). `+` and `-` step the window through 1, 5, 10 and 30 minutes and
+1 hour; the history is kept in memory from the moment spark-smi starts,
+so a fresh start fills in from the right.
+
+`g` cycles the graph size: **auto** (the big layout when the terminal is big
+enough), **large** (also a one-column big layout on terminals of 120-199
+columns, when it fits), and **compact** (the normal page at any size).
+`--graphs` and `--history` set the same from the command line. spark-smi
+remembers your last `g` and `+`/`-` choice in
+`~/.config/spark-smi/settings.json` (or under `$XDG_CONFIG_HOME`).
+
+Below 200 columns, and in a node drilldown on a smaller terminal, page 1 is
+the same as before. A drilldown into a remote node on a big terminal uses
+the big layout with that node's last minute of history; the long history is
+kept only on the machine that draws it and never goes over the network.
 
 ### PCIe link monitoring
 
@@ -224,6 +264,8 @@ resize the window and it adapts live, no restart needed:
 | `compact` | < 84 cols | Condensed layout: two NIC/disk entries per cell-row, GPU fields folded onto fewer lines. |
 | `standard` | 84–110 cols | Full field set, but GPU cards and THERMALS/SMART stack full-width instead of side-by-side. |
 | `wide` | > 110 cols | The full multi-column layout; content is capped at 160 columns and centered on wider terminals. |
+| `large` | ≥ 200 cols, ≥ 45 rows | Page 1 only: dial strip, CPU+MEMORY beside the GPUs, full-width charts with axes (see "Big screens"). |
+| `xl` | ≥ 300 cols, ≥ 45 rows | Page 1 only: `large` plus a POWER & THERMAL column and a per-core heatmap. |
 
 Resizing is live — the same running process, no restart, reflowing between
 wide, standard, and compact as the window changes. Every width below shows a
@@ -315,6 +357,8 @@ directory, plus ASIC temperature from the NIC's own hwmon device.
 | `?` | all | Toggle the help overlay (any key dismisses it) |
 | `n` | 1 | Show active NICs only |
 | `s` | 1 | Sort NIC rows by current rate (max of RX/TX), descending — toggle back to detection order |
+| `g` | 1 | Graph size: auto / large / compact (see "Big screens"); remembered |
+| `+` / `-` | 1 | History window of the big layouts' charts: 1m, 5m, 10m, 30m, 1h; remembered |
 | `Tab` | 2 | Select GPU (when more than one) |
 | `P` | 2 | Focus/cycle the power-limit knob (GPU limit → PL1 → PL2 → SYSPL1 → SYSPL2, as available) |
 | `C` / `M` | 2 | Focus the SM / memory clock-lock knob |
@@ -435,6 +479,14 @@ spark-smi [options]
                    with --shot to the whole page)
   --warmup SECS    snapshot mode: sample once a second for SECS first, so
                    history graphs have data (0-120, default 0)
+  --graphs MODE    page 1's graph size: auto (default; the big-screen
+                   layouts on terminals of 200+ columns and 45+ rows),
+                   large (also a one-column big layout from 120 columns),
+                   or compact (the 160-column page at any size). The `g`
+                   key cycles it live; the choice is remembered
+  --history SPAN   how far back the big layouts' charts reach, 10s to 1h
+                   (e.g. 90s, 5m, 1h; default 5m, 10m at 300+ columns).
+                   The +/- keys step it live; the choice is remembered
   --json           print one sample as JSON (+ node/model/version/ts) and exit
   --serve [PORT]   read-only HTTP sample server (default port 8817);
                    GET /sample, GET /healthz. A token in the file named by
@@ -939,7 +991,10 @@ all fixed in 4.0 — see the [changelog](CHANGELOG.md).
 - [X] **PyPI Package** — `pip install spark-smi` one-liner install
 - [X] **Capability-driven universal detection** — CPU/GPU/NIC/storage/thermal topology discovered at runtime, not hardcoded to one machine
 - [X] **Page 2 advanced panels + power/clock knobs** — per-GPU detail, per-PF RDMA counters, thermal/SMART, interactive power/clock control
-- [ ] **Multi-node Support** — Monitor clustered DGX Spark nodes from a single dashboard
+- [X] **Multi-node Support** — Monitor clustered DGX Spark nodes from a single dashboard (cluster mode, pages 3-4)
+- [X] **Big-screen page 1** — dials, charts with axes and up to an hour of history on terminals of 200+ columns (5.0)
+- [ ] **Fuller GPU task manager** — per-process SM %, GPU memory, encoder/decoder and history on page 5 ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14))
+- [ ] **Big-screen cluster page** — cluster dials, a telemetry column per node and a GPU heat grid on page 3 ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14))
 
 ---
 

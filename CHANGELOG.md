@@ -6,6 +6,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.0.0] — 2026-11-25
+
+Page 1 uses the whole screen on big terminals ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14)).
+
+### Added
+
+- **Big-screen page 1.** On a terminal of 200 columns and 45 rows or more,
+  page 1 no longer stops at 160 columns. It opens with a strip of dials
+  (CPU, memory, each GPU's utilization and power, system power, fabric,
+  the hottest sensor and disk, disk use), puts CPU+MEMORY beside the GPUs,
+  and runs NETWORK+STORAGE across the full width. Every chart has a value
+  axis and a time axis, and charts grow until the page fills the terminal.
+- At 300 columns or more, a **POWER & THERMAL** column (every power rail
+  and temperature sensor, each with its history) and a **per-core heatmap**
+  under the CPU charts.
+- **History windows:** the big layouts chart the last 5 minutes (10 at 300+
+  columns). `+` and `-` step through 1, 5, 10, 30 minutes and 1 hour.
+  spark-smi keeps up to an hour of history in memory.
+- **`g`** cycles page 1's graph size: auto, large (a one-column big layout
+  on 120-199 column terminals) and compact (the normal page everywhere).
+- `--graphs MODE` and `--history SPAN` set the same from the command line.
+  The last `g` and `+`/`-` choice is remembered in
+  `~/.config/spark-smi/settings.json`.
+
+### Changed
+
+- The cluster wire format is unchanged: a node's sample still carries one
+  minute of history per series. The longer history stays on the machine
+  that draws it.
+- `--shot` without ROWS keeps drawing the normal page; give `--size
+  COLSxROWS` with 200+ columns and 45+ rows for a big-screen picture.
+
+### Fixed
+
+- README's Roadmap listed multi-node support as not done; cluster mode
+  shipped in 4.0.0.
+
 ## [4.4.0] — 2026-11-24
 
 Page 3 fills the screen, and draws the cluster.
@@ -397,6 +434,7 @@ is still there, on page 1.
 
 - Initial public release.
 
+[5.0.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.0.0
 [4.4.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.4.0
 [4.3.1]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.3.1
 [4.3.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.3.0

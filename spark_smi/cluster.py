@@ -32,7 +32,7 @@ from . import node
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "4.4.0"
+    VERSION = "5.0.0"
 
 DEFAULT_PORT = 8817
 POLL_TIMEOUT = 0.75          # per-member urllib timeout (spec)
@@ -99,6 +99,9 @@ def to_wire(sample):
     tuples) are the only fields in State.sample() that aren't already plain
     dicts/lists/primitives -- everything else passes through untouched."""
     out = dict(sample)
+    # Local long histories (#14) stay on this machine: a second's sample
+    # carries HIST_LEN points per series, never the hour behind them.
+    out.pop("long", None)
     mem = dict(out.get("mem") or {})
     mem["vm"] = _tuple_to_dict(mem.get("vm"))
     mem["swap"] = _tuple_to_dict(mem.get("swap"))

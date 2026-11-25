@@ -4,12 +4,14 @@ Curses-specific calls are confined to this module -- everything else draws
 through the duck-typed screen interface shared by VirtualCurses and real
 curses windows.
 """
+import json
 import os
 import shutil
 import sys
 import time
 from collections import deque
 
+from . import bigpage
 from . import cluster
 from . import collectors
 from . import fabtest
@@ -24,9 +26,13 @@ from . import term
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "4.4.0"
+    VERSION = "5.0.0"
 DEFAULT_REFRESH_RATE = 1.0
 HIST_LEN = 60
+# Local history kept for the big-screen layouts (#14): up to an hour at 1 s.
+# Only HIST_LEN samples go in the sample's own *history keys (and so over
+# the cluster wire); the rest rides in sample["long"], which to_wire drops.
+HIST_LONG = 3600
 
 HELP_TEXT = f"""spark-smi {VERSION} -- terminal system monitor for NVIDIA DGX Spark
 
@@ -60,6 +66,14 @@ Usage: spark-smi [options]
                    with --shot to the whole page)
   --warmup SECS    snapshot mode: sample once a second for SECS first, so
                    history graphs have data (0-120, default 0)
+  --graphs MODE    page 1's graph size: auto (default; the big-screen
+                   layouts on terminals of 200+ columns and 45+ rows),
+                   large (also a one-column big layout from 120 columns),
+                   or compact (the 160-column page at any size). The `g`
+                   key cycles it live; the choice is remembered
+  --history SPAN   how far back the big layouts' charts reach, 10s to 1h
+                   (e.g. 90s, 5m, 1h; default 5m, 10m at 300+ columns).
+                   The +/- keys step it live; the choice is remembered
   --json           print one sample as JSON (+ node/model/version/ts) and exit
   --serve [PORT]   read-only HTTP sample server (default port {cluster.DEFAULT_PORT});
                    GET /sample, GET /healthz. A token in the file named by
@@ -91,7 +105,11 @@ members) prints a short "needs --cluster" note instead of a fabric panel.
 
 Live-mode keys: q quit  ·  t toggle C/F  ·  u toggle GiB/GB  ·  1/2/5 page
                 n active-NICs-only  ·  s sort NICs by rate  ·  c cycle theme
+                g graph size  ·  +/- history window (page 1)
                 S save this screen as SVG (current folder)  ·  ? help overlay
+
+Remembered choices (the g and +/- keys) live in
+$XDG_CONFIG_HOME/spark-smi/settings.json (~/.config/spark-smi/settings.json).
                 page 2: tab select GPU  ·  P/C/M/R/X knobs
                 page 3 (--cluster only): up/down select · enter drill into
                 node · esc back · a alerts only (fleet) · o sort col (fleet)
@@ -139,7 +157,8 @@ def _parse_args(argv):
     opts = {"loop": False, "rate": DEFAULT_REFRESH_RATE, "help": False, "page": 1,
             "theme": None, "theme_list": False, "json": False, "serve": None,
             "serve_verbose": False, "cluster": _UNSET, "node_name": None,
-            "shot": None, "size": None, "warmup": 0.0, "background": None}
+            "shot": None, "size": None, "warmup": 0.0, "background": None,
+            "graphs": None, "history": None}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -200,6 +219,12 @@ def _parse_args(argv):
         elif a == "--warmup":
             opts["warmup"] = argv[i + 1] if i + 1 < len(argv) else ""
             i += 1
+        elif a == "--graphs":
+            opts["graphs"] = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 1
+        elif a == "--history":
+            opts["history"] = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 1
         elif a in ("-h", "--help"):
             opts["help"] = True
         # --ascii is read directly from sys.argv by term._detect_bar_style()
@@ -228,16 +253,68 @@ class State:
         # nothing for the /proc walk, and nothing about local pids ever
         # goes over the cluster wire format.
         self.tasks = tasks.TaskCollector()
-        self.cluster_hist = [deque(maxlen=HIST_LEN) for _ in self.cpu.clusters]
+        self.cluster_hist = [deque(maxlen=HIST_LONG) for _ in self.cpu.clusters]
         self.gpu_hist = {}
         self.nic_hist = {}
         self.disk_hist = {}
         # Page 3's MEMORY rows graph used % per node (sent in the sample).
-        self.mem_hist = deque(maxlen=HIST_LEN)
+        self.mem_hist = deque(maxlen=HIST_LONG)
         # Phase 8: per-GPU (util, gen_cur) history for stuck-under-load
         # detection -- separate from gpu_hist (util-only, for sparklines)
         # since this needs the paired gen_cur reading at the same tick.
         self.gpu_pcie_hist = {}
+        # Big-screen layouts only (#14): GPU power, per-core load, power
+        # rails and temperature sensors, keyed by a stable name.
+        self.gpu_pwr_hist = {}
+        self.want_long = False
+        # Big-screen layouts (#14): the `g` key's graph mode and the +/-
+        # keys' history window in seconds (None: the layout's default).
+        self.graphs = "auto"
+        self.history = None
+        self.core_hist = {}
+        self.rail_hist = {}
+        self.temp_hist = {}
+
+    def _push(self, store, key, value):
+        hist = store.get(key)
+        if hist is None:
+            hist = store[key] = deque(maxlen=HIST_LONG)
+        try:
+            hist.append(float(value))
+        except Exception:
+            hist.append(0.0)
+        return hist
+
+    def _long_history(self, cpu, gpus, nics, disks, thermal, power_rails):
+        """Up to HIST_LONG samples per series for the big-screen layouts
+        (#14), as plain lists. Local only: cluster.to_wire() drops it."""
+        out = {"cpu": [list(h) for h in self.cluster_hist], "mem": list(self.mem_hist),
+               "gpu": {}, "gpu_pwr": {}, "nic": {}, "disk": {}, "core": {}, "rail": {}, "temp": {}}
+        for g in gpus:
+            gid = g.get("id")
+            if gid in self.gpu_hist:
+                out["gpu"][gid] = list(self.gpu_hist[gid])
+            watts = _watts(g.get("pwr_str"))
+            if watts is not None:
+                out["gpu_pwr"][gid] = list(self._push(self.gpu_pwr_hist, gid, watts))
+        for n in nics:
+            h = self.nic_hist.get(n.get("name"))
+            if h:
+                out["nic"][n.get("name")] = {"rx": list(h["rx"]), "tx": list(h["tx"])}
+        for d in disks:
+            h = self.disk_hist.get(d.get("name"))
+            if h:
+                out["disk"][d.get("name")] = {"r": list(h["r"]), "w": list(h["w"])}
+        for i, load in enumerate(cpu.get("percpu") or []):
+            out["core"][i] = list(self._push(self.core_hist, i, load))
+        for r in power_rails or []:
+            if r.get("label") and r.get("watts") is not None:
+                out["rail"][r["label"]] = list(self._push(self.rail_hist, r["label"], r["watts"]))
+        for t in thermal or []:
+            key = f"{t.get('hwname') or t.get('kind')}:{t.get('label')}"
+            if t.get("temp_c") is not None:
+                out["temp"][key] = list(self._push(self.temp_hist, key, t["temp_c"]))
+        return out
 
     def sample(self):
         try:
@@ -291,10 +368,10 @@ class State:
 
         for i, cl in enumerate(cpu.get("clusters") or []):
             if i >= len(self.cluster_hist):
-                self.cluster_hist.append(deque(maxlen=HIST_LEN))
+                self.cluster_hist.append(deque(maxlen=HIST_LONG))
             hist = self.cluster_hist[i]
             hist.append(cl.get("avg", 0.0))
-            cl["history"] = list(hist)
+            cl["history"] = list(hist)[-HIST_LEN:]
 
         # Phase 8 join: PcieCollector's sysfs rows keyed by PCI address, for
         # GPUs whose own NVML pcie_gen_cur/max fields didn't come back (the
@@ -304,12 +381,12 @@ class State:
         unified_pci_addrs = set()
 
         for idx, g in enumerate(gpus):
-            hist = self.gpu_hist.setdefault(g.get("id"), deque(maxlen=HIST_LEN))
+            hist = self.gpu_hist.setdefault(g.get("id"), deque(maxlen=HIST_LONG))
             try:
                 hist.append(float(g.get("util", 0)))
             except Exception:
                 hist.append(0.0)
-            g["history"] = list(hist)
+            g["history"] = list(hist)[-HIST_LEN:]
 
             gpu_caps = self.gpu.caps[idx] if idx < len(self.gpu.caps) else {}
             if not gpu_caps.get("mem_local", True):
@@ -366,30 +443,34 @@ class State:
         # (grouping is topology, detected once at construction), so this
         # doesn't need the same re-detection care as CPU cluster indices.
         for n in nics:
-            hist = self.nic_hist.setdefault(n.get("name"), {"rx": deque(maxlen=HIST_LEN), "tx": deque(maxlen=HIST_LEN)})
+            hist = self.nic_hist.setdefault(n.get("name"), {"rx": deque(maxlen=HIST_LONG), "tx": deque(maxlen=HIST_LONG)})
             hist["rx"].append(n.get("rx_bps", 0) or 0)
             hist["tx"].append(n.get("tx_bps", 0) or 0)
-            n["rx_history"] = list(hist["rx"])
-            n["tx_history"] = list(hist["tx"])
+            n["rx_history"] = list(hist["rx"])[-HIST_LEN:]
+            n["tx_history"] = list(hist["tx"])[-HIST_LEN:]
         try:
             self.mem_hist.append(float(mem["vm"].percent))
-            mem["history"] = list(self.mem_hist)
+            mem["history"] = list(self.mem_hist)[-HIST_LEN:]
         except Exception:
             pass
         # Same for block devices: page 1's mirrored R/W history (D-02 item 1).
         for d in disks:
-            hist = self.disk_hist.setdefault(d.get("name"), {"r": deque(maxlen=HIST_LEN), "w": deque(maxlen=HIST_LEN)})
+            hist = self.disk_hist.setdefault(d.get("name"), {"r": deque(maxlen=HIST_LONG), "w": deque(maxlen=HIST_LONG)})
             hist["r"].append(d.get("read_bps", 0) or 0)
             hist["w"].append(d.get("write_bps", 0) or 0)
-            d["read_history"] = list(hist["r"])
-            d["write_history"] = list(hist["w"])
+            d["read_history"] = list(hist["r"])[-HIST_LEN:]
+            d["write_history"] = list(hist["w"])[-HIST_LEN:]
 
         try:
             driver, cuda = self.gpu.driver_info()
         except Exception:
             driver, cuda = "Unknown", "Unknown"
 
+        # Only the screen pays for the long copies; --serve/--json don't.
+        long = self._long_history(cpu, gpus, nics, disks, thermal, power_rails) if self.want_long else None
+
         return {
+            "long": long,
             "cpu": cpu, "mem": mem, "gpus": gpus, "nics": nics, "disks": disks,
             "thermal": thermal, "power_rails": power_rails, "smart": smart, "nic_pf": nic_pf,
             "nic_asic_temp": nic_asic_temp, "nic_fw": nic_fw, "pcie_links": pcie_links,
@@ -458,6 +539,7 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
         return
     if h < 8 or w < 40:
         return
+    state.want_long = True
     tier = pages.tier_for_width(w)
     draw_w = pages.content_width(tier, w)
     x0 = max(0, (w - draw_w) // 2)
@@ -600,9 +682,22 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
                                        theme_toast=theme_toast, remote=remote_name, cluster_tabs=has_cluster,
                                        has_perf=has_perf)
         else:
-            built = pages.build_page1(sample, tier, draw_w, x0, height=height_hint or h, sort_nics=sort_nics,
-                                       theme_toast=theme_toast, remote=remote_name, cluster_tabs=has_cluster,
-                                       has_perf=has_perf)
+            built = None
+            layout = bigpage.layout_for(w, height_hint or h, getattr(state, "graphs", "auto"))
+            if layout:
+                # The big layouts (#14) use the whole terminal, not the
+                # centred 160-column page; None when they can't fit.
+                if sort_nics and sample.get("nics"):
+                    sample["nics"] = sorted(sample["nics"], reverse=True,
+                                            key=lambda n: max(n.get("rx_bps", 0) or 0, n.get("tx_bps", 0) or 0))
+                built = bigpage.build_page1_large(sample, w, height_hint or h, 0, layout,
+                                                  history=getattr(state, "history", None),
+                                                  graphs=getattr(state, "graphs", "auto"), theme_toast=theme_toast,
+                                                  remote=remote_name, cluster_tabs=has_cluster, has_perf=has_perf)
+            if built is None:
+                built = pages.build_page1(sample, tier, draw_w, x0, height=height_hint or h, sort_nics=sort_nics,
+                                           theme_toast=theme_toast, remote=remote_name, cluster_tabs=has_cluster,
+                                           has_perf=has_perf)
     except Exception:
         built = []
 
@@ -655,6 +750,62 @@ def _init_curses_colors(curses):
             attr |= curses.A_DIM
         colors[slot] = attr
     return colors
+
+
+def parse_span(text):
+    """'90', '90s', '5m', '1h' -> seconds, within 10 s .. 1 h; else None."""
+    t = str(text).strip().lower()
+    mult = 1
+    if t[-1:] in ("s", "m", "h"):
+        mult = {"s": 1, "m": 60, "h": 3600}[t[-1]]
+        t = t[:-1]
+    try:
+        secs = int(float(t) * mult)
+    except ValueError:
+        return None
+    return secs if 10 <= secs <= HIST_LONG else None
+
+
+def settings_path():
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, "spark-smi", "settings.json")
+
+
+def load_settings():
+    """The live-mode choices remembered between runs ({graphs, history}).
+    A missing or unreadable file is just no saved choices."""
+    try:
+        with open(settings_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_settings(**changes):
+    """Merges `changes` into the settings file (owner-only, written whole
+    and renamed into place). Never raises: failing to remember a choice
+    must not take the dashboard down."""
+    try:
+        data = load_settings()
+        data.update(changes)
+        path = settings_path()
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        tmp = path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=1)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def _watts(text):
+    """'348 W' -> 348.0; None for 'N/A' or anything unparsable."""
+    try:
+        return float(str(text).split()[0])
+    except Exception:
+        return None
 
 
 def main_loop(stdscr, state, rate, cluster_ctx=None):
@@ -968,6 +1119,26 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
             if ch == ord('u'):
                 term.USE_DECIMAL_UNITS = not term.USE_DECIMAL_UNITS
                 break
+            if ch == ord('g'):
+                # Graph size (#14): auto (big layouts when the terminal is
+                # big enough) -> large (also on 120-199 columns) -> compact
+                # (today's page everywhere). Remembered between runs.
+                modes = list(bigpage.GRAPH_MODES)
+                state.graphs = modes[(modes.index(state.graphs) + 1) % len(modes)] \
+                    if state.graphs in modes else "auto"
+                save_settings(graphs=state.graphs)
+                theme_toast_text = f"graphs: {state.graphs}"
+                theme_toast_ticks = THEME_TOAST_TICKS
+                stdscr.clear()
+                break
+            if ch in (ord('+'), ord('='), ord('-'), ord('_')):
+                layout = bigpage.layout_for(w, h, state.graphs)
+                state.history = bigpage.history_step(state.history, 1 if ch in (ord('+'), ord('=')) else -1, layout)
+                save_settings(history=state.history)
+                theme_toast_text = f"history: {term.fmt_span(state.history)}"
+                theme_toast_ticks = THEME_TOAST_TICKS
+                stdscr.clear()
+                break
             if ch == ord('n'):
                 active_nics_only = not active_nics_only
                 stdscr.clear()
@@ -1159,6 +1330,22 @@ def main():
 
     state = State(opts["rate"])
     state.page = opts["page"]
+    saved = load_settings()
+    graphs = opts["graphs"] if opts["graphs"] is not None else saved.get("graphs", "auto")
+    if graphs not in bigpage.GRAPH_MODES:
+        if opts["graphs"] is not None:
+            print(f"--graphs: give one of {', '.join(bigpage.GRAPH_MODES)}", file=sys.stderr)
+            sys.exit(1)
+        graphs = "auto"
+    state.graphs = graphs
+    hist = opts["history"] if opts["history"] is not None else saved.get("history")
+    if hist is not None:
+        secs = parse_span(hist)
+        if secs is None:
+            if opts["history"] is not None:
+                print("--history: give a window from 10s to 1h, such as 90s, 5m or 1h", file=sys.stderr)
+                sys.exit(1)
+        state.history = secs
 
     # --json: print one sample (+ node metadata) and exit -- the same wire
     # format --serve's /sample and --cluster's pollers use, so `spark-smi
@@ -1227,6 +1414,7 @@ def main():
             cluster_ctx["aggregator"].poll_once_sync(budget=2.0)
         # --warmup: fill the history ring buffers the way live mode does, one
         # sample a second, so the single render below can draw its graphs.
+        state.want_long = True
         for _ in range(int(warmup)):
             state.sample()
             time.sleep(1.0)
