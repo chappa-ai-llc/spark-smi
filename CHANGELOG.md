@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.0.1] — 2026-11-25
+
+### Added
+
+- `-V`, `--version` print `spark-smi X.Y.Z` and exit
+  ([#15](https://github.com/chappa-ai-llc/spark-smi/issues/15)).
+
+### Fixed
+
+- An unknown option or a stray word on the command line is no longer
+  skipped in silence: spark-smi names it in one line and exits 1, so a typo
+  such as `--cluser` can't quietly run another mode
+  ([#15](https://github.com/chappa-ai-llc/spark-smi/issues/15)).
+
 ## [5.0.0] — 2026-11-25
 
 Page 1 uses the whole screen on big terminals ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14)).
@@ -435,6 +449,7 @@ is still there, on page 1.
 
 - Initial public release.
 
+[5.0.1]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.0.1
 [5.0.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.0.0
 [4.4.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.4.0
 [4.3.1]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v4.3.1

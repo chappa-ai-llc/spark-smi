@@ -20,6 +20,7 @@ python spark-smi.py --theme nord  # one of 10 themes; `c` cycles them in live mo
 python spark-smi.py --serve       # read-only sample agent on :8817 (GET /sample, /healthz)
 python spark-smi.py -l --cluster a,b,c   # pages 3 (fleet) and 4 (fabric tests) need this
 python spark-smi.py --json        # one sample as JSON to stdout, then exit
+python spark-smi.py --version     # print the version; unknown options exit 1 (#15)
 python spark-smi.py --page 2 --size 130 --warmup 5 --shot p2.svg   # page as SVG
 ```
 
