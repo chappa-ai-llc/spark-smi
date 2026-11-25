@@ -873,8 +873,10 @@ with 4.3 after a 10-second all-pairs sweep, saved with the live `S` key.
 
 **Page 4 on an ultrawide screen.** Two Sparks at 380 × 75 with one rail
 carrying a two-way RDMA run: the last pair's per-rail chart, every node's
-fabric traffic in and out, the matrix and the run history. Captured live
-with 5.5 and the `S` key; host names were replaced before publishing.
+fabric traffic in and out, the matrix and the run history. The matrix says
+"no data" because the recorded runs used an earlier name for the second
+node. Captured live with 5.5 and the `S` key; host names were replaced
+before publishing.
 
 ![Page 4 on an ultrawide screen](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page4-ultrawide.png)
 
