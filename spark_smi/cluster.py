@@ -34,7 +34,7 @@ from . import tasks
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "5.6.0"
+    VERSION = "5.7.0"
 
 DEFAULT_PORT = 8817
 POLL_TIMEOUT = 0.75          # per-member urllib timeout (spec)

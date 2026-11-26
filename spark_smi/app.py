@@ -30,7 +30,7 @@ from . import term
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "5.6.0"
+    VERSION = "5.7.0"
 DEFAULT_REFRESH_RATE = 1.0
 HIST_LEN = 60
 # Local history kept for the big-screen layouts (#14): up to an hour at 1 s.
@@ -78,6 +78,13 @@ Usage: spark-smi [options]
   --history SPAN   how far back the big layouts' charts reach, 10s to 1h
                    (e.g. 90s, 5m, 1h; default 5m, 10m at 300+ columns).
                    The +/- keys step it live; the choice is remembered
+  --preset NAME    the big layouts' preset: auto (default), graphs (no
+                   dials), dials (bigger dials, every one shown) or dense
+                   (page 1: today's panels with page 2's beside them).
+                   The `L` key cycles it live; the choice is remembered
+  --view NAME      page 3's big layout: map+graphs (default), map (the map
+                   with the heat grid under it) or heat (the heat grid
+                   alone). The `v` key cycles it live; remembered
   --json           print one sample as JSON (+ node/model/version/ts) and exit
   --serve [PORT]   read-only HTTP sample server (default port {cluster.DEFAULT_PORT});
                    GET /sample, GET /healthz. A token in the file named by
@@ -116,11 +123,16 @@ members) prints a short "needs --cluster" note instead of a fabric panel.
 
 Live-mode keys: q quit  ·  t toggle C/F  ·  u toggle GiB/GB  ·  1/2/5 page
                 n active-NICs-only  ·  s sort NICs by rate  ·  c cycle theme
-                g graph size  ·  +/- history window (page 1)
-                S save this screen as SVG (current folder)  ·  ? help overlay
+                g graph size  ·  +/- history window  ·  L layout preset
+                v page 3 view  ·  S save this screen as SVG (current
+                folder)  ·  ? help overlay
 
-Remembered choices (the g and +/- keys) live in
+Remembered choices (the g, +/-, L and v keys) live in
 $XDG_CONFIG_HOME/spark-smi/settings.json (~/.config/spark-smi/settings.json).
+Its "dials" list, if you add one, picks page 1's dials and their order:
+cpu, memory, gpuN.util, gpuN.power, system.power, fabric, hottest,
+disk.temp, disk.used. A file spark-smi cannot read is left untouched;
+the page runs on defaults and says why.
                 page 2: tab select GPU  ·  P/C/M/R/X knobs
                 page 3 (--cluster only): up/down select · enter drill into
                 node · esc back · a alerts only (fleet) · o sort col (fleet)
@@ -171,7 +183,7 @@ def _parse_args(argv):
             "serve_verbose": False, "share_tasks": False, "share_args": False,
             "cluster": _UNSET, "node_name": None,
             "shot": None, "size": None, "warmup": 0.0, "background": None,
-            "graphs": None, "history": None, "version": False, "unknown": None}
+            "graphs": None, "history": None, "preset": None, "view": None, "version": False, "unknown": None}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -242,6 +254,12 @@ def _parse_args(argv):
         elif a == "--history":
             opts["history"] = argv[i + 1] if i + 1 < len(argv) else ""
             i += 1
+        elif a == "--preset":
+            opts["preset"] = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 1
+        elif a == "--view":
+            opts["view"] = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 1
         elif a in ("-h", "--help"):
             opts["help"] = True
         elif a in ("-V", "--version"):
@@ -302,6 +320,11 @@ class State:
         # keys' history window in seconds (None: the layout's default).
         self.graphs = "auto"
         self.history = None
+        # Step 5: the `L` key's preset, the `v` key's page-3 view, and the
+        # settings file's "dials" list (None: every dial that fits).
+        self.preset = "auto"
+        self.view3 = "map+graphs"
+        self.dial_pins = None
         self.core_hist = {}
         self.rail_hist = {}
         self.temp_hist = {}
@@ -629,7 +652,9 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
         if layout in ("large", "xl"):
             try:
                 built = clusterpage.build_page3_large(ctx, w, height_hint or h, 0, layout, history=state.history,
-                                                      theme_toast=theme_toast, has_perf=has_perf)
+                                                      theme_toast=theme_toast, has_perf=has_perf,
+                                                      preset=getattr(state, "preset", "auto"),
+                                                      view=getattr(state, "view3", "map+graphs"))
             except Exception:
                 built = None
         if built is None:
@@ -821,7 +846,9 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
                 built = bigpage.build_page1_large(sample, w, height_hint or h, 0, layout,
                                                   history=getattr(state, "history", None),
                                                   graphs=getattr(state, "graphs", "auto"), theme_toast=theme_toast,
-                                                  remote=remote_name, cluster_tabs=has_cluster, has_perf=has_perf)
+                                                  remote=remote_name, cluster_tabs=has_cluster, has_perf=has_perf,
+                                                  preset=getattr(state, "preset", "auto"),
+                                                  pins=getattr(state, "dial_pins", None))
             if built is None:
                 built = pages.build_page1(sample, tier, draw_w, x0, height=height_hint or h, sort_nics=sort_nics,
                                            theme_toast=theme_toast, remote=remote_name, cluster_tabs=has_cluster,
@@ -899,23 +926,73 @@ def settings_path():
     return os.path.join(base, "spark-smi", "settings.json")
 
 
-def load_settings():
-    """The live-mode choices remembered between runs ({graphs, history}).
-    A missing or unreadable file is just no saved choices."""
+def read_settings():
+    """(choices, problem): the settings file as a dict, and None or one
+    line saying why it could not be used. A missing file is no problem."""
+    path = settings_path()
     try:
-        with open(settings_path(), encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        return {}, None
+    except Exception as e:
+        return {}, f"settings.json unreadable ({getattr(e, 'strerror', None) or type(e).__name__})"
+    try:
+        data = json.loads(text)
+    except ValueError as e:
+        return {}, f"settings.json is not valid JSON (line {getattr(e, 'lineno', '?')})"
+    if not isinstance(data, dict):
+        return {}, "settings.json must hold one {...} object"
+    return data, None
+
+
+def load_settings():
+    """The live-mode choices remembered between runs ({graphs, history,
+    preset, view, dials}). A missing or unreadable file is no choices."""
+    return read_settings()[0]
+
+
+def settings_problems(saved):
+    """Values in the settings file this version cannot use, one line
+    each. Each one falls back to its default; nothing here is fatal."""
+    out = []
+    if "graphs" in saved and saved["graphs"] not in bigpage.GRAPH_MODES:
+        out.append(f"graphs {saved['graphs']!r} unknown")
+    if "history" in saved and parse_span(saved["history"]) is None:
+        out.append(f"history {saved['history']!r} unknown")
+    if "preset" in saved and saved["preset"] not in bigpage.PRESETS:
+        out.append(f"preset {saved['preset']!r} unknown")
+    if "view" in saved and saved["view"] not in clusterpage.VIEWS:
+        out.append(f"view {saved['view']!r} unknown")
+    if "dials" in saved:
+        pins = saved["dials"]
+        if not isinstance(pins, list):
+            out.append("dials must be a list")
+        else:
+            bad = [p for p in pins if not bigpage.dial_id_ok(p)]
+            if bad:
+                out.append(f"unknown dial {bad[0]!r}")
+    return out
+
+
+def dial_pins(saved):
+    """The settings file's "dials" list, its unknown names left out; None
+    when there is none (every dial that fits)."""
+    pins = saved.get("dials")
+    if not isinstance(pins, list):
+        return None
+    return [p for p in pins if bigpage.dial_id_ok(p)] or None
 
 
 def save_settings(**changes):
     """Merges `changes` into the settings file (owner-only, written whole
-    and renamed into place). Never raises: failing to remember a choice
-    must not take the dashboard down."""
+    and renamed into place). A file that exists but cannot be read is
+    left alone, so a key press never wipes out the owner's edits. Never
+    raises: failing to remember a choice must not take the dashboard down."""
     try:
-        data = load_settings()
+        data, problem = read_settings()
+        if problem:
+            return
         data.update(changes)
         path = settings_path()
         os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
@@ -950,6 +1027,9 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
     show_help = False
     theme_toast_text = None
     theme_toast_ticks = 0
+    if getattr(state, "settings_note", None):
+        theme_toast_text = state.settings_note
+        theme_toast_ticks = 10      # long enough to read, then the footer keys return
     shot_pending = False
     THEME_TOAST_TICKS = knobs.KnobUI.TOAST_TICKS
     # Phase 4: page 2's interactive power/clock knobs. Constructed here (not
@@ -1280,6 +1360,25 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
                 theme_toast_ticks = THEME_TOAST_TICKS
                 stdscr.clear()
                 break
+            if ch == ord('L'):
+                # Layout preset (#14 step 5), remembered between runs.
+                names = list(bigpage.PRESETS)
+                state.preset = names[(names.index(state.preset) + 1) % len(names)] \
+                    if state.preset in names else "auto"
+                save_settings(preset=state.preset)
+                theme_toast_text = f"layout: {state.preset}"
+                theme_toast_ticks = THEME_TOAST_TICKS
+                stdscr.clear()
+                break
+            if ch == ord('v') and state.page == 3:
+                names = list(clusterpage.VIEWS)
+                state.view3 = names[(names.index(state.view3) + 1) % len(names)] \
+                    if state.view3 in names else names[0]
+                save_settings(view=state.view3)
+                theme_toast_text = f"view: {state.view3}"
+                theme_toast_ticks = THEME_TOAST_TICKS
+                stdscr.clear()
+                break
             if ch in (ord('+'), ord('='), ord('-'), ord('_')):
                 layout = bigpage.layout_for(w, h, state.graphs)
                 state.history = bigpage.history_step(state.history, 1 if ch in (ord('+'), ord('=')) else -1, layout)
@@ -1495,7 +1594,8 @@ def main():
     state.page = opts["page"]
     state.share_tasks = opts["share_tasks"]
     state.share_args = opts["share_args"]
-    saved = load_settings()
+    saved, problem = read_settings()
+    problems = [problem] if problem else settings_problems(saved)
     graphs = opts["graphs"] if opts["graphs"] is not None else saved.get("graphs", "auto")
     if graphs not in bigpage.GRAPH_MODES:
         if opts["graphs"] is not None:
@@ -1511,6 +1611,31 @@ def main():
                 print("--history: give a window from 10s to 1h, such as 90s, 5m or 1h", file=sys.stderr)
                 sys.exit(1)
         state.history = secs
+    preset = opts["preset"] if opts["preset"] is not None else saved.get("preset", "auto")
+    if preset not in bigpage.PRESETS:
+        if opts["preset"] is not None:
+            print(f"--preset: give one of {', '.join(bigpage.PRESETS)}", file=sys.stderr)
+            sys.exit(1)
+        preset = "auto"
+    state.preset = preset
+    view = opts["view"] if opts["view"] is not None else saved.get("view", clusterpage.VIEWS[0])
+    if view not in clusterpage.VIEWS:
+        if opts["view"] is not None:
+            print(f"--view: give one of {', '.join(clusterpage.VIEWS)}", file=sys.stderr)
+            sys.exit(1)
+        view = clusterpage.VIEWS[0]
+    state.view3 = view
+    state.dial_pins = dial_pins(saved)
+    # Settings-first: a bad file never stops the monitor. It runs on the
+    # defaults and says why -- on stderr here, in the footer in live mode.
+    state.settings_note = None
+    if problem:
+        state.settings_note = f"{problem}: running on defaults, file left as it is ({settings_path()})"
+    elif problems:
+        more = f" (+{len(problems) - 1} more)" if len(problems) > 1 else ""
+        state.settings_note = f"settings.json: {problems[0]}{more}, default used ({settings_path()})"
+    if state.settings_note and not opts["loop"] and not (opts["json"] or opts["serve"] is not None):
+        print(f"spark-smi: {state.settings_note}", file=sys.stderr)
 
     # --json: print one sample (+ node metadata) and exit -- the same wire
     # format --serve's /sample and --cluster's pollers use, so `spark-smi

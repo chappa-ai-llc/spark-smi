@@ -21,6 +21,8 @@ Same rules as the rest of the UI: no sensor, no row (a dial, a column or a
 chart appears only when its data exists), panels only -- no curses calls --
 and every colour through a slot.
 """
+import re
+
 from . import panels, pages, term
 
 LARGE_MIN_W = 200
@@ -28,6 +30,15 @@ XL_MIN_W = 300
 LARGE_MIN_H = 45
 TALL_MIN_W, TALL_MIN_H = 120, 36
 GRAPH_MODES = ("auto", "large", "compact")
+# The `L` key's layout presets (#14 step 5): auto picks for the terminal;
+# graphs drops the dial strips; dials draws them bigger, every dial shown;
+# dense puts today's panels side by side (page 1 only).
+PRESETS = ("auto", "graphs", "dials", "dense")
+DIAL_W = {"tall": 16, "large": 16, "xl": 18}
+BIG_DIAL_W = {"tall": 20, "large": 20, "xl": 22}
+# Dial ids for the settings file's "dials" list: which dials page 1 shows,
+# in that order. gpuN is the GPU's id as the header shows it.
+_DIAL_ID = re.compile(r"^(cpu|memory|gpu\d{1,2}\.(util|power)|system\.power|fabric|hottest|disk\.(temp|used))$")
 HISTORY_STEPS = (60, 300, 600, 1800, 3600)
 DEFAULT_HISTORY = {"tall": 300, "large": 300, "xl": 600}
 
@@ -136,44 +147,61 @@ def _fmt_watts(w):
 
 # --- dials --------------------------------------------------------------
 
-def _dials(state, long):
+def dial_id_ok(name):
+    """True for a name the settings file's "dials" list may hold."""
+    return isinstance(name, str) and bool(_DIAL_ID.match(name))
+
+
+def _dials(state, long, pins=None):
     """Capability-driven: a dial only for a number the sample really has.
     Returns [(frac, value_text, sub_text, label, warn), ...] in priority
-    order; the strip shows as many as fit."""
+    order; the strip shows as many as fit. `pins` (the settings file's
+    "dials" list) keeps only those ids, in its order; an id this machine
+    has no sensor for is skipped, like any other missing sensor."""
+    keyed = _dials_keyed(state)
+    if pins:
+        have = dict(keyed)
+        return [have[k] for k in pins if k in have]
+    return [d for _, d in keyed]
+
+
+def _dials_keyed(state):
     out = []
     cpu = state.get("cpu") or {}
     clusters = cpu.get("clusters") or []
     n_cores = sum(len(c.get("cores") or []) for c in clusters)
     if clusters and n_cores:
         avg = sum((c.get("avg") or 0) * len(c.get("cores") or []) for c in clusters) / n_cores
-        out.append((avg / 100, f"{avg:.0f}%", f"{n_cores} cores", "CPU", None))
+        out.append(("cpu", (avg / 100, f"{avg:.0f}%", f"{n_cores} cores", "CPU", None)))
     vm = (state.get("mem") or {}).get("vm")
     if vm is not None and getattr(vm, "total", 0):
         used = vm.total - getattr(vm, "available", vm.total - getattr(vm, "used", 0))
-        out.append((vm.percent / 100, f"{vm.percent:.0f}%",
-                    f"{used / 2**30:.0f}/{vm.total / 2**30:.0f} GiB", "MEMORY", None))
+        out.append(("memory", (vm.percent / 100, f"{vm.percent:.0f}%",
+                               f"{used / 2**30:.0f}/{vm.total / 2**30:.0f} GiB", "MEMORY", None)))
     gpus = state.get("gpus") or []
     caps = (state.get("caps") or {}).get("gpu") or []
     for g in gpus:
         u = g.get("util")
         if isinstance(u, (int, float)):
-            out.append((u / 100, f"{u:.0f}%", _short_gpu_name(g.get("name")), f"GPU {g.get('id', '?')} UTIL", None))
+            out.append((f"gpu{g.get('id', '?')}.util",
+                        (u / 100, f"{u:.0f}%", _short_gpu_name(g.get("name")), f"GPU {g.get('id', '?')} UTIL", None)))
     for i, g in enumerate(gpus):
         c = caps[i] if i < len(caps) else {}
         watts = _watts(g.get("pwr_str"))
         limit = (g.get("power_limit_mw") or 0) / 1000
         if c.get("power_limit") and watts is not None and limit > 0:
-            out.append((watts / limit, f"{watts:.0f} W", f"of {limit:.0f} W", f"GPU {g.get('id', '?')} POWER", (0.8, 0.95)))
+            out.append((f"gpu{g.get('id', '?')}.power",
+                        (watts / limit, f"{watts:.0f} W", f"of {limit:.0f} W", f"GPU {g.get('id', '?')} POWER", (0.8, 0.95))))
     rails = {r.get("label"): r for r in state.get("power_rails") or []}
     sysw = (rails.get("dc_input") or rails.get("sys_total") or {}).get("watts")
     sys_cap = (rails.get("syspl1") or {}).get("cap_w")
     if sysw is not None and sys_cap:
-        out.append((sysw / sys_cap, f"{sysw:.0f} W", f"of {sys_cap:.0f} W", "SYSTEM POWER", (0.8, 0.95)))
+        out.append(("system.power", (sysw / sys_cap, f"{sysw:.0f} W", f"of {sys_cap:.0f} W", "SYSTEM POWER", (0.8, 0.95))))
     fab = [n for n in state.get("nics") or [] if n.get("up") and (n.get("speed_mbit") or 0) >= 25000]
     if fab:
         cap = sum(n.get("speed_mbit") or 0 for n in fab) * 1e6
         rate = sum(max(n.get("rx_bps") or 0, n.get("tx_bps") or 0) for n in fab)
-        out.append((rate / cap if cap else 0, term.fmt_rate(rate, "bit"), f"of {cap / 1e9:.0f} Gb/s", "FABRIC", None))
+        out.append(("fabric", (rate / cap if cap else 0, term.fmt_rate(rate, "bit"), f"of {cap / 1e9:.0f} Gb/s", "FABRIC", None)))
     temps = []
     for t in state.get("thermal") or []:
         if isinstance(t.get("temp_c"), (int, float)):
@@ -183,15 +211,15 @@ def _dials(state, long):
             temps.append((float(g["temp"]), f"GPU {g.get('id', '?')}"))
     if temps:
         t, where = max(temps)
-        out.append((t / 100, term.fmt_temp(t), where[:12], "HOTTEST", (0.8, 0.9)))
+        out.append(("hottest", (t / 100, term.fmt_temp(t), where[:12], "HOTTEST", (0.8, 0.9))))
     disks = [d for d in state.get("disks") or [] if isinstance(d.get("temp"), (int, float))]
     if disks:
         d = max(disks, key=lambda d: d["temp"])
-        out.append((d["temp"] / 80, term.fmt_temp(d["temp"]), str(d.get("name"))[:12], "DISK TEMP", (0.75, 0.875)))
+        out.append(("disk.temp", (d["temp"] / 80, term.fmt_temp(d["temp"]), str(d.get("name"))[:12], "DISK TEMP", (0.75, 0.875))))
     used = [d for d in state.get("disks") or [] if isinstance(d.get("used_pct"), (int, float))]
     if used:
         d = max(used, key=lambda d: d.get("size") or 0)
-        out.append((d["used_pct"] / 100, f"{d['used_pct']:.0f}%", str(d.get("name"))[:12], "DISK USED", (0.85, 0.95)))
+        out.append(("disk.used", (d["used_pct"] / 100, f"{d['used_pct']:.0f}%", str(d.get("name"))[:12], "DISK USED", (0.85, 0.95))))
     return out
 
 
@@ -202,27 +230,38 @@ def _watts(text):
         return None
 
 
-def _build_dial_strip(y, x0, width, dials, dial_w, title_right, measure=False, title="AT A GLANCE"):
-    per = dial_w + 6
-    fit = dials[:max(1, (width - 4) // per)]
+def _build_dial_strip(y, x0, width, dials, dial_w, title_right, measure=False, title="AT A GLANCE", max_rows=1):
+    """One framed strip of dials, as many as fit across; with `max_rows`
+    above 1 the rest wrap onto further rows of dials (the dials preset)."""
+    per_row = max(1, (width - 4) // (dial_w + 6))
+    n_rows = max(1, min(max_rows, -(-len(dials) // per_row)))
+    fit = dials[:per_row * n_rows]
+    per_row = -(-len(fit) // n_rows) if fit else per_row   # even rows: 5 + 5, not 9 + 1
     if not fit:
         return None
+    size = term.dial_size(dial_w)
     if measure:
         p = panels.Panel(y, x0, width, kind="top")
-        for _ in range(term.dial_size(dial_w)):
+        for _ in range(size * n_rows + n_rows - 1):
             p.add_row([])
         return p
     rendered = [term.dial(f, dial_w, v, s, lab, warn) for f, v, s, lab, warn in fit]
     if any(r is None for r in rendered):
         return None
     p = panels.Panel(y, x0, width, title=[(title, 9)], title_right=title_right, kind="top")
-    slot_w = (width - 2) // len(fit)
-    for r in range(term.dial_size(dial_w)):
-        segs = []
-        for i, rows in enumerate(rendered):
-            col = 1 + i * slot_w + (slot_w - dial_w) // 2
-            segs += _row(col, rows[r])
-        p.add_row(segs)
+    # every row spaces its dials like the first, so the columns line up
+    cols = min(per_row, len(fit))
+    slot_w = (width - 2) // cols
+    for k in range(n_rows):
+        if k:
+            p.add_row([])
+        chunk = rendered[k * per_row:(k + 1) * per_row]
+        for r in range(size):
+            segs = []
+            for i, rows in enumerate(chunk):
+                col = 1 + i * slot_w + (slot_w - dial_w) // 2
+                segs += _row(col, rows[r])
+            p.add_row(segs)
     return p
 
 
@@ -518,16 +557,21 @@ def _heat_steps(n_cores, col_w):
     return sorted(steps)
 
 
-def _assemble(state, width, height, x0, layout, span, v, measure, dials_on, header_kw, footer_kw, graphs, pad=0):
+def _assemble(state, width, height, x0, layout, span, v, measure, dials_on, header_kw, footer_kw, graphs, pad=0,
+              preset="auto", pins=None):
     """One pass: every panel at the chart heights in `v`. Returns (panels,
     rows used including header and footer)."""
     long = state.get("long")
     out = [pages._build_header(x0, width, "wide", **header_kw)]
     y = 1
     if dials_on:
-        dial_w = 18 if layout == "xl" else 16
-        strip = _build_dial_strip(y, x0, width, _dials(state, long), dial_w,
-                                  [("history ", 6), (term.fmt_span(span), 8), ("  graphs ", 6), (graphs, 8)], measure)
+        big = preset == "dials"
+        dial_w = (BIG_DIAL_W if big else DIAL_W).get(layout, 16)
+        right = [("history ", 6), (term.fmt_span(span), 8), ("  graphs ", 6), (graphs, 8)]
+        if preset != "auto":
+            right += [("  layout ", 6), (preset, 8)]
+        strip = _build_dial_strip(y, x0, width, _dials(state, long, pins), dial_w, right, measure,
+                                  max_rows=2 if big else 1)
         if strip is not None:
             out.append(strip)
             y += strip.total_height + 1
@@ -582,11 +626,17 @@ _GROW = ["gpu", "cpu", "net", "pwr", "heat", "heat", "heat", "heat", "mem", "rai
 
 
 def build_page1_large(state, width, height, x0=0, layout="large", history=None, graphs="auto",
-                      theme_toast=None, remote=None, cluster_tabs=False, has_perf=False):
+                      theme_toast=None, remote=None, cluster_tabs=False, has_perf=False,
+                      preset="auto", pins=None):
     """Page 1 for a big terminal: exactly `height` rows. None when even the
-    minimum layout can't fit (the caller then draws the normal page 1)."""
+    minimum layout can't fit (the caller then draws the normal page 1).
+    `preset` is the `L` key's layout (PRESETS); `pins` the settings file's
+    "dials" list."""
     if term.BAR_STYLE != "eighths":
         return None
+    if preset == "dense":
+        return build_page1_dense(state, width, height, x0, layout, theme_toast=theme_toast, remote=remote,
+                                 cluster_tabs=cluster_tabs, has_perf=has_perf)
     span = history or DEFAULT_HISTORY.get(layout, 300)
     try:
         _RATE[0] = float(state.get("rate") or 1.0)
@@ -597,19 +647,24 @@ def build_page1_large(state, width, height, x0=0, layout="large", history=None, 
     footer_kw = {"driver": state.get("driver", "Unknown"), "cuda": state.get("cuda", "Unknown"), "rate": rate,
                  "has_nvml": (state.get("caps") or {}).get("has_nvml", False),
                  "knob_ui": {"toast": theme_toast} if theme_toast else None}
-    key = (width, height, layout, span, _shape(state))
+    pins = tuple(pins) if pins else None
+    key = (width, height, layout, span, _shape(state), preset, pins)
     cached = _FIT_CACHE.get(key, False)
     if cached is None:
         return None
+    extra = {"preset": preset, "pins": pins}
     if cached:
         v, dials_on, pad = cached
-        built, _ = _assemble(state, width, height, x0, layout, span, v, False, dials_on, header_kw, footer_kw, graphs, pad)
+        built, _ = _assemble(state, width, height, x0, layout, span, v, False, dials_on, header_kw, footer_kw, graphs,
+                             pad, **extra)
         return built
     v = dict(_MIN, **(_TALL_MIN if layout == "tall" else {}))
-    dials_on = layout in ("large", "xl")
+    # the dials preset asks for the strip on the one-column layout too
+    dials_on = preset != "graphs" and (layout in ("large", "xl") or preset == "dials")
 
     def fits(vv, d):
-        return _assemble(state, width, height, x0, layout, span, vv, True, d, header_kw, footer_kw, graphs)[1] <= height
+        return _assemble(state, width, height, x0, layout, span, vv, True, d, header_kw, footer_kw, graphs,
+                         **extra)[1] <= height
 
     if not fits(v, dials_on):
         dials_on = False
@@ -641,10 +696,12 @@ def build_page1_large(state, width, height, x0=0, layout="large", history=None, 
                 grown = True
     if len(_FIT_CACHE) > 32:
         _FIT_CACHE.clear()
-    used = _assemble(state, width, height, x0, layout, span, v, True, dials_on, header_kw, footer_kw, graphs)[1]
+    used = _assemble(state, width, height, x0, layout, span, v, True, dials_on, header_kw, footer_kw, graphs,
+                     **extra)[1]
     pad = max(0, height - used)
     _FIT_CACHE[key] = (v, dials_on, pad)
-    built, _ = _assemble(state, width, height, x0, layout, span, v, False, dials_on, header_kw, footer_kw, graphs, pad)
+    built, _ = _assemble(state, width, height, x0, layout, span, v, False, dials_on, header_kw, footer_kw, graphs, pad,
+                         **extra)
     return built
 
 
@@ -667,3 +724,60 @@ def _shape(state):
         len(pages._build_memory_panel(0, 0, 200, state.get("mem") or {},
                                       (state.get("caps") or {}).get("gpu") or [], "wide", True).rows),
     )
+
+
+# --- the dense preset ------------------------------------------------------------
+
+DENSE_GAP = 2
+
+
+def _fit_column(built, height):
+    """A page builder's panels without its header and footer, trimmed from
+    the end until the last one ends above the footer row. Whole panels go,
+    never half of one, and a dropped 'top' panel takes its 'mid' panels
+    with it."""
+    body = [p for p in built[1:-1] if p.kind != "plain"]
+    while body and body[-1].y + body[-1].total_height > height - 1:
+        last = body.pop()
+        while last.kind == "mid" and body:
+            last = body.pop()
+    return body
+
+
+def build_page1_dense(state, width, height, x0=0, layout="large", theme_toast=None, remote=None,
+                      cluster_tabs=False, has_perf=False):
+    """The dense preset: today's page 1 panels in the left column and
+    page 2's (GPU detail, NIC ports, THERMALS, POWER RAILS, PCIE LINKS,
+    NVME SMART) in the right, read-only. None on the one-column layout,
+    which keeps the normal page."""
+    if layout not in ("large", "xl"):
+        return None
+    col_w = (width - DENSE_GAP) // 2         # equal columns, so a panel can move across
+    right_x = x0 + width - col_w
+    kw = {"remote": remote, "cluster_tabs": cluster_tabs, "has_perf": has_perf}
+    out = [pages._build_header(x0, width, "wide", **kw)]
+    tier = pages.tier_for_width(col_w)
+    left = _fit_column(pages.build_page1(state, tier, col_w, x0, height=height, **kw), height)
+    try:
+        right = _fit_column(pages.build_page2(state, tier, col_w, right_x, height=height, **kw), height)
+    except Exception:
+        right = []
+    # page 1 is usually the shorter column: the right column's last
+    # full-width panels move under it while they fit
+    left_end = max((p.y + p.total_height + 1 for p in left), default=1)
+    moved = []
+    while right and right[-1].kind == "top" and right[-1].x == right_x and right[-1].w == col_w \
+            and len(right) > 1 and left_end + right[-1].total_height + 1 <= height - 1:
+        p = right.pop()
+        moved.append(p)
+        left_end += p.total_height + 1
+    y = max((p.y + p.total_height + 1 for p in left), default=1)
+    for p in reversed(moved):
+        p.x, p.y = x0, y
+        y += p.total_height + 1
+    out += left + moved + right
+    out.append(pages._build_footer(x0, width, height - 1, state.get("driver", "Unknown"),
+                                   state.get("cuda", "Unknown"), state.get("rate", 1.0),
+                                   (state.get("caps") or {}).get("has_nvml", False),
+                                   knob_ui={"toast": theme_toast} if theme_toast else None))
+    return out

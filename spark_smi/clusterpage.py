@@ -31,7 +31,10 @@ from . import bigpage, cluster, pages, panels, term, topomap
 MAX_NODES = 16
 MAX_GRID_ROWS = 4
 COL_MIN_W = 56          # a node column narrower than this cannot hold its charts
-DIAL_W = {"large": 16, "xl": 18}
+DIAL_W = bigpage.DIAL_W
+# The `v` key's page-3 views (#14 step 5).
+VIEWS = ("map+graphs", "map", "heat")
+HEAT_THICK_MAX = 3      # the heat view draws each series up to this many rows tall
 TOP_PROCS = 3
 
 # Chart heights in rows ("fab" is each half of the mirror), the number of
@@ -422,14 +425,16 @@ _HEAT_TITLES = {
 }
 
 
-def _build_heat(y, x0, width, rows, span, pad, level=1):
+def _build_heat(y, x0, width, rows, span, pad, level=1, thick=1):
+    """`thick` rows per series (the heat view); the label sits on the first."""
     lw = min(24, max(len(lbl) for lbl, _ in rows)) + 1
     cells = width - 2 - 1 - lw
     p = panels.Panel(y, x0, width, title=_HEAT_TITLES.get(level, _HEAT_TITLES[1]),
                      title_right=[("· idle ", 7), ("▆", 12), ("▆", 15), (" busy", 6)], kind="top")
     for label, hist in rows:
         runs = term.heat_runs(bigpage._window(hist, span), cells, window=bigpage._w(span)) or []
-        p.add_row([(1, f"{label[:lw - 1]:<{lw}}", 6)] + bigpage._row(None, runs))
+        for k in range(thick):
+            p.add_row([(1, f"{label[:lw - 1] if not k else '':<{lw}}", 6)] + bigpage._row(None, runs))
     p.add_row(bigpage._row(1 + lw, term.time_axis(cells, span)))
     for _ in range(pad):
         p.add_row([])
@@ -438,7 +443,8 @@ def _build_heat(y, x0, width, rows, span, pad, level=1):
 
 def _footer(x0, width, y, up, total, rate, span, has_perf, theme_toast):
     page_nums = "1 2 3 4 5" if has_perf else "1 2 3 5"
-    keys = f" q quit · ←→ select · enter drill into node · {page_nums} page · g graphs · +/- history · c colors"
+    keys = (f" q quit · ←→ select · enter drill into node · {page_nums} page · v view · L layout"
+            " · g graphs · +/- history · c colors")
     if theme_toast:
         info = [theme_toast]
     else:
@@ -478,9 +484,13 @@ def _total(infos, per, v, dials_h, topo, heat_n):
 
 
 def build_page3_large(cluster_ctx, width, height, x0=0, layout="large", history=None,
-                      theme_toast=None, has_perf=False):
+                      theme_toast=None, has_perf=False, preset="auto", view="map+graphs"):
     """Page 3 for a big terminal, exactly `height` rows; None when it does
-    not apply (no braille, no nodes, over MAX_NODES) or nothing fits."""
+    not apply (no braille, no nodes, over MAX_NODES) or nothing fits.
+    `preset` (the `L` key): graphs drops the CLUSTER dials, dials draws
+    them bigger. `view` (the `v` key, VIEWS): map is the map with the heat
+    grid under it, heat the heat grid alone, neither with node columns;
+    with no map or no heat data they fall back to map+graphs."""
     if term.BAR_STYLE != "eighths" or not height:
         return None
     pre = pages.page3_prepare(cluster_ctx)
@@ -499,8 +509,8 @@ def build_page3_large(cluster_ctx, width, height, x0=0, layout="large", history=
     per = grid_for(n, width)
     if math.ceil(n / per) > MAX_GRID_ROWS:
         return None
-    dial_w = DIAL_W.get(layout, 16)
-    dials = cluster_dials(infos, pre["total"])
+    dial_w = (bigpage.BIG_DIAL_W if preset == "dials" else DIAL_W).get(layout, 16)
+    dials = cluster_dials(infos, pre["total"]) if preset != "graphs" else []
     dials_h = term.dial_size(dial_w) + 2 if dials else 0
     levels = heat_levels(infos)
     heat_count = {lvl: len(heat_rows(infos, lvl)) for lvl in levels}
@@ -509,8 +519,14 @@ def build_page3_large(cluster_ctx, width, height, x0=0, layout="large", history=
         return heat_count.get(level, 0)
 
     pairs_by_name = sorted(zip(views, metrics), key=lambda vm: vm[0].get("name") or "")
-    topos = _topo_candidates(pairs_by_name, width, max(6, min(16, height // 5)),
-                             ui.selected_name if ui else None, getattr(ui, "topo_cache", None) if ui else None)
+    sel_name = ui.selected_name if ui else None
+    cache = getattr(ui, "topo_cache", None) if ui else None
+    if view in ("map", "heat"):
+        alone = _build_alone(view, pre, infos, levels, pairs_by_name, sel_name, cache, width, height,
+                             x0, dials, dial_w, dials_h, span, cluster_ctx, rate, has_perf, theme_toast)
+        if alone is not None:
+            return alone
+    topos = _topo_candidates(pairs_by_name, width, max(6, min(16, height // 5)), sel_name, cache)
 
     # Keep the dials and the heat grid before the map's size, the map before
     # nothing; first at comfortable chart heights, then at the least.
@@ -594,4 +610,45 @@ def build_page3_large(cluster_ctx, width, height, x0=0, layout="large", history=
         out.append(hp)
         y += hp.total_height + 1
     out.append(_footer(x0, width, height - 1, pre["up"], pre["total"], rate, span, has_perf, theme_toast))
+    return out
+
+
+def _build_alone(view, pre, infos, levels, pairs, sel_name, cache, width, height, x0,
+                 dials, dial_w, dials_h, span, cluster_ctx, rate, has_perf, theme_toast):
+    """The map view (TOPOLOGY at its own height, the heat grid filling the
+    rows below) or the heat view (the heat grid alone). The heat grid is the
+    deepest level, each series drawn up to HEAT_THICK_MAX rows tall. None
+    when the view has nothing to show (no links found, no heat data)."""
+    if not levels:
+        return None
+    level = max(levels)
+    rows = heat_rows(infos, level)
+    if not rows:
+        return None
+    out = [pages._build_header(x0, width, "wide", page=3, cluster_tabs=True,
+                               cluster_summary=pre["summary"], has_perf=has_perf)]
+    y = 1
+    footer_y = height - 1
+    heat_min = len(rows) + 1 + 2            # one row per series, the time axis, the frame
+    if dials and y + dials_h + heat_min <= footer_y:
+        strip = bigpage._build_dial_strip(y, x0, width, dials, dial_w,
+                                          [(f"{cluster_ctx.get('name', 'cluster')} · {pre['total']} nodes", 6)],
+                                          title="CLUSTER")
+        if strip is not None:
+            out.append(strip)
+            y += strip.total_height + 1
+    if view == "map":
+        cap = footer_y - y - heat_min - 2
+        topo = topomap.render(pairs, width - 4, min(cap, 24), selected_name=sel_name, cache=cache) if cap >= 3 else None
+        if not topo or not topo["rows"]:
+            return None
+        tp = pages._build_topology_panel(y, x0, width, topo, pre["n"])
+        out.append(tp)
+        y += tp.total_height + 1
+    room = footer_y - y - 2                 # rows inside the heat panel
+    if len(rows) + 1 > room:
+        return None
+    thick = max(1, min(HEAT_THICK_MAX, (room - 1) // len(rows)))
+    out.append(_build_heat(y, x0, width, rows, span, room - (len(rows) * thick + 1), level, thick))
+    out.append(_footer(x0, width, footer_y, pre["up"], pre["total"], rate, span, has_perf, theme_toast))
     return out
