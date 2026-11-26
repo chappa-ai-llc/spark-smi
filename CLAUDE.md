@@ -32,7 +32,8 @@ pure pieces (cluster token reader, node names, the network counter rules,
 the ethtool netlink codec, themes, graphs, SVG shots, page 3's topology map,
 page 5's session grouping and confirm gate, page 5's remote tasks (wire cut, merge, read-only gates), page 5's tracker/sort/filter/
 layouts, the big-screen page 1, page 3's big layout and cluster history,
-page 2's big layout and normal-page height fit, and page 4's big layout and run history): `python3 -m unittest discover -s deploy` and
+page 2's big layout and normal-page height fit, page 4's big layout and run history,
+and the layout presets, page 3 views and settings file): `python3 -m unittest discover -s deploy` and
 `python3 -m unittest discover -s tests` (the second needs psutil installed). Packaging is setuptools via
 `pyproject.toml`; the pip entry point is `spark-smi = spark_smi.__main__:main`.
 
@@ -195,6 +196,13 @@ spark_smi/
                   shape). Dial strip, charts with axes, POWER & THERMAL
                   and per-core heatmap at xl. Reads State's sample["long"]
                   (up to HIST_LONG samples, never sent over the wire).
+                  PRESETS (the `L` key, 5.7): graphs = no strip, dials =
+                  BIG_DIAL_W and up to two strip rows, dense =
+                  build_page1_dense (pages.build_page1 | pages.build_page2
+                  in two equal columns, whole panels dropped to fit, the
+                  right column's last full-width panels moved under the
+                  left). _dials(pins) follows settings.json's "dials" ids
+                  (dial_id_ok).
   clusterpage.py  Page 3's big layout (#14 step 3, 5.3 for ultrawide/4K):
                   build_page3_large() at bigpage.layout_for() large/xl, up
                   to MAX_NODES (16) in grid_for()'s rows (up to 4):
@@ -207,6 +215,10 @@ spark_smi/
                   terminal exactly;
                   None falls back to pages.build_page3. Shares
                   pages.page3_prepare (sort/filter/selection/summary).
+                  VIEWS (the `v` key, 5.7): map = TOPOLOGY + heat grid,
+                  heat = heat grid alone (_build_alone; None without a
+                  heat grid falls back to map+graphs). Takes the preset
+                  for the CLUSTER dials (graphs: none, dials: bigger).
   advpage.py      Page 2's big layout (#14, 5.4): build_page2_large() at
                   bigpage.layout_for() large/xl: a column per GPU (pages.
                   _build_gpu_detail_panel, knobs included, + SM clock/
@@ -242,6 +254,12 @@ spark_smi/
                   ONLY module allowed to `import curses`.
   __main__.py     from .app import main; main() — the runpy hack is gone.
 ```
+Remembered choices live in `settings.json` under `$XDG_CONFIG_HOME/spark-smi`
+(app.py `read_settings`/`settings_problems`/`save_settings`): graphs,
+history, preset, view and an optional hand-written "dials" list. A file
+that is not valid JSON is never written over; main() turns any problem
+into `state.settings_note` (stderr in snapshot mode, a footer toast live).
+
 `spark-smi.py` (repo root) is a tiny launcher: it puts the repo dir on
 `sys.path` and calls `spark_smi.app.main()`.
 

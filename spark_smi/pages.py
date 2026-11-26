@@ -18,7 +18,7 @@ from . import topomap
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "5.6.0"
+    VERSION = "5.7.0"
 
 # The header shows the major.minor series ("4.0"). Derived from VERSION rather
 # than written out, because a hardcoded literal here silently drifted a whole
@@ -384,7 +384,9 @@ def _build_footer(x0, width, y, driver, cuda, rate, has_nvml, extra_keys=None, k
         ]
     else:
         variants = [
+            " q quit · 1 2 5 page · t °C/°F · u GiB/GB · c colors · n active NICs · s sort · g graphs · +/- history · L layout · ? help",
             " q quit · 1 2 5 page · t °C/°F · u GiB/GB · c colors · n active NICs · s sort · g graphs · +/- history · ? help",
+            " q quit · 1 2 5 page · t °C/°F · u GiB/GB · c colors · n active NICs · s sort · g graphs · ? help",
             " q quit · 1 2 5 page · t °C/°F · u GiB/GB · c colors · n active NICs · s sort · ? help",
             " q quit · 1 2 5 page · t °C/°F · u GiB/GB · c colors · n NICs",
             " q quit · 1 2 5 page · t temp · u units",
@@ -444,6 +446,7 @@ def build_help_overlay(term_w, term_h):
         ("  g            graphs: auto / large / compact (big-screen", 3),
         ("               layouts need 200+ columns, or large: 120+)", 3),
         ("  + / -        history window: 1m 5m 10m 30m 1h", 3),
+        ("  L            layout: auto / graphs / dials / dense", 3),
         ("", 3),
         ("Page 2 -- advanced (GPU knobs, root-gated)", 9),
         ("  Tab          select GPU", 3),
@@ -460,7 +463,8 @@ def build_help_overlay(term_w, term_h):
         ("Page 3 -- cluster (--cluster)", 9),
         ("  arrows       select node", 3),
         ("  Enter        drill into node (knobs stay local-only)", 3),
-        ("  g  + / -     graph size, history window (as page 1)", 3),
+        ("  g  + / -  L  graph size, history window, layout", 3),
+        ("  v            view: map+graphs / map / heat", 3),
         ("  Esc          back out of a drilldown", 3),
         ("  a            fleet matrix: alerting nodes only", 3),
         ("  o            fleet matrix: cycle sort column", 3),

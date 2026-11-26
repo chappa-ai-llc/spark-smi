@@ -2,7 +2,7 @@
 
 > A terminal-based system monitor (TUI) built for **NVIDIA Grace Blackwell (GB10)** and hybrid ARM architectures — because `nvidia-smi` alone doesn't tell the full story.
 
-![Version](https://img.shields.io/badge/version-5.6.0-blue)
+![Version](https://img.shields.io/badge/version-5.7.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8%2B-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Linux%20aarch64-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -199,6 +199,34 @@ columns, when it fits), and **compact** (the normal page at any size).
 remembers your last `g` and `+`/`-` choice in
 `~/.config/spark-smi/settings.json` (or under `$XDG_CONFIG_HOME`).
 
+`L` cycles the big layouts' preset (`--preset` on the command line):
+
+- **auto**: the layout described here.
+- **graphs**: no dial strip on page 1 or page 3; the charts take its rows.
+- **dials**: bigger dials, and every dial this machine has, on two rows
+  when one is not enough.
+- **dense** (page 1): today's panels in two columns: page 1's on the left,
+  page 2's (GPU detail, NIC ports, PCIE LINKS, THERMALS, POWER RAILS,
+  NVME SMART) on the right, read-only. A panel that does not fit is left
+  out whole. Best on a wide terminal that is not very tall.
+
+To choose page 1's dials and their order, add a `"dials"` list to the
+settings file. spark-smi keeps it when it saves your key choices:
+
+```json
+{
+ "preset": "auto",
+ "dials": ["cpu", "memory", "gpu0.util", "gpu0.power", "system.power", "fabric", "hottest"]
+}
+```
+
+The names are `cpu`, `memory`, `gpuN.util`, `gpuN.power` (N is the GPU's
+number in the header), `system.power`, `fabric`, `hottest`, `disk.temp` and
+`disk.used`. A dial this machine has no sensor for is skipped. If the file
+is not valid JSON, spark-smi runs on its defaults, says why in the footer
+(on stderr in snapshot mode) and never writes over the file; a value it
+does not know falls back to its default the same way.
+
 Page 2 has one too (a live capture is under "Screenshots"):
 
 - **One column per GPU**: the same detail as the normal page, knobs
@@ -244,6 +272,12 @@ Page 3 (cluster mode, up to 16 nodes) has one too:
   that lags the others stands out. On a taller terminal it becomes **HEAT**
   and adds a row per node for fabric use (as a % of link speed), then one
   for CPU.
+
+`v` cycles page 3's view (`--view` on the command line): **map+graphs**
+(the layout above), **map** (the map, with the heat grid filling the rows
+beneath it) and **heat** (the heat grid alone, each row drawn up to three
+lines tall). A cluster with no heat grid (fewer than two GPUs) keeps
+map+graphs. The view is remembered like the other choices.
 
 The cluster history is kept by the machine drawing the page, from its own
 polls. Until it has more than a minute, the charts show the minute each
@@ -463,6 +497,8 @@ directory, plus ASIC temperature from the NIC's own hwmon device.
 | `s` | 1 | Sort NIC rows by current rate (max of RX/TX), descending — toggle back to detection order |
 | `g` | 1 / 3 / 5 | Graph size: auto / large / compact (see "Big screens"); remembered |
 | `+` / `-` | 1 / 3 / 5 | History window of the big layouts' charts: 1m, 5m, 10m, 30m, 1h; remembered |
+| `L` | 1 / 3 | Layout preset of the big layouts: auto / graphs / dials / dense; remembered |
+| `v` | 3 | Big cluster page view: map+graphs / map / heat; remembered |
 | `Tab` | 2 | Select GPU (when more than one) |
 | `P` | 2 | Focus/cycle the power-limit knob (GPU limit → PL1 → PL2 → SYSPL1 → SYSPL2, as available) |
 | `C` / `M` | 2 | Focus the SM / memory clock-lock knob |
@@ -594,6 +630,13 @@ spark-smi [options]
   --history SPAN   how far back the big layouts' charts reach, 10s to 1h
                    (e.g. 90s, 5m, 1h; default 5m, 10m at 300+ columns).
                    The +/- keys step it live; the choice is remembered
+  --preset NAME    the big layouts' preset: auto (default), graphs (no
+                   dials), dials (bigger dials, every one shown) or dense
+                   (page 1: today's panels with page 2's beside them).
+                   The `L` key cycles it live; the choice is remembered
+  --view NAME      page 3's big layout: map+graphs (default), map (the map
+                   with the heat grid under it) or heat (the heat grid
+                   alone). The `v` key cycles it live; remembered
   --json           print one sample as JSON (+ node/model/version/ts) and exit
   --serve [PORT]   read-only HTTP sample server (default port 8817);
                    GET /sample, GET /healthz. A token in the file named by
@@ -1208,7 +1251,7 @@ all fixed in 4.0 — see the [changelog](CHANGELOG.md).
 - [X] **Big-screen advanced page** — clock, power, temperature, PCIe, per-port fabric and congestion charts, a thermal heat grid and wall power on page 2 (5.4)
 - [X] **Big-screen fabric page** — a tall per-rail chart, every node's fabric traffic and the run history on page 4 (5.5)
 - [X] **Other nodes' GPU tasks** — page 5 lists other nodes' GPU processes read-only, opt-in on each agent (`--share-tasks`), command lines only with `--share-args` (5.6)
-- [ ] **Layout presets** — `L` presets and a layout file ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14))
+- [X] **Layout presets** — `L` presets (graphs, dials, dense), page 3 views (`v`) and pinned dials in the settings file (5.7)
 
 ---
 

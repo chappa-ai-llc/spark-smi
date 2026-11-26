@@ -6,6 +6,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.7.0] — 2026-11-26
+
+Layout presets ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14), step 5, the last).
+
+### Added
+
+- **`L` layout presets** for the big layouts (`--preset`): **auto**;
+  **graphs** (no dial strip on pages 1 and 3); **dials** (bigger dials,
+  every one shown, on two rows when needed); **dense** (page 1: today's
+  panels in two columns, page 2's sensor panels beside page 1's).
+- **`v` page 3 views** (`--view`): **map+graphs**, **map** (the map with the
+  heat grid beneath) and **heat** (the heat grid alone, rows up to three
+  lines tall).
+- **Pinned dials**: a `"dials"` list in `settings.json` picks page 1's dials
+  and their order (`cpu`, `memory`, `gpuN.util`, `gpuN.power`,
+  `system.power`, `fabric`, `hottest`, `disk.temp`, `disk.used`).
+- Both new choices are remembered with the others.
+
+### Fixed
+
+- A `settings.json` that is not valid JSON was read as empty, and the next
+  `g` or `+`/`-` press wrote over it. Now it is never written over; the
+  monitor runs on defaults and says why in the footer (on stderr in
+  snapshot mode). An unknown value falls back to its default the same way.
+
+### Decided
+
+- The layout file proposed for step 5 is the existing `settings.json`, not
+  a new `layout.toml`: JSON needs nothing beyond the standard library, and
+  `tomllib` would have meant Python 3.11 or newer.
+
 ## [5.6.0] — 2026-11-26
 
 Other nodes' GPU tasks on page 5 ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14), step 4).
@@ -609,6 +640,7 @@ is still there, on page 1.
 
 - Initial public release.
 
+[5.7.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.7.0
 [5.6.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.6.0
 [5.5.1]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.5.1
 [5.5.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.5.0
