@@ -577,7 +577,7 @@ _EMPTY_SAMPLE = {"cpu": {}, "mem": {}, "gpus": [], "nics": [], "disks": [], "the
 
 def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_hint=None, page_num=1,
                       knob_ui=None, sort_nics=False, show_help=False, theme_toast=None, cluster_ctx=None,
-                      fab_ui=None, fab_engine=None, task_ui=None):
+                      fab_ui=None, fab_engine=None, task_ui=None, help_scroll=0):
     """Single UI entry point for both backends. Builds the requested page
     (1 overview, 2 advanced, 3 cluster, 4 fabric validation -- Phases 6/7,
     both --cluster only -- 5 GPU tasks, always local) and draws it.
@@ -598,7 +598,8 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
     `sort_nics` ('s' key, page 1 only) reorders NETWORK rows by max(rx, tx)
     rate descending each frame; `show_help` ('?' key, live mode, both pages)
     draws a help overlay panel appended last so it paints over everything
-    else already built this frame. `theme_toast` ('c' key, live mode, both
+    else already built this frame; `help_scroll` is its scroll offset
+    when the list does not fit (#16, pages.build_help_overlay). `theme_toast` ('c' key, live mode, both
     pages) is a (text, slot) pair shown via the footer's existing toast
     rendering (see pages._build_footer) for a few ticks after a theme
     switch, or None the rest of the time.
@@ -720,7 +721,7 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
             built = [err]
         if show_help:
             try:
-                built = built + pages.build_help_overlay(w, h)
+                built = built + pages.build_help_overlay(w, h, page_num, help_scroll)
             except Exception:
                 pass
         try:
@@ -782,7 +783,7 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
             built = [err]
         if show_help:
             try:
-                built = built + pages.build_help_overlay(w, h)
+                built = built + pages.build_help_overlay(w, h, page_num, help_scroll)
             except Exception:
                 pass
         try:
@@ -858,7 +859,7 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
 
     if show_help:
         try:
-            built = built + pages.build_help_overlay(w, h)
+            built = built + pages.build_help_overlay(w, h, page_num, help_scroll)
         except Exception:
             pass
 
@@ -1013,6 +1014,19 @@ def _watts(text):
         return None
 
 
+def _help_scroll_step(curses, ch, term_h):
+    """Scroll step for a key while the help overlay is up (#16): a row
+    for up/down, a page for PgUp/PgDn, the ends for Home/End;
+    None for every other key, which closes the overlay."""
+    page = max(1, term_h - 8)
+    return {
+        curses.KEY_UP: -1,
+        curses.KEY_DOWN: 1,
+        curses.KEY_PPAGE: -page, curses.KEY_NPAGE: page,
+        curses.KEY_HOME: -10 ** 6, curses.KEY_END: 10 ** 6,
+    }.get(ch)
+
+
 def main_loop(stdscr, state, rate, cluster_ctx=None):
     import curses
     curses.start_color()
@@ -1025,6 +1039,7 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
     active_nics_only = False
     sort_nics = False
     show_help = False
+    help_scroll = 0
     theme_toast_text = None
     theme_toast_ticks = 0
     if getattr(state, "settings_note", None):
@@ -1114,7 +1129,8 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
             render_dashboard(screen, colors, state, active_nics_only, height_hint=h, page_num=state.page,
                               knob_ui=knob_ui, sort_nics=sort_nics, show_help=show_help,
                               theme_toast=theme_toast, cluster_ctx=cluster_ctx,
-                              fab_ui=fab_ui, fab_engine=fab_engine, task_ui=task_ui)
+                              fab_ui=fab_ui, fab_engine=fab_engine, task_ui=task_ui,
+                              help_scroll=help_scroll)
             stdscr.refresh()
         except Exception:
             pass
@@ -1136,13 +1152,23 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
             # Help overlay swallows every key while shown -- "dismissed by
             # any key" takes priority over what that key would otherwise do
             # (e.g. 'q' while help is up closes help, it doesn't quit).
+            # The scroll keys scroll it when it does not fit (#16), and a
+            # resize redraws it instead of closing it.
             if show_help:
-                if ch != -1:
-                    show_help = False
-                    stdscr.clear()
+                if ch == -1:
+                    time.sleep(0.05)
+                    continue
+                if ch == curses.KEY_RESIZE:
                     break
-                time.sleep(0.05)
-                continue
+                hh, ww = stdscr.getmaxyx()
+                step = _help_scroll_step(curses, ch, hh)
+                if step is not None:
+                    top = pages.help_scroll_max(ww, hh, state.page)
+                    help_scroll = max(0, min(top, help_scroll + step))
+                    break
+                show_help = False
+                stdscr.clear()
+                break
             # Page 5's `/` filter: while typing, every key is text (q
             # included) until Enter keeps it or Esc clears it.
             if state.page == 5 and task_ui.editing:
@@ -1155,6 +1181,7 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
                 return
             if ch == ord('?'):
                 show_help = True
+                help_scroll = 0
                 stdscr.clear()
                 break
             # Phase 6 (--cluster only): page 3's own key bindings. '3' is

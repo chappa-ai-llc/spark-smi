@@ -420,95 +420,182 @@ def _build_footer(x0, width, y, driver, cuda, rate, has_nvml, extra_keys=None, k
     return p
 
 
-def build_help_overlay(term_w, term_h):
-    """'?' key (live mode, both pages): a single centered bordered panel
+HELP_COL_W = 56     # one help column; " " + every line fits in it
+
+
+def _help_sections():
+    """The `?` overlay's sections: [(page or None, [(text, slot), ...])].
+    None is the global block. Built per call: the theme name and the
+    arrow glyphs change at run time."""
+    la, ra = term.knob_arrows()
+    return [
+        (None, [
+            ("Global", 9),
+            ("  q            quit", 3),
+            ("  1 - 5        switch page: overview / advanced /", 3),
+            ("               cluster / fabric / tasks", 3),
+            ("               (3 and 4 need --cluster)", 3),
+            ("  t            toggle °C / °F", 3),
+            ("  u            toggle GiB / GB (decimal units)", 3),
+            (f"  c            cycle color theme  (now: {term.ACTIVE_THEME})", 3),
+            ("  S            save this screen as SVG (current folder)", 3),
+            ("  ?            toggle this help", 3),
+        ]),
+        (1, [
+            ("Page 1 -- overview", 9),
+            ("  n            show active NICs only", 3),
+            ("  s            sort NIC rows by rate (toggle)", 3),
+            ("  g            graphs: auto / large / compact", 3),
+            ("               (big layouts need 200+ columns,", 3),
+            ("               or 120+ with large)", 3),
+            ("  + / -        history window: 1m 5m 10m 30m 1h", 3),
+            ("  L            layout: auto / graphs / dials / dense", 3),
+        ]),
+        (2, [
+            ("Page 2 -- advanced (GPU knobs, root-gated)", 9),
+            ("  Tab          select GPU", 3),
+            ("  P            power limit knob", 3),
+            ("  C / M        SM / memory clock lock knob", 3),
+            ("  R            reset clocks", 3),
+            ("  X            toggle persistence mode", 3),
+            (f"  {la} / {ra}          adjust focused knob", 3),
+            ("  Enter        apply focused knob (confirm)", 3),
+            ("  Esc          cancel / dismiss confirm", 3),
+            ("  ! knobs write real hardware -- no warranty,", 4),
+            ("    entirely at your own risk", 4),
+        ]),
+        (3, [
+            ("Page 3 -- cluster (--cluster)", 9),
+            ("  arrows       select node", 3),
+            ("  Enter        drill into node (knobs stay local-only)", 3),
+            ("  g  + / -  L  graph size, history window, layout", 3),
+            ("  v            view: map+graphs / map / heat", 3),
+            ("  Esc          back out of a drilldown", 3),
+            ("  a            fleet matrix: alerting nodes only", 3),
+            ("  o            fleet matrix: cycle sort column", 3),
+        ]),
+        (4, [
+            ("Page 4 -- fabric validation (--cluster, 2+ members)", 9),
+            ("  space        start test (confirm) /", 3),
+            ("               stop at once (no confirm)", 3),
+            ("  m            cycle mode: pair / sweep / burst", 3),
+            ("  d            cycle duration: 10s / 30s / 60s", 3),
+            ("  up / down    select pair (pair mode)", 3),
+        ]),
+        (5, [
+            ("Page 5 -- GPU tasks (others read-only)", 9),
+            ("  up / down    select GPU / session / process row", 3),
+            ("  Enter / o    open session: tmux/screen attach,", 3),
+            ("               journalctl / docker logs tail", 3),
+            ("  e            end process (SIGTERM) or session", 3),
+            ("               via tmux/screen/systemctl/docker", 3),
+            ("  k            kill process (SIGKILL) -- confirm", 3),
+            ("  a            also list bare /dev/nvidia* holders", 3),
+            ("  s            sort: GPU mem / SM / CPU / time / PID", 3),
+            ("  f            flat list per GPU / session tree", 3),
+            ("  /            filter (Enter keeps, Esc clears)", 3),
+            ("  g  + / -     graph size, history window (as page 1)", 3),
+            ("  Esc          cancel confirm, else clear the filter", 3),
+        ]),
+    ]
+
+
+def help_lines(page=1):
+    """The overlay's body lines: the global keys, then the CURRENT page's
+    section, then the other pages in order (#16: on a small terminal the
+    keys that matter right now come first, not after four other pages)."""
+    secs = _help_sections()
+    order = [s for s in secs if s[0] is None]
+    order += [s for s in secs if s[0] == page]
+    order += [s for s in secs if s[0] is not None and s[0] != page]
+    out = []
+    for i, (_, rows) in enumerate(order):
+        if i:
+            out.append(("", 3))
+        out.extend(rows)
+    return out
+
+
+def _help_geometry(term_w, term_h, n_body):
+    """(mode, rows) for a body of n_body lines plus the closing line:
+    mode "one" (one column, everything), "two" (two columns, everything)
+    or "scroll" (one column, `rows` body rows plus the closing line)."""
+    avail = max(4, max(6, term_h - 2) - 2)     # inner rows the frame can hold
+    total = n_body + 2                         # blank + "press any key"
+    if total <= avail:
+        return "one", total
+    if term_w >= HELP_COL_W * 2 + 6 and (total + 1) // 2 <= avail:
+        return "two", (total + 1) // 2
+    return "scroll", max(2, avail - 1)
+
+
+def _help_window(n_body, rows, scroll):
+    """Visible body slice in scroll mode: (start, end) with a marker row
+    taken from the top when start > 0 and from the bottom when end < n."""
+    start = max(0, min(scroll, help_scroll_max_for(n_body, rows)))
+    end = start + rows - (1 if start else 0)
+    if end < n_body:
+        end -= 1
+    return start, min(end, n_body)
+
+
+def help_scroll_max_for(n_body, rows):
+    if n_body <= rows:
+        return 0
+    return n_body - rows + 1     # the last screen keeps its top marker
+
+
+def help_scroll_max(term_w, term_h, page=1):
+    """Largest useful scroll offset for the overlay at this size: 0 when
+    the whole list shows (one or two columns). app.py clamps with it."""
+    n = len(help_lines(page))
+    mode, rows = _help_geometry(term_w, term_h, n)
+    return help_scroll_max_for(n, rows) if mode == "scroll" else 0
+
+
+def build_help_overlay(term_w, term_h, page=1, scroll=0):
+    """'?' key (live mode, every page): a single centered bordered panel
     listing every key binding + the running version, appended AFTER the
-    already-built page so panels.render() paints it on top -- dismissed by
-    any keypress (app.py's main_loop), not drawn by this function itself.
+    already-built page so panels.render() paints it on top -- app.py's
+    main_loop closes it on any key but the scroll keys.
     Rows are padded to the panel's inner width so they blank out whatever
     page content sits underneath (bordered rows aren't auto-padded by
-    panels.render -- only the frame/border chars are)."""
-    la, ra = term.knob_arrows()
-    lines = [
-        ("Global", 9),
-        ("  q            quit", 3),
-        ("  1 - 5        switch page: overview / advanced /", 3),
-        ("               cluster / fabric (3-4 need --cluster) / tasks", 3),
-        ("  t            toggle °C / °F", 3),
-        ("  u            toggle GiB / GB (decimal units)", 3),
-        (f"  c            cycle color theme  (now: {term.ACTIVE_THEME})", 3),
-        ("  S            save this screen as SVG (current folder)", 3),
-        ("  ?            toggle this help", 3),
-        ("", 3),
-        ("Page 1 -- overview", 9),
-        ("  n            show active NICs only", 3),
-        ("  s            sort NIC rows by rate (toggle)", 3),
-        ("  g            graphs: auto / large / compact (big-screen", 3),
-        ("               layouts need 200+ columns, or large: 120+)", 3),
-        ("  + / -        history window: 1m 5m 10m 30m 1h", 3),
-        ("  L            layout: auto / graphs / dials / dense", 3),
-        ("", 3),
-        ("Page 2 -- advanced (GPU knobs, root-gated)", 9),
-        ("  Tab          select GPU", 3),
-        ("  P            power limit knob", 3),
-        ("  C / M        SM / memory clock lock knob", 3),
-        ("  R            reset clocks", 3),
-        ("  X            toggle persistence mode", 3),
-        (f"  {la} / {ra}          adjust focused knob", 3),
-        ("  Enter        apply focused knob (confirm)", 3),
-        ("  Esc          cancel / dismiss confirm", 3),
-        ("  ! knobs write real hardware -- no warranty,", 4),
-        ("    entirely at your own risk", 4),
-        ("", 3),
-        ("Page 3 -- cluster (--cluster)", 9),
-        ("  arrows       select node", 3),
-        ("  Enter        drill into node (knobs stay local-only)", 3),
-        ("  g  + / -  L  graph size, history window, layout", 3),
-        ("  v            view: map+graphs / map / heat", 3),
-        ("  Esc          back out of a drilldown", 3),
-        ("  a            fleet matrix: alerting nodes only", 3),
-        ("  o            fleet matrix: cycle sort column", 3),
-        ("", 3),
-        ("Page 4 -- fabric validation (--cluster, 2+ members)", 9),
-        ("  space        start test (confirm) / stop immediately (no confirm)", 3),
-        ("  m            cycle mode: pair / sweep / burst", 3),
-        ("  d            cycle duration: 10s / 30s / 60s", 3),
-        ("  up / down    select pair (pair mode)", 3),
-        ("", 3),
-        ("Page 5 -- GPU tasks (others read-only)", 9),
-        ("  up / down    select GPU / session / process row", 3),
-        ("  Enter / o    open session: tmux/screen attach,", 3),
-        ("               journalctl / docker logs tail", 3),
-        ("  e            end process (SIGTERM) or session", 3),
-        ("               via tmux/screen/systemctl/docker", 3),
-        ("  k            kill process (SIGKILL) -- confirm", 3),
-        ("  a            also list bare /dev/nvidia* holders", 3),
-        ("  s            sort: GPU mem / SM / CPU / time / PID", 3),
-        ("  f            flat list per GPU / session tree", 3),
-        ("  /            filter (Enter keeps, Esc clears)", 3),
-        ("  g  + / -     graph size, history window (as page 1)", 3),
-        ("  Esc          cancel confirm, else clear the filter", 3),
-        ("", 3),
-        ("press any key to close", 6),
-    ]
-    # One column when it fits. When it doesn't -- a 30-row terminal can't
-    # show all of this -- spill into two columns rather than silently
-    # truncating the list, which used to drop whole pages' bindings off the
-    # bottom with nothing to indicate they existed.
-    col_w = 56
-    max_rows = max(4, min(len(lines), max(6, term_h - 2) - 2))
-    two_col = len(lines) > max_rows and term_w >= (col_w * 2 + 6)
+    panels.render -- only the frame/border chars are).
 
-    if two_col:
-        rows_per_col = min(max_rows, (len(lines) + 1) // 2)
-        left, right = lines[:rows_per_col], lines[rows_per_col:rows_per_col * 2]
-        width = min(term_w - 4, col_w * 2 + 3)
-        n_rows = rows_per_col
+    One column when everything fits, else two columns when the terminal
+    is wide enough, else (#16, e.g. 80x24) one column that scrolls: the
+    current page's keys come right after the global ones, "▲/▼ N more"
+    rows say what is hidden, and the closing line names the scroll keys.
+    Never a silently cut list."""
+    body = help_lines(page)
+    mode, n_rows = _help_geometry(term_w, term_h, len(body))
+    ascii_ = term.BAR_STYLE == "ascii"
+    up, down = ("^", "v") if ascii_ else ("▲", "▼")
+
+    if mode == "scroll":
+        start, end = _help_window(len(body), n_rows, scroll)
+        shown = []
+        if start:
+            shown.append((f"{up} {start} more", 6))
+        shown.extend(body[start:end])
+        if end < len(body):
+            shown.append((f"{down} {len(body) - end} more", 6))
+        keys = "up/down PgUp/PgDn" if ascii_ else "↑/↓ PgUp/PgDn"
+        shown.append((f"{keys} scroll, any other key closes", 6))
+        lines, left, right = shown, shown, []
+        n_rows = len(shown)
     else:
-        left, right = lines[:max_rows], []
-        width = min(58, max(40, term_w - 4))
-        n_rows = len(left)
+        lines = body + [("", 3), ("press any key to close", 6)]
+        if mode == "two":
+            left, right = lines[:n_rows], lines[n_rows:]
+        else:
+            left, right = lines, []
+            n_rows = len(lines)
 
+    if mode == "two":
+        width = min(term_w - 4, HELP_COL_W * 2 + 3)
+    else:
+        width = min(HELP_COL_W + 2, max(40, term_w - 4))
     inner = width - 2
     height = n_rows + 2
     x0 = max(0, (term_w - width) // 2)
@@ -519,7 +606,7 @@ def build_help_overlay(term_w, term_h):
     # they blank out the page underneath edge to edge. Starting at column 1
     # (as this did) left the first inner column showing through the overlay
     # and pushed the last char past the right border.
-    if two_col:
+    if mode == "two":
         half = inner // 2
         for i in range(n_rows):
             ltext, lslot = left[i]
