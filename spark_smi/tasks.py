@@ -692,7 +692,7 @@ def matches(proc, group, filt):
         return True
     f = filt.lower()
     hay = (str(proc.get("pid")), proc.get("name") or "", proc.get("cmd") or "", proc.get("user") or "",
-           (group or {}).get("label") or "")
+           (group or {}).get("label") or "", proc.get("node") or "")
     return any(f in str(h).lower() for h in hay)
 
 
@@ -707,7 +707,8 @@ def flatten(tree, sort="mem", flat=False, filt=""):
     key = _sort_key(sort)
     rows = []
     for root in (tree or {}).get("gpus") or []:
-        rows.append({"type": "gpu", "gpu": root, "gpu_idx": root["idx"]})
+        where = {"remote": True, "node": root.get("node")} if root.get("remote") else {}
+        rows.append(dict({"type": "gpu", "gpu": root, "gpu_idx": root["idx"]}, **where))
         groups = []
         for grp in root.get("groups") or []:
             procs = sorted((p for p in grp.get("procs") or [] if matches(p, grp, filt)), key=key)
@@ -716,18 +717,122 @@ def flatten(tree, sort="mem", flat=False, filt=""):
         if flat:
             procs = sorted(((p, grp) for grp, ps in groups for p in ps), key=lambda t: key(t[0]))
             for pi, (p, grp) in enumerate(procs):
-                rows.append({"type": "proc", "gpu_idx": root["idx"], "group": grp, "proc": p,
-                             "last": pi == len(procs) - 1, "group_last": True, "flat": True})
+                rows.append(dict({"type": "proc", "gpu_idx": root["idx"], "group": grp, "proc": p,
+                                  "last": pi == len(procs) - 1, "group_last": True, "flat": True}, **where))
             continue
         if sort != "mem":
             groups.sort(key=lambda t: key(t[1][0]))
         for gi, (grp, procs) in enumerate(groups):
             g_last = gi == len(groups) - 1
-            rows.append({"type": "group", "gpu_idx": root["idx"], "group": grp, "last": g_last})
+            rows.append(dict({"type": "group", "gpu_idx": root["idx"], "group": grp, "last": g_last}, **where))
             for pi, p in enumerate(procs):
-                rows.append({"type": "proc", "gpu_idx": root["idx"], "group": grp, "proc": p,
-                             "last": pi == len(procs) - 1, "group_last": g_last})
+                rows.append(dict({"type": "proc", "gpu_idx": root["idx"], "group": grp, "proc": p,
+                                  "last": pi == len(procs) - 1, "group_last": g_last}, **where))
     return rows
+
+
+# =========================================================================
+# Other nodes' tasks (#14 step 4, D-05). An agent shares its tree only when
+# started with --share-tasks (and, for --serve, a cluster token); command
+# lines only with --share-args too. The viewer merges what arrives below
+# its own GPUs, read-only.
+# =========================================================================
+
+READ_ONLY_NOTE = "read-only: {node}'s processes can only be viewed here"
+NOT_SHARED_NOTE = "tasks not shared · start its agent with --share-tasks"
+
+_WIRE_ROOT = ("idx", "id", "name", "util", "mem_used", "mem_total", "enc_util", "dec_util")
+_WIRE_GROUP = ("kind", "key", "label", "detail", "gpu_mem")
+_WIRE_PROC = ("pid", "name", "user", "cpu", "rss", "age", "status", "state", "gpu_mem", "sm", "membw",
+              "enc", "dec", "gpu_idx", "on_gpus", "orphan", "holder", "tty", "tty_gone")
+
+
+def wire_tree(tree, share_args=False):
+    """TaskCollector.sample()'s tree, cut to what another node may see:
+    the GPU roots, each session's kind/label, each process's numbers. The
+    handles end/open act on (tmux targets, unit names, container ids)
+    never leave, nor does proc_detail(); the command line only with
+    `share_args`."""
+    roots = []
+    for root in (tree or {}).get("gpus") or []:
+        r = {k: root.get(k) for k in _WIRE_ROOT}
+        r["groups"] = []
+        for grp in root.get("groups") or []:
+            g = {k: grp.get(k) for k in _WIRE_GROUP}
+            g["procs"] = []
+            for p in grp.get("procs") or []:
+                q = {k: p[k] for k in _WIRE_PROC if k in p}
+                if share_args:
+                    q["cmd"] = p.get("cmd") or ""
+                g["procs"].append(q)
+            r["groups"].append(g)
+        roots.append(r)
+    t = tree or {}
+    return {"shared": True, "args": bool(share_args), "gpus": roots, "n_procs": t.get("n_procs") or 0,
+            "n_orphans": t.get("n_orphans") or 0, "source": t.get("source") or "none"}
+
+
+def _note_root(name, note):
+    return {"idx": f"{name}:-", "id": None, "name": "", "node": name, "remote": True, "note": note,
+            "groups": []}
+
+
+def merge_remote(tree, views):
+    """The local tree plus, for each other cluster member, its shared GPU
+    roots (gpu_idx "node:idx", so the same pid or GPU number on two
+    machines stays two rows) or one note row saying why there is nothing.
+    Every remote root, group and process carries remote=True and its node
+    name; TaskUI and end_*/open_group_argv refuse such rows."""
+    out = dict(tree or {})
+    roots = list(out.get("gpus") or [])
+    nodes = 0
+    for v in views or []:
+        if v.get("is_local"):
+            continue
+        name = v.get("name") or "?"
+        sample = v.get("sample")
+        shared = (sample or {}).get("tasks")
+        if not sample:
+            roots.append(_note_root(name, f"no sample · {v.get('error') or 'waiting'}"[:60]))
+            continue
+        if shared is None:
+            ver = sample.get("version") or "?"
+            roots.append(_note_root(name, f"its agent ({ver}) cannot share tasks · update it"))
+            continue
+        if not shared.get("shared"):
+            roots.append(_note_root(name, NOT_SHARED_NOTE))
+            continue
+        nodes += 1
+        args = bool(shared.get("args"))
+        for root in shared.get("gpus") or []:
+            r = dict(root)
+            r["gpu_no"] = root.get("idx")
+            r["idx"] = f"{name}:{root.get('idx')}"
+            r["node"], r["remote"] = name, True
+            if v.get("stale"):
+                r["stale"] = True       # last known list, the node went quiet
+            groups = []
+            for grp in root.get("groups") or []:
+                g = dict(grp)
+                g["key"] = f"{name}:{grp.get('key')}"
+                g["node"], g["remote"] = name, True
+                g["procs"] = []
+                for p in grp.get("procs") or []:
+                    q = dict(p)
+                    q["node"], q["remote"] = name, True
+                    if not args:
+                        q["cmd"] = ""
+                        q["args_hidden"] = True
+                    g["procs"].append(q)
+                    out["n_procs"] = (out.get("n_procs") or 0) + 1
+                    if q.get("orphan"):
+                        out["n_orphans"] = (out.get("n_orphans") or 0) + 1
+                groups.append(g)
+            r["groups"] = groups
+            roots.append(r)
+    out["gpus"] = roots
+    out["nodes"] = nodes
+    return out
 
 
 # =========================================================================
@@ -969,7 +1074,10 @@ def _signal_pid(pid, force):
 
 
 def end_process(proc, force=False):
-    """Signals ONE process. (ok, msg)."""
+    """Signals ONE process. (ok, msg). Another node's process (#14 step 4)
+    is refused: its pid means nothing on this machine."""
+    if proc.get("remote"):
+        return False, READ_ONLY_NOTE.format(node=proc.get("node") or "another node")
     return _signal_pid(int(proc["pid"]), force)
 
 
@@ -984,6 +1092,8 @@ def end_group(group, force=False):
     """Ends a whole session group through its manager where one exists
     (tmux kill-pane / screen quit / systemctl stop / docker stop), else
     signals every GPU process listed in it. (ok, msg)."""
+    if group.get("remote"):
+        return False, READ_ONLY_NOTE.format(node=group.get("node") or "another node")
     kind = group.get("kind")
     try:
         if kind == "tmux" and group.get("attachable"):
@@ -1026,6 +1136,8 @@ def open_group_argv(group):
     """(argv, blocking, note) for app.py to run OUTSIDE curses, or
     (None, False, reason). Attaching/tailing is not destructive, so it isn't
     confirm-gated -- but it's still only reachable from live mode."""
+    if group.get("remote"):
+        return None, False, READ_ONLY_NOTE.format(node=group.get("node") or "another node")
     kind = group.get("kind")
     if kind == "tmux":
         if not group.get("attachable"):
@@ -1094,6 +1206,8 @@ class TaskUI:
     def _same_row(a, b):
         if a.get("type") != b.get("type"):
             return False
+        # gpu_idx is "node:idx" for another node's GPU (merge_remote), so
+        # the same pid on two machines never counts as the same row.
         if a["type"] == "proc":
             return a["proc"]["pid"] == b["proc"]["pid"] and a["gpu_idx"] == b["gpu_idx"]
         if a["type"] == "group":
@@ -1178,6 +1292,9 @@ class TaskUI:
         row = self.current()
         if row is None:
             return
+        if row.get("remote"):
+            self._toast(READ_ONLY_NOTE.format(node=row.get("node") or "another node"), 6)
+            return
         sig = "SIGKILL" if force else "SIGTERM"
         if row["type"] == "proc":
             p = row["proc"]
@@ -1226,6 +1343,9 @@ class TaskUI:
             return None
         row = self.current()
         if row is None:
+            return None
+        if row.get("remote"):
+            self._toast(READ_ONLY_NOTE.format(node=row.get("node") or "another node"), 6)
             return None
         group = row.get("group")
         if group is None:

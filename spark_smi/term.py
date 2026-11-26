@@ -413,6 +413,10 @@ def _ansi_for_slot(slot):
     return f"\033[{_ANSI_BASIC.get(slot, '37')}m"
 
 
+# C0 and C1 control characters (and DEL) -> "?" in the snapshot grid (#18).
+_CONTROL_TO_MARK = {c: "?" for c in list(range(0x20)) + list(range(0x7f, 0xa0))}
+
+
 class VirtualCurses:
     """In-memory character grid standing in for a curses window in snapshot
     mode. Implements the same duck-typed interface real curses windows use:
@@ -447,7 +451,9 @@ class VirtualCurses:
 
     def addstr(self, y, x, text, attr=None):
         if 0 <= y < self.rows and 0 <= x < self.cols:
-            for i, char in enumerate(str(text)):
+            # Text can come from another node's sample (#18): a control
+            # character must never reach the terminal render() prints to.
+            for i, char in enumerate(str(text).translate(_CONTROL_TO_MARK)):
                 if x + i < self.cols:
                     self.grid[y][x + i] = (char, attr)
 

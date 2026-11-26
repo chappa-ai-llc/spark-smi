@@ -30,7 +30,7 @@ from . import term
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "5.5.1"
+    VERSION = "5.6.0"
 DEFAULT_REFRESH_RATE = 1.0
 HIST_LEN = 60
 # Local history kept for the big-screen layouts (#14): up to an hour at 1 s.
@@ -84,6 +84,12 @@ Usage: spark-smi [options]
                    $SPARK_SMI_TOKEN_FILE (or, older setups, $SPARK_SMI_TOKEN)
                    is required as the X-Spark-Token header on /sample
   --serve-verbose  log one line per request to stderr (--serve only)
+  --share-tasks    with --serve or --json: add this node's GPU processes
+                   (session, user, numbers; no command lines) to the
+                   payload, so other nodes' page 5 lists them read-only.
+                   Off by default; --serve refuses it without a token
+  --share-args     with --share-tasks: include command lines too. They can
+                   carry passwords or keys: share only on a trusted network
   --node-name NAME show NAME instead of this machine's hostname: in the
                    header, in --json and --serve's payload, and so on every
                    cluster page (or $SPARK_SMI_NODE_NAME; 1-63 letters,
@@ -123,11 +129,12 @@ $XDG_CONFIG_HOME/spark-smi/settings.json (~/.config/spark-smi/settings.json).
                 duration · up/down select pair (pair mode) · y confirms a
                 run -- generates real RDMA/network traffic between nodes,
                 so every run is confirm-gated (see README)
-                page 5 (GPU tasks, local only): up/down select · enter/o
-                open the session (tmux/screen attach, journalctl/docker
-                logs tail) · e end (SIGTERM, or the session's own stop) ·
-                k kill (SIGKILL) · a also list bare /dev/nvidia* holders ·
-                y confirms an end/kill, anything else cancels
+                page 5 (GPU tasks; other nodes' rows are read-only):
+                up/down select · enter/o open the session (tmux/screen
+                attach, journalctl/docker logs tail) · e end (SIGTERM, or
+                the session's own stop) · k kill (SIGKILL) · a also list
+                bare /dev/nvidia* holders · y confirms an end/kill,
+                anything else cancels
 """
 
 
@@ -161,7 +168,8 @@ def _pcie_stuck_from_history(history, gen_max):
 def _parse_args(argv):
     opts = {"loop": False, "rate": DEFAULT_REFRESH_RATE, "help": False, "page": 1,
             "theme": None, "theme_list": False, "json": False, "serve": None,
-            "serve_verbose": False, "cluster": _UNSET, "node_name": None,
+            "serve_verbose": False, "share_tasks": False, "share_args": False,
+            "cluster": _UNSET, "node_name": None,
             "shot": None, "size": None, "warmup": 0.0, "background": None,
             "graphs": None, "history": None, "version": False, "unknown": None}
     i = 0
@@ -202,6 +210,10 @@ def _parse_args(argv):
                 opts["serve"] = int(argv[i])
         elif a == "--serve-verbose":
             opts["serve_verbose"] = True
+        elif a == "--share-tasks":
+            opts["share_tasks"] = True
+        elif a == "--share-args":
+            opts["share_args"] = True
         elif a == "--node-name":
             # Taken as given (even "-x"), so main() rejects a bad value with
             # its reason rather than silently reading the next flag as a name.
@@ -260,10 +272,14 @@ class State:
         self.smart = collectors.SmartCollector()
         self.pcie = collectors.PcieCollector()
         # Page 5: only sampled while page 5 is on screen (render_dashboard),
-        # never as part of sample() -- so --serve/--json/pages 1-4 pay
-        # nothing for the /proc walk, and nothing about local pids ever
-        # goes over the cluster wire format.
+        # never as part of sample() -- so pages 1-4 pay nothing for the
+        # /proc walk. --serve/--json sample it only with --share-tasks
+        # (cluster.tasks_payload), and then only tasks.wire_tree()'s cut.
         self.tasks = tasks.TaskCollector()
+        # --share-tasks / --share-args (#14 step 4): what an agent adds to
+        # its payload (cluster.tasks_payload); both off unless asked for.
+        self.share_tasks = False
+        self.share_args = False
         # Page 5's per-process history and recently-ended list (#14 step 2):
         # fed below from the GPU sample's own procs while a screen is drawn
         # (want_long), so it runs on every page; read only by page 5.
@@ -698,6 +714,13 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
             tree = state.tasks.sample(sample.get("gpus") or [], include_holders=include_holders)
         except Exception:
             tree = {"gpus": [], "n_procs": 0, "n_orphans": 0, "source": "none", "caps": {}}
+        # Cluster mode: other nodes' shared processes below ours, read-only
+        # (#14 step 4); a node that shares nothing gets one line saying why.
+        if has_cluster and cluster_ctx and cluster_ctx.get("aggregator") is not None:
+            try:
+                tree = tasks.merge_remote(tree, cluster_ctx["aggregator"].get_views())
+            except Exception:
+                pass
         view = task_ui.render_ctx() if task_ui is not None else {}
         try:
             rows = tasks.flatten(tree, sort=view.get("sort", "mem"), flat=view.get("flat", False),
@@ -715,7 +738,8 @@ def render_dashboard(stdscr, colors_map, state, active_nics_only=False, height_h
             track = None
         sel = taskpage.selected_proc_row(rows, task_ctx)
         try:
-            detail = tasks.proc_detail(sel["proc"]["pid"]) if sel else None
+            # Another node's pid means nothing here: never read /proc for it.
+            detail = tasks.proc_detail(sel["proc"]["pid"]) if sel and not sel.get("remote") else None
         except Exception:
             detail = None
         # The big layout's charts are braille: other terminals keep the
@@ -1072,8 +1096,8 @@ def main_loop(stdscr, state, rate, cluster_ctx=None):
                 stdscr.clear()
                 break
             if ch == ord('5'):
-                # Page 5 is local-only: leaving a drilldown here keeps the
-                # cluster tabs but never shows a remote node's processes.
+                # Page 5 lists this node's processes, then (cluster mode)
+                # every sharing node's below them, so a drilldown ends here.
                 if cluster_ui and cluster_ui.drilldown:
                     cluster_ui.exit_drilldown()
                 if state.page != 5:
@@ -1460,8 +1484,17 @@ def main():
         print("--warmup: give a number of seconds from 0 to 120", file=sys.stderr)
         sys.exit(1)
 
+    if opts["share_args"] and not opts["share_tasks"]:
+        print("--share-args: needs --share-tasks", file=sys.stderr)
+        sys.exit(1)
+    if opts["share_tasks"] and not (opts["json"] or opts["serve"] is not None):
+        print("--share-tasks: only means something with --serve or --json", file=sys.stderr)
+        sys.exit(1)
+
     state = State(opts["rate"])
     state.page = opts["page"]
+    state.share_tasks = opts["share_tasks"]
+    state.share_args = opts["share_args"]
     saved = load_settings()
     graphs = opts["graphs"] if opts["graphs"] is not None else saved.get("graphs", "auto")
     if graphs not in bigpage.GRAPH_MODES:
@@ -1492,6 +1525,10 @@ def main():
     # the render paths below -- this process IS the server, nothing else.
     if opts["serve"] is not None:
         token, source = _token_or_exit("--serve")
+        if state.share_tasks and not token:
+            print("--share-tasks: --serve shares processes only behind the cluster token; "
+                  "put it in a file and name it in $SPARK_SMI_TOKEN_FILE", file=sys.stderr)
+            sys.exit(1)
         cluster.run_server(state, port=opts["serve"], verbose=opts["serve_verbose"],
                            token=token, token_source=source)
         return
@@ -1537,19 +1574,21 @@ def main():
             if cluster_ctx:
                 cluster_ctx["aggregator"].stop()
     else:
-        if cluster_ctx and state.page in (3, 4):
-            # Snapshot mode has no background thread ticking -- one blocking
-            # poll round (2s cap, spec) gets every member's freshest sample
-            # before the single render. Page 4 in snapshot mode still only
-            # ever DISPLAYS results (fab_ui/fab_engine are never constructed
-            # below) -- this poll is just for the header/MATRIX node list.
-            cluster_ctx["aggregator"].poll_once_sync(budget=2.0)
         # --warmup: fill the history ring buffers the way live mode does, one
         # sample a second, so the single render below can draw its graphs.
         state.want_long = True
         for _ in range(int(warmup)):
             state.sample()
             time.sleep(1.0)
+        if cluster_ctx and state.page in (3, 4, 5):
+            # Snapshot mode has no background thread ticking -- one blocking
+            # poll round (2s cap, spec), after any warmup so no member reads
+            # as stale, gets every member's freshest sample before the
+            # single render. Page 4 in snapshot mode still only ever
+            # DISPLAYS results (fab_ui/fab_engine are never constructed
+            # below) -- this poll is just for the header/MATRIX node list;
+            # page 5 lists the sharing nodes' processes from it.
+            cluster_ctx["aggregator"].poll_once_sync(budget=2.0)
         if opts["shot"] is not None:
             cols = size[0] if size else shutil.get_terminal_size((140, 50)).columns
             size = (max(40, min(cols, 400)), (size[1] if size and size[1] else SHOT_ROWS))

@@ -6,6 +6,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.6.0] — 2026-11-26
+
+Other nodes' GPU tasks on page 5 ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14), step 4).
+
+### Added
+
+- **Other nodes' GPU processes on page 5.** In cluster mode, page 5 lists
+  this machine's processes, then each other node's under rows such as
+  `node-2 · GPU 0`. They are read-only: `e`, `k` and `Enter` say so and do
+  nothing. A node that shares nothing gets one line saying why (not
+  shared, an agent too old, or no answer). The filter matches node names.
+- **`--share-tasks`** (with `--serve` or `--json`): the agent adds its GPU
+  processes to its sample, without command lines, working folders,
+  environment or session handles. Off by default. `--serve` refuses it
+  without the shared token.
+- **`--share-args`** (with `--share-tasks`): command lines too.
+
+### Changed
+
+- `--page 3`, `4` and `5` snapshots in cluster mode poll the other nodes
+  after `--warmup`, so no node reads as stale.
+
+### Security
+
+- Snapshot output and `--shot` pictures replace control characters with
+  `?` ([#18](https://github.com/chappa-ai-llc/spark-smi/issues/18)). A
+  string from another node's sample, such as a process or GPU name, could
+  otherwise reach the viewer's terminal as an escape sequence.
+
 ## [5.5.1] — 2026-11-26
 
 ### Fixed
@@ -580,6 +609,7 @@ is still there, on page 1.
 
 - Initial public release.
 
+[5.6.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.6.0
 [5.5.1]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.5.1
 [5.5.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.5.0
 [5.4.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.4.0

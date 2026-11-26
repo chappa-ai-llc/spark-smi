@@ -29,11 +29,12 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 from . import node
+from . import tasks
 
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "5.5.1"
+    VERSION = "5.6.0"
 
 DEFAULT_PORT = 8817
 POLL_TIMEOUT = 0.75          # per-member urllib timeout (spec)
@@ -135,11 +136,26 @@ def build_json_payload(state):
     one flat dict."""
     sample = state.sample()
     payload = to_wire(sample)
+    payload["tasks"] = tasks_payload(state, sample)
     payload["node"] = node.display_name()
     payload["model"] = machine_model()
     payload["version"] = VERSION
     payload["ts"] = time.time()
     return payload
+
+
+def tasks_payload(state, sample):
+    """The payload's "tasks" key (#14 step 4): {"shared": False} unless
+    this agent was started with --share-tasks (state.share_tasks), then
+    tasks.wire_tree() of a fresh TaskCollector sample -- command lines only
+    with --share-args too. A failure shares nothing rather than raise."""
+    if not getattr(state, "share_tasks", False):
+        return {"shared": False}
+    try:
+        tree = state.tasks.sample(sample.get("gpus") or [])
+        return tasks.wire_tree(tree, share_args=getattr(state, "share_args", False))
+    except Exception:
+        return {"shared": False}
 
 
 def dumps(payload):
