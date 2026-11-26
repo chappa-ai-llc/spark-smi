@@ -130,7 +130,9 @@ def task_cols(tier, cc, spark_w=0):
 
 
 def _proc_hist(track, row):
-    if not track or row.get("type") != "proc":
+    # History is this machine's (ProcTracker); another node's pid may
+    # match a local one, so its rows never read it.
+    if not track or row.get("type") != "proc" or row.get("remote"):
         return None
     root = row.get("gpu_id")
     if root is None:
@@ -146,10 +148,14 @@ def _task_row(row, cols, glyphs, selected, track=None, rate=1.0):
     sel_slot = 9
     if row["type"] == "gpu":
         g = row["gpu"]
+        if g.get("note"):
+            # Another node with nothing to list: say why, on one line.
+            return [(sel, sel_slot), (glyphs["gpu"], 9), (f"{g.get('node')}  ", 9), (g["note"], 6)], []
         n = sum(len(gr.get("procs") or []) for gr in g.get("groups") or [])
         mem = sum(gr.get("gpu_mem") or 0 for gr in g.get("groups") or [])
         util = g.get("util")
-        left = [(sel, sel_slot), (glyphs["gpu"], 9), (f"GPU {g['idx']}  ", 9), (str(g.get("name") or ""), 8)]
+        where = f"{g.get('node')} · GPU {g.get('gpu_no')}" if g.get("remote") else f"GPU {g['idx']}"
+        left = [(sel, sel_slot), (glyphs["gpu"], 9), (f"{where}  ", 9), (str(g.get("name") or ""), 8)]
         bits = []
         if util not in (None, "N/A"):
             try:
@@ -159,7 +165,10 @@ def _task_row(row, cols, glyphs, selected, track=None, rate=1.0):
         bits.append(f"{n} proc" + ("" if n == 1 else "s"))
         if mem:
             bits.append(term.fmt_mem(mem))
-        return left, [("  ·  ".join(bits), 3)]
+        right = [("  ·  ".join(bits), 3)]
+        if g.get("stale"):
+            right = [("stale  ·  ", 5)] + right
+        return left, right
     if row["type"] == "group":
         g = row["group"]
         n = len(g.get("procs") or [])
@@ -308,11 +317,15 @@ def _build_tasks_panel(y, x0, width, tree, rows, cols, ui, height_avail, track=N
     content rows (frame excluded); `fill` pads to exactly that."""
     inner = width - 2
     glyphs = _tree_glyphs()
-    n_gpus = len(tree.get("gpus") or [])
+    n_gpus = sum(1 for g in tree.get("gpus") or [] if not g.get("note"))
+    n_nodes = tree.get("nodes") or 0
     n_procs = tree.get("n_procs") or 0
     n_orph = tree.get("n_orphans") or 0
     n_sess = sum(len(g.get("groups") or []) for g in tree.get("gpus") or [])
-    title = [("GPU TASKS", 9), (f"  {n_gpus} GPU" + ("" if n_gpus == 1 else "s"), 3),
+    title = [("GPU TASKS", 9), (f"  {n_gpus} GPU" + ("" if n_gpus == 1 else "s"), 3)]
+    if n_nodes:
+        title.append((f" on {n_nodes + 1} nodes", 3))
+    title += [
              (f" · {n_procs} process" + ("" if n_procs == 1 else "es"), 3)]
     if n_sess:
         title.append((f" · {n_sess} session" + ("" if n_sess == 1 else "s"), 3))
@@ -425,7 +438,12 @@ def detail_fields(row, detail, now):
     p = row["proc"]
     g = row.get("group") or {}
     d = detail or {}
-    out = [("command", p.get("cmd") or p.get("name") or "?")]
+    cmd = p.get("cmd") or p.get("name") or "?"
+    if p.get("args_hidden"):
+        cmd += "  (arguments not shared by its node)"
+    out = [("command", cmd)]
+    if row.get("remote"):
+        out.append(("node", f"{row.get('node')} · read-only here"))
     sess = g.get("label") or ""
     if g.get("detail"):
         sess += f" · {g['detail']}"
@@ -437,7 +455,9 @@ def detail_fields(row, detail, now):
     if d.get("ppid"):
         user += f"  ppid {d['ppid']}" + (f" {d['parent']}" if d.get("parent") else "")
     out.append(("user", user))
-    started = _when(d.get("started"), now)
+    # Another node's process has no proc_detail(): its age dates it.
+    born = d.get("started") or (now - p["age"] if row.get("remote") and p.get("age") is not None else None)
+    started = _when(born, now)
     if p.get("age") is not None:
         started += f" · up {_fmt_age(p['age'])}"
     if d.get("threads"):
@@ -449,7 +469,8 @@ def detail_fields(row, detail, now):
         out.append(("gpu env", "  ".join(f"{k}={v}" for k, v in d["env"])))
     if d.get("devices"):
         out.append(("devices", " · ".join(d["devices"])))
-    ctx = f"GPU {row.get('gpu_idx')}"
+    gpu_no = str(row.get("gpu_idx")).rsplit(":", 1)[-1] if row.get("remote") else row.get("gpu_idx")
+    ctx = f"GPU {gpu_no}"
     if p.get("gpu_mem"):
         ctx += f" · {term.fmt_mem(p['gpu_mem'])}"
     if len(p.get("on_gpus") or []) > 1:
@@ -575,8 +596,12 @@ def _build_detail_panel(y, x0, width, height, row, detail, track, rate, span, cc
             lines.append(_clip_runs([(f"{k:<9}", 6), (v, 3)], fw))
         if ui and body >= len(lines) + 3:
             lines += [[] for _ in range(body - len(lines) - 2)]
-            lines.append(_clip_runs([("e", 9), (" end (SIGTERM)  ", 6), ("k", 9), (" kill (SIGKILL)", 6)], fw))
-            lines.append(_clip_runs([("every action asks y to confirm", 6)], fw))
+            if row.get("remote"):
+                lines.append(_clip_runs([(f"{row.get('node')}'s process: view only", 6)], fw))
+                lines.append(_clip_runs([("end or kill it on its own node", 6)], fw))
+            else:
+                lines.append(_clip_runs([("e", 9), (" end (SIGTERM)  ", 6), ("k", 9), (" kill (SIGKILL)", 6)], fw))
+                lines.append(_clip_runs([("every action asks y to confirm", 6)], fw))
         charts = _detail_charts(row, track, cw, body, span, rate, cc, mem_top) if cw >= 30 else []
         for i in range(body):
             segs = _row(1, lines[i]) if i < len(lines) else []
@@ -608,7 +633,10 @@ def _build_detail_panel(y, x0, width, height, row, detail, track, rate, span, cc
             panel.add_row(r)
     while len(panel.rows) < body - (2 if keys else 0):
         panel.add_row([])
-    if keys:
+    if keys and row.get("remote"):
+        panel.add_row(_row(1, [(f"{row.get('node')}'s process: view only", 6)]))
+        panel.add_row(_row(1, [("end or kill it on its own node", 6)]))
+    elif keys:
         panel.add_row(_row(1, keys))
         panel.add_row(_row(1, [("every action asks y to confirm; another user's process needs root", 6)]))
     return panel
@@ -730,7 +758,7 @@ def _build_tasks_footer(x0, width, y, sample, ui, theme_toast=None):
     if ui and ui.get("editing"):
         p = panels.Panel(y, x0, width, kind="plain")
         p.rows.append(([(" filter: ", 9), ((ui.get("filter") or "") + "_", 8),
-                        ("   pid, name, command, user or session · Enter keep · Esc clear", 6)], []))
+                        ("   pid, name, command, user, session or node · Enter keep · Esc clear", 6)], []))
         return p
     ud = "↑↓" if term.BAR_STYLE != "ascii" else "up/dn"
     if ui is None:
@@ -772,7 +800,7 @@ def _gpu_ids(rows, tree):
     roots = {r["idx"]: r for r in (tree or {}).get("gpus") or []}
     for r in rows:
         root = roots.get(r.get("gpu_idx")) or {}
-        r["gpu_id"] = root.get("id")
+        r["gpu_id"] = None if root.get("remote") else root.get("id")
         r["gpu_mem_total"] = root.get("mem_total")
     return rows
 
@@ -835,7 +863,9 @@ def build_page5(sample, tree, rows, tier, width, x0=0, height=None, ui=None, the
 def _build_large(sample, tree, rows, width, x0, height, ui, theme_toast, cluster_tabs, has_perf,
                  track, detail, span, cc, sel_row, rate, now):
     out = [pages._build_header(x0, width, "wide", page=5, cluster_tabs=cluster_tabs, has_perf=has_perf)]
-    roots = tree.get("gpus") or []
+    # GPU cards chart this machine's history, so only local GPUs get one;
+    # other nodes' GPUs are rows in the table below.
+    roots = [r for r in tree.get("gpus") or [] if not r.get("remote")]
     gpus = sample.get("gpus") or []
     caps = (sample.get("caps") or {}).get("gpu") or []
     y = 1

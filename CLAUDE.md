@@ -18,6 +18,7 @@ python spark-smi.py --page 5      # GPU tasks page (read-only here; live mode ad
 python spark-smi.py --ascii       # force plain-ASCII bars/frames regardless of terminal detection
 python spark-smi.py --theme nord  # one of 10 themes; `c` cycles them in live mode
 python spark-smi.py --serve       # read-only sample agent on :8817 (GET /sample, /healthz)
+python spark-smi.py --serve --share-tasks  # + GPU process list (token required; --share-args adds cmdlines)
 python spark-smi.py -l --cluster a,b,c   # pages 3 (fleet) and 4 (fabric tests) need this
 python spark-smi.py --json        # one sample as JSON to stdout, then exit
 python spark-smi.py --version     # print the version; unknown options exit 1 (#15)
@@ -29,7 +30,7 @@ rendering against real hardware over ssh (see `scratchpad/`, gitignored, for
 the deploy/record helpers). Unit tests cover the release script and a few
 pure pieces (cluster token reader, node names, the network counter rules,
 the ethtool netlink codec, themes, graphs, SVG shots, page 3's topology map,
-page 5's session grouping and confirm gate, page 5's tracker/sort/filter/
+page 5's session grouping and confirm gate, page 5's remote tasks (wire cut, merge, read-only gates), page 5's tracker/sort/filter/
 layouts, the big-screen page 1, page 3's big layout and cluster history,
 page 2's big layout and normal-page height fit, and page 4's big layout and run history): `python3 -m unittest discover -s deploy` and
 `python3 -m unittest discover -s tests` (the second needs psutil installed). Packaging is setuptools via
@@ -103,7 +104,9 @@ spark_smi/
                   version is kept in sync with this literal by hand — dynamic
                   versioning from this file is not wired up) and __version__.
   term.py         Terminal capability detection (BAR_STYLE eighths/blocks/
-                  ascii, 256-color palette), VirtualCurses, make_bar/seg_bar/
+                  ascii, 256-color palette), VirtualCurses (its addstr
+                  turns control characters into "?", #18: remote samples
+                  reach it), make_bar/seg_bar/
                   core_strip/sparkline, fmt_temp/fmt_mem/fmt_rate, knob_arrows.
   collectors.py   CpuCollector, MemoryCollector, GpuCollector, NetCollector,
                   DiskCollector, ThermalCollector, SmartCollector. Each probes
@@ -136,8 +139,10 @@ spark_smi/
                   from the viewer's own polls (None on a failed poll),
                   exposed as view["hist"], never on the wire;
                   fabric_nics() and node_power() are the one rule page 3
-                  uses for "fabric" and "power". Has NO code path that
-                  writes anything.
+                  uses for "fabric" and "power". tasks_payload(): the
+                  payload's "tasks" key, {"shared": False} unless
+                  --share-tasks (state.share_tasks), then tasks.wire_tree().
+                  Has NO code path that writes anything.
   color.py        Colour maths: xterm-256 RGB, OKLab mix, WCAG contrast,
                   nearest xterm colour under a contrast floor. Stdlib only.
   shot.py         SVG pictures of a VirtualCurses grid (--shot, live `S`):
@@ -167,7 +172,13 @@ spark_smi/
                   detail pane's facts; environment limited to DETAIL_ENV),
                   and end_process()/end_group()/open_group_argv() -- the
                   only code that signals or runs a session manager. Live
-                  mode only constructs TaskUI.
+                  mode only constructs TaskUI. wire_tree() cuts a tree to
+                  what an agent may share (no cmd unless --share-args, no
+                  end/open handles); merge_remote() appends other nodes'
+                  roots (gpu_idx "node:idx", remote=True on every row) or a
+                  note root; TaskUI, end_* and open_group_argv refuse
+                  remote rows, and page 5 never calls proc_detail() or
+                  reads ProcTracker history for them.
   taskpage.py     Page 5's drawing (#4, #14 step 2): build_page5() takes
                   the tree, rows, TaskUI ctx, ProcTracker snapshot and
                   proc_detail; normal layout (tree, PROCESS pane, recently

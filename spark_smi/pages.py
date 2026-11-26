@@ -18,7 +18,7 @@ from . import topomap
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "5.5.1"
+    VERSION = "5.6.0"
 
 # The header shows the major.minor series ("4.0"). Derived from VERSION rather
 # than written out, because a hardcoded literal here silently drifted a whole
@@ -236,7 +236,7 @@ def _cluster_tabs_compact(page, has_perf=False):
     return "".join(_tab(n) if n == page else str(n) for n in nums) + "  "
 
 
-# Page 5 (GPU tasks) is local-only but always available, so it sits on the
+# Page 5 (GPU tasks) needs no --cluster and is always available, so it sits on the
 # plain 2-tab bar too; the 3/4 gap is deliberate -- those numbers are the
 # --cluster pages, and keeping 5 stable across both bars means the key never
 # moves depending on how spark-smi was launched.
@@ -471,7 +471,7 @@ def build_help_overlay(term_w, term_h):
         ("  d            cycle duration: 10s / 30s / 60s", 3),
         ("  up / down    select pair (pair mode)", 3),
         ("", 3),
-        ("Page 5 -- GPU tasks (local only)", 9),
+        ("Page 5 -- GPU tasks (others read-only)", 9),
         ("  up / down    select GPU / session / process row", 3),
         ("  Enter / o    open session: tmux/screen attach,", 3),
         ("               journalctl / docker logs tail", 3),

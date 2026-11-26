@@ -2,7 +2,7 @@
 
 > A terminal-based system monitor (TUI) built for **NVIDIA Grace Blackwell (GB10)** and hybrid ARM architectures — because `nvidia-smi` alone doesn't tell the full story.
 
-![Version](https://img.shields.io/badge/version-5.5.1-blue)
+![Version](https://img.shields.io/badge/version-5.6.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8%2B-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Linux%20aarch64-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -101,7 +101,7 @@ between nodes — per rail, node-to-node, or all nodes at once — and charts th
 result live while correlating each NIC's ASIC temperature against sustained
 load. Every run is behind an explicit confirm. See "Fabric validation" below.
 
-**Page 5 — GPU tasks** (`5`, live mode, this machine only): every process
+**Page 5 — GPU tasks** (`5`): every process
 holding a GPU context, as a tree. Each GPU is a root; below it, processes are
 grouped by where they live — a tmux pane, a screen session, a docker
 container, a systemd unit, an ssh login or a plain terminal — and processes
@@ -133,8 +133,15 @@ process or a whole session through its own manager (`tmux kill-pane`,
 asks `y`/`N` first. A process owned by another user needs passwordless sudo,
 and another user's tmux server cannot be attached. `a` also lists processes
 that only hold `/dev/nvidia*` open (monitoring tools, an idle CUDA context).
-Snapshot mode (`--page 5`) shows the same tree read-only. In cluster mode
-page 5 always shows the local machine.
+Snapshot mode (`--page 5`) shows the same tree read-only.
+
+In cluster mode, page 5 lists this machine's processes first, then each
+other node's, under rows such as `node-2 · GPU 0`. Another node shares its
+list only when its agent runs with `--share-tasks` (see "Other nodes' GPU
+tasks" below); a node that doesn't gets one line saying why. Other nodes'
+rows are **read-only**: `e`, `k` and `Enter` only say so, because a PID
+from another machine means nothing here. End or open them on their own node.
+The filter also matches node names.
 
 ### History graphs
 
@@ -444,7 +451,7 @@ directory, plus ASIC temperature from the NIC's own hwmon device.
 |:---:|:---:|:---|
 | `q` | all | Quit |
 | `1` / `2` | all | Switch page (overview / advanced) |
-| `5` | all | GPU tasks page (this machine's processes, even in cluster mode) |
+| `5` | all | GPU tasks page (this machine's processes; in cluster mode, then other nodes' shared ones, read-only) |
 | `3` | all | Cluster page (only live with `--cluster`; inert otherwise) |
 | `4` | all | Fabric validation page (only live with `--cluster` and 2+ members; inert otherwise) |
 | `t` | all | Toggle temperature units (°C / °F) |
@@ -479,7 +486,7 @@ directory, plus ASIC temperature from the NIC's own hwmon device.
 | `a` | 5 | Also list processes that only hold `/dev/nvidia*` open |
 | `s` | 5 | Sort processes: GPU memory / SM % / CPU % / run time / PID |
 | `f` | 5 | Flat list per GPU (the session shows in brackets) / back to the session tree |
-| `/` | 5 | Filter by PID, name, command line, user or session; type, then `Enter` keeps it, `Esc` clears it |
+| `/` | 5 | Filter by PID, name, command line, user, session or node; type, then `Enter` keeps it, `Esc` clears it |
 | `Esc` | 5 | Cancel the pending confirm, else clear the filter |
 
 Page 5 can end other people's work: `e` and `k` stop running GPU jobs, and
@@ -593,6 +600,12 @@ spark-smi [options]
                    $SPARK_SMI_TOKEN_FILE (or, older setups, $SPARK_SMI_TOKEN)
                    is required as the X-Spark-Token header on /sample
   --serve-verbose  log one line per request to stderr (--serve only)
+  --share-tasks    with --serve or --json: add this node's GPU processes
+                   (session, user, numbers; no command lines) to the
+                   payload, so other nodes' page 5 lists them read-only.
+                   Off by default; --serve refuses it without a token
+  --share-args     with --share-tasks: include command lines too. They can
+                   carry passwords or keys: share only on a trusted network
   --node-name NAME show NAME instead of this machine's hostname: in the
                    header, in --json and --serve's payload, and so on every
                    cluster page (or $SPARK_SMI_NODE_NAME; 1-63 letters,
@@ -724,6 +737,28 @@ Copy the same file to each node, and set the same variable where you run
 - `$SPARK_SMI_TOKEN` (the token itself in the environment) still works for
   older setups, but other processes of the same user can read it from
   `/proc`. Set one variable, not both.
+
+### Other nodes' GPU tasks
+
+An agent never sends its process list unless you ask. To let other nodes'
+page 5 list this node's GPU processes, start its agent with `--share-tasks`:
+
+```bash
+SPARK_SMI_TOKEN_FILE=~/.config/spark-smi/token spark-smi --serve --share-tasks
+```
+
+- `--serve --share-tasks` refuses to start without the shared token, so the
+  list is never open on the port.
+- It sends, per GPU process: PID, name, user, CPU, resident memory, GPU
+  memory, SM / encoder / decoder %, age, and the kind and name of its
+  session (tmux, docker, systemd, ssh, terminal). It does **not** send
+  command lines, working folders, environment variables, or the handles
+  page 5 uses to end or open a session.
+- Add `--share-args` to send each command line too. A command line can
+  carry a password or an API key, so do this only on a network you trust.
+- Viewers see the processes read-only, and the sample is taken at most
+  once a second however many viewers poll.
+- An agent older than 5.6 cannot share; page 5 names its version.
 
 ---
 
@@ -902,6 +937,17 @@ and the PROCESS pane with its charts. Captured live with 5.1, redacted the
 same way.
 
 ![Page 5 on a big screen](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page5-big.png)
+
+**Page 5 in cluster mode.** The local node's GPU processes, then node-2's,
+shared by its agent with `--share-tasks` (no command lines). A node-2
+process is selected: the pane marks it read-only and shows what was
+shared. Its SM column reads `-` because that node's agent has no NVML
+bindings, so it cannot report per-process SM. Captured live with 5.6 at
+160 × 45 with the `S` key; account names, the model path, a command's
+arguments, the process and the container name were replaced with
+`[markers]` before publishing.
+
+![Page 5 in cluster mode](https://raw.githubusercontent.com/chappa-ai-llc/spark-smi/main/screenshots/page5-cluster.png)
 
 ---
 
@@ -1161,7 +1207,8 @@ all fixed in 4.0 — see the [changelog](CHANGELOG.md).
 - [X] **Big-screen cluster page** — cluster dials, a telemetry column per node and a GPU heat grid on page 3 (5.2); up to 16 nodes with memory and temperature charts for ultrawide and 4K (5.3)
 - [X] **Big-screen advanced page** — clock, power, temperature, PCIe, per-port fabric and congestion charts, a thermal heat grid and wall power on page 2 (5.4)
 - [X] **Big-screen fabric page** — a tall per-rail chart, every node's fabric traffic and the run history on page 4 (5.5)
-- [ ] **Other nodes' GPU tasks** — page 5 for a remote node, opt-in on its agent, arguments hidden by default ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14))
+- [X] **Other nodes' GPU tasks** — page 5 lists other nodes' GPU processes read-only, opt-in on each agent (`--share-tasks`), command lines only with `--share-args` (5.6)
+- [ ] **Layout presets** — `L` presets and a layout file ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14))
 
 ---
 
