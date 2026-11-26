@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.5.1] — 2026-11-26
+
+### Fixed
+
+- The normal page 2 fits a short terminal
+  ([#17](https://github.com/chappa-ai-llc/spark-smi/issues/17)). It used to
+  run past the bottom at 200 × 45 on a node with two GPUs and many
+  sensors. THERMALS now gets the rows the other panels leave: more sensors
+  per row first, then without the duplicate zones, then without bars. Then
+  PCIE LINKS lists only links below full speed and counts the rest, then
+  POWER RAILS shows only the main rails. If it is still too tall, a last line says how
+  many sensors are hidden. A tall terminal looks as before.
+
 ## [5.5.0] — 2026-11-25
 
 Page 4 on big screens ([#14](https://github.com/chappa-ai-llc/spark-smi/issues/14)).
@@ -567,6 +580,7 @@ is still there, on page 1.
 
 - Initial public release.
 
+[5.5.1]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.5.1
 [5.5.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.5.0
 [5.4.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.4.0
 [5.3.0]: https://github.com/chappa-ai-llc/spark-smi/releases/tag/v5.3.0
