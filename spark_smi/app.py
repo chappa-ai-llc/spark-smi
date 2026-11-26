@@ -30,7 +30,7 @@ from . import term
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "5.5.0"
+    VERSION = "5.5.1"
 DEFAULT_REFRESH_RATE = 1.0
 HIST_LEN = 60
 # Local history kept for the big-screen layouts (#14): up to an hour at 1 s.

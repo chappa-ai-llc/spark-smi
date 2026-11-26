@@ -18,7 +18,7 @@ from . import topomap
 try:
     from . import VERSION
 except ImportError:
-    VERSION = "5.5.0"
+    VERSION = "5.5.1"
 
 # The header shows the major.minor series ("4.0"). Derived from VERSION rather
 # than written out, because a hardcoded literal here silently drifted a whole
@@ -1635,14 +1635,15 @@ def _pcie_status_cell(row, gpu_by_addr):
     return "⚠ degraded", 5
 
 
-def _build_pcie_links_panel(y, x0, width, pcie_links, gpus):
+def _build_pcie_links_panel(y, x0, width, pcie_links, gpus, problems_only=False):
     """One row per PCIe endpoint (storage/NVMe, network, display/3D),
     collectors.PcieCollector's sort order already applied (degraded first,
     then gpu > nvme/storage > network, then address). Caller (build_page2)
     only invokes this when `pcie_links` is non-empty -- the panel is absent
     entirely on a platform with no /sys/bus/pci/devices tree (Windows/macOS
     dev boxes), matching the rest of this module's "no sensor, no row" rule
-    at the whole-panel level."""
+    at the whole-panel level. `problems_only` (a short terminal, #17) keeps
+    the rows whose status is not "ok" and counts the rest in one row."""
     inner = width - 2
     p = panels.Panel(y, x0, width,
                       title=[("PCIE LINKS", 9),
@@ -1653,8 +1654,12 @@ def _build_pcie_links_panel(y, x0, width, pcie_links, gpus):
         return p
 
     gpu_by_addr = {g.get("pci_addr"): g for g in (gpus or []) if g.get("pci_addr")}
+    hidden_ok = 0
     for row in pcie_links:
         status_text, status_slot = _pcie_status_cell(row, gpu_by_addr)
+        if problems_only and status_text == "ok":
+            hidden_ok += 1
+            continue
         right = [(status_text, status_slot)]
         f = _Flow(inner - 1 - _right_reserve(right))
         name = row.get("name") or "?"
@@ -1683,20 +1688,37 @@ def _build_pcie_links_panel(y, x0, width, pcie_links, gpus):
                 max_txt += f" (dev {' '.join(dev_bits)})"
             f.try_add(max_txt, 6)
         p.add_row(_finish_row(f, 1), right=right)
+    if hidden_ok:
+        more = "more " if hidden_ok < len(pcie_links) else ""
+        p.add_row([(1, f"{hidden_ok} {more}link{'s' if hidden_ok != 1 else ''} at full speed · "
+                       "a taller terminal lists them", 6)], right=[("ok", 1)])
     return p
 
 
 # --- THERMALS / POWER RAILS / NVME SMART ---------------------------------
 
-def _build_thermals_panel(y, x0, width, entries, kind="top", paired=False, show_bars=True, has_spbm=False):
+THERMAL_LABEL_W = 14
+THERMAL_CELL_BARS = THERMAL_LABEL_W + 20   # label, temp, an 11-cell bar
+THERMAL_CELL_PLAIN = THERMAL_LABEL_W + 8   # label and temp only
+
+
+def thermal_default_per_row(inner, paired):
+    """Entries per THERMALS row when height is no concern: one in the
+    paired (half-width) card, two in the full-width card when two cells
+    with bars fit."""
+    if paired:
+        return 1
+    return 2 if inner >= THERMAL_CELL_BARS * 2 else 1
+
+
+def _build_thermals_panel(y, x0, width, entries, kind="top", paired=False, show_bars=True, has_spbm=False,
+                          per_row=None, max_rows=None):
     """`paired` is True in the wide-tier THERMALS/NVME-SMART side-by-side
-    layout: that card has plenty of per-row width (~50+ cols) for a single
-    "label temp bar" entry, so it always packs ONE entry per row WITH its
-    bar -- two-per-row packing is for the full-width standalone variant
-    only (cramming two cells into half the width is what silently starved
-    the bar of room before). `show_bars` only applies in that standalone
-    mode; the paired layout never drops bars (see build_page2's degrade
-    order: it drops the Zone-A..G group first instead)."""
+    layout. `per_row` packs that many entries per row (default:
+    thermal_default_per_row); a cell narrower than THERMAL_CELL_BARS drops
+    its bar, and `show_bars` False drops them all. `max_rows` caps the
+    content rows: past it the last row says how many sensors are hidden
+    (#17, build_page2 picks these from the height it has)."""
     inner = width - 2
     title = [("THERMALS", 9), (" zones + hwmon · spbm" if has_spbm else " zones + hwmon", 3)]
     p = panels.Panel(y, x0, width, title=title, kind=kind)
@@ -1704,25 +1726,21 @@ def _build_thermals_panel(y, x0, width, entries, kind="top", paired=False, show_
         p.add_row([(1, "no thermal sensors detected", 6)])
         return p
 
-    label_w = 14
-    if paired:
-        for e in entries:
-            f = _Flow(inner - 1)
-            f.try_add_multi([(f"{e['label'][:label_w]:<{label_w}}", 3), (f"{term.fmt_temp(e['temp_c']):>5} ", 8)])
-            lb, rb = term.bar_brackets()
-            bar, slot = term.make_bar(max(0.0, min(e["temp_c"], 100.0)), 11)
-            f.try_add_multi([(lb, 10), (bar, slot), (rb, 10)])
-            p.add_row(_finish_row(f))
-        return p
-
-    per_row = 2 if inner >= (label_w + 20) * 2 else 1
-    show_bars = show_bars and inner // per_row >= label_w + 20
+    label_w = THERMAL_LABEL_W
+    if per_row is None:
+        per_row = thermal_default_per_row(inner, paired)
+    per_row = max(1, per_row)
     cell_w = inner // per_row
-    for i in range(0, len(entries), per_row):
-        chunk = entries[i:i + per_row]
+    show_bars = show_bars and cell_w >= THERMAL_CELL_BARS
+    first_col = 2 if paired else 1
+    shown = entries
+    if max_rows is not None and -(-len(entries) // per_row) > max_rows:
+        shown = entries[:max(0, max_rows - 1) * per_row]
+    for i in range(0, len(shown), per_row):
+        chunk = shown[i:i + per_row]
         row = []
         for j, e in enumerate(chunk):
-            f = _Flow(cell_w - 1)
+            f = _Flow((inner if per_row == 1 else cell_w) - 1)
             f.try_add_multi([(f"{e['label'][:label_w]:<{label_w}}", 3), (f"{term.fmt_temp(e['temp_c']):>5} ", 8)])
             if show_bars:
                 lb, rb = term.bar_brackets()
@@ -1730,9 +1748,12 @@ def _build_thermals_panel(y, x0, width, entries, kind="top", paired=False, show_
                 f.try_add_multi([(lb, 10), (bar, slot), (rb, 10)])
             segs = list(f.segs)
             if segs:
-                segs[0] = (j * cell_w + 1, segs[0][1], segs[0][2])
+                segs[0] = (j * cell_w + first_col, segs[0][1], segs[0][2])
             row.extend(segs)
         p.add_row(row)
+    hidden = len(entries) - len(shown)
+    if hidden:
+        p.add_row([(first_col, f"+{hidden} more sensors · a taller terminal shows all", 6)])
     return p
 
 
@@ -1896,6 +1917,42 @@ def page2_footer(state, x0, width, y, knob_ui=None, theme_toast=None, remote=Non
                          extra_keys=extra_keys, knob_ui=footer_knob_ui, remote_note=remote_note)
 
 
+def _page2_thermal_fit(entries, inner, paired, has_spbm, pcie, tail, budget):
+    """Fits page 2's THERMALS card into the rows the rest of the page
+    leaves (#17). `budget` is the rows from where PCIE LINKS would start to
+    the footer (None: no height limit); `pcie(compact)` builds the panels
+    above THERMALS and `tail(essentials)` the ones below it, both at y=0.
+    Tries, gentlest first: the default packing, more entries per row with
+    bars, the same without the duplicate Zone-A.. group (only once spbm
+    names its own), more entries per row without bars; then the same with
+    PCIE LINKS cut to its problem rows, then with POWER RAILS' essentials;
+    last a "+N more" row. Returns (config, above panels, tail panels)."""
+    default = thermal_default_per_row(inner, paired)
+    cfg = {"entries": entries, "bars": True, "per_row": default, "max_rows": None}
+    if budget is None:
+        return cfg, pcie(False), tail(False)
+    sets = [entries]
+    zoneless = [e for e in entries if e.get("kind") != "thermal"]
+    if has_spbm and len(zoneless) < len(entries):
+        sets.append(zoneless)
+    max_bars = max(default, inner // THERMAL_CELL_BARS)
+    max_plain = max(max_bars, inner // THERMAL_CELL_PLAIN)
+    tried = []
+    for ents in sets:
+        tried += [(ents, True, n) for n in range(default, max_bars + 1)]
+    tried += [(sets[-1], False, n) for n in range(max_bars + 1, max_plain + 1)]
+    for compact, essentials in ((False, False), (True, False), (True, True)):
+        above, below = pcie(compact), tail(essentials)
+        # Content rows THERMALS may use: its border, its closing border and
+        # the gap under it, then each other panel's own rows the same way.
+        rows = budget - 2 - sum(p.total_height + 1 for p in above + below)
+        for ents, bars, n in tried:
+            if -(-len(ents) // n) <= rows:
+                return dict(cfg, entries=ents, bars=bars, per_row=n), above, below
+    ents, n = sets[-1], max_plain
+    return dict(cfg, entries=ents, bars=n <= max_bars, per_row=n, max_rows=max(1, rows)), above, below
+
+
 def build_page2(state, tier, width, x0=0, height=None, knob_ui=None, theme_toast=None,
                  remote=None, cluster_tabs=False, has_perf=False):
     """Builds page 2: header (ADVANCED tab active), one full-width detail
@@ -1934,30 +1991,6 @@ def build_page2(state, tier, width, x0=0, height=None, knob_ui=None, theme_toast
     has_spbm = bool(thermal_caps.get("spbm"))
     paired = tier == "wide" and width >= 90
 
-    # Height degrade order differs by layout: the paired (side-by-side)
-    # THERMALS card always has room for one-entry-per-row WITH its bar (see
-    # _build_thermals_panel), so it degrades by dropping the redundant
-    # Zone-A..G group (only once spbm's own named zones are live) before it
-    # ever touches bars; the standalone full-width card has no zone
-    # redundancy to shed, so it degrades by dropping bars first instead.
-    drop_zones = False
-    show_thermal_bars = True
-    essentials_only = False
-    if height:
-        if paired:
-            if height < 42:
-                drop_zones = has_spbm
-            if height < 36:
-                essentials_only = True
-        else:
-            if height < 45:
-                show_thermal_bars = False
-            if height < 38:
-                essentials_only = True
-
-    if drop_zones:
-        thermal_entries = [e for e in thermal_entries if e.get("kind") != "thermal"]
-
     out.append(_build_header(x0, width, tier, page=2, cluster_tabs=cluster_tabs, remote=remote, has_perf=has_perf))
     y = 1
 
@@ -1984,45 +2017,64 @@ def build_page2(state, tier, width, x0=0, height=None, knob_ui=None, theme_toast
     # collector found nothing -- e.g. Windows/macOS dev boxes with no
     # /sys/bus/pci/devices tree at all, matching the POWER RAILS panel's
     # "only build it when there's something to show" gating just below.
-    if pcie_links:
+    def pcie(compact):
+        if not pcie_links:
+            return []
         try:
-            pcie_panel = _build_pcie_links_panel(y, x0, width, pcie_links, gpus)
-            out.append(pcie_panel)
-            y += pcie_panel.total_height + 1
+            return [_build_pcie_links_panel(0, x0, width, pcie_links, gpus, problems_only=compact)]
         except Exception:
-            pass
+            return []
 
     show_rails = has_spbm and bool(power_rails)
+    if paired:
+        half = (width - 2) // 2
+        th_w, sm_x, sm_w = half, x0 + half + 2, width - half - 2
+    else:
+        th_w, sm_x, sm_w = width, x0, width
+
+    def tail(essentials):
+        # Panels below THERMALS, built at y=0 and moved once its height is
+        # known: POWER RAILS, then NVME SMART unless it sits beside THERMALS.
+        built = []
+        try:
+            if show_rails:
+                built.append(_build_power_rails_panel(0, x0, width, power_rails,
+                                                      essentials_only=essentials, knob_ui=knob_ui))
+            if not paired:
+                built.append(_build_nvme_smart_panel(0, x0, width, smart))
+        except Exception:
+            pass
+        return built
+
+    footer_rows = len(page2_footer(state, x0, width, 0, knob_ui, theme_toast, remote).rows)
+    th_cfg, above, tail_panels = _page2_thermal_fit(
+        thermal_entries, th_w - 2, paired, has_spbm, pcie, tail,
+        None if not height else height - y - footer_rows)
+    for panel in above:
+        panel.y = y
+        out.append(panel)
+        y += panel.total_height + 1
+    try:
+        sm_panel = _build_nvme_smart_panel(y, sm_x, sm_w, smart) if paired else None
+    except Exception:
+        sm_panel = None
 
     try:
-        if paired:
-            half = (width - 2) // 2
-            w1, w2 = half, width - half - 2
-            th_panel = _build_thermals_panel(y, x0, w1, thermal_entries, paired=True, has_spbm=has_spbm)
-            sm_panel = _build_nvme_smart_panel(y, x0 + w1 + 2, w2, smart)
-            out.append(th_panel)
+        th_panel = _build_thermals_panel(y, x0, th_w, th_cfg["entries"], paired=paired, has_spbm=has_spbm,
+                                         show_bars=th_cfg["bars"], per_row=th_cfg["per_row"],
+                                         max_rows=th_cfg["max_rows"])
+        out.append(th_panel)
+        block = th_panel.total_height
+        if sm_panel is not None:
             out.append(sm_panel)
-            y += max(th_panel.total_height, sm_panel.total_height) + 1
-            if show_rails:
-                rails_panel = _build_power_rails_panel(y, x0, width, power_rails,
-                                                         essentials_only=essentials_only, knob_ui=knob_ui)
-                out.append(rails_panel)
-                y += rails_panel.total_height + 1
-        else:
-            th_panel = _build_thermals_panel(y, x0, width, thermal_entries,
-                                              show_bars=show_thermal_bars, has_spbm=has_spbm)
-            out.append(th_panel)
-            y += th_panel.total_height + 1
-            if show_rails:
-                rails_panel = _build_power_rails_panel(y, x0, width, power_rails,
-                                                         essentials_only=essentials_only, knob_ui=knob_ui)
-                out.append(rails_panel)
-                y += rails_panel.total_height + 1
-            sm_panel = _build_nvme_smart_panel(y, x0, width, smart)
-            out.append(sm_panel)
-            y += sm_panel.total_height + 1
+            block = max(block, sm_panel.total_height)
+        y += block + 1
     except Exception:
         pass
+    for panel in tail_panels:
+        panel.y = y
+        out.append(panel)
+        y += panel.total_height + 1
 
     out.append(page2_footer(state, x0, width, y, knob_ui, theme_toast, remote))
     return out

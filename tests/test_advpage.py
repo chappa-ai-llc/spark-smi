@@ -173,3 +173,81 @@ class AdvHistoryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NormalPage2FitTest(unittest.TestCase):
+    """The normal page 2 fits the height it is given (#17)."""
+
+    def setUp(self):
+        self._style = term.BAR_STYLE
+        term.BAR_STYLE = "eighths"
+
+    def tearDown(self):
+        term.BAR_STYLE = self._style
+
+    def _page(self, w, h, sample=None):
+        from spark_smi import pages
+        tier = pages.tier_for_width(w)
+        cw = pages.content_width(tier, w)
+        built = pages.build_page2(sample or _sample(long=False), tier, cw, 0, height=h)
+        return built, "\n".join(_text(built, cw, h + 40))
+
+    def _assert_fits(self, built, h):
+        footer = built[-1]
+        self.assertLessEqual(footer.y + len(footer.rows), h)
+        for p in built:
+            self.assertLess(p.y, footer.y + 1)
+
+    def test_issue_case_fits_with_every_sensor(self):
+        built, text = self._page(200, 45)
+        self._assert_fits(built, 45)
+        self.assertEqual(sum(f"sensor_{i} " in text for i in range(27)), 27)
+        self.assertNotIn("more sensors", text)
+
+    def test_short_terminal_says_what_is_hidden(self):
+        built, text = self._page(100, 36)
+        self._assert_fits(built, 36)
+        shown = sum(f"sensor_{i} " in text for i in range(27))
+        self.assertIn(f"+{27 - shown} more sensors", text)
+
+    def test_tall_terminal_keeps_one_sensor_per_row(self):
+        built, text = self._page(200, 70)
+        th = next(p for p in built if p.title and p.title[0][0] == "THERMALS")
+        self.assertEqual(len(th.rows), 27)
+
+    def test_no_height_keeps_default(self):
+        from spark_smi import pages
+        built = pages.build_page2(_sample(long=False), "wide", 160, 0)
+        th = next(p for p in built if p.title and p.title[0][0] == "THERMALS")
+        self.assertEqual(len(th.rows), 27)
+
+    def test_zone_duplicates_go_before_bars(self):
+        s = _sample(long=False)
+        s["thermal"] = s["thermal"] + [{"label": f"Zone-{c}", "temp_c": 40.0, "kind": "thermal"} for c in "ABCDEFG"]
+        built, text = self._page(200, 45, s)
+        self._assert_fits(built, 45)
+        self.assertNotIn("Zone-A", text)
+        self.assertIn("▕", text.split("THERMALS")[1].split("POWER RAILS")[0])
+        built, text = self._page(200, 60, s)
+        self.assertIn("Zone-A", text)
+
+    def test_every_height_fits_once_the_fixed_panels_do(self):
+        for w in (80, 100, 120, 200):
+            for h in range(36, 61):
+                built, _ = self._page(w, h)
+                self._assert_fits(built, h)
+
+    def test_pcie_links_shrink_to_their_problems_before_sensors_hide(self):
+        s = _sample(long=False)
+        s["pcie_links"] = [{"name": "GeForce RTX 3090", "addr": "0004:01:00.0", "class_label": "gpu",
+                            "gen_cur": 1, "width_cur": 4, "gen_max_eff": 4, "width_max_eff": 4, "degraded": True}]
+        s["pcie_links"] += [{"name": "ConnectX-7", "addr": f"000{i}:01:00.0", "class_label": "network",
+                             "gen_cur": 5, "width_cur": 4, "gen_max_eff": 5, "width_max_eff": 4,
+                             "degraded": False} for i in range(5)]
+        built, text = self._page(200, 70, s)
+        self.assertNotIn("at full speed", text)
+        built, text = self._page(100, 42, s)
+        self._assert_fits(built, 42)
+        self.assertIn("RTX 3090", text)
+        self.assertIn("5 more links at full speed", text)
+        self.assertNotIn("0001:01:00.0", text)

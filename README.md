@@ -2,7 +2,7 @@
 
 > A terminal-based system monitor (TUI) built for **NVIDIA Grace Blackwell (GB10)** and hybrid ARM architectures — because `nvidia-smi` alone doesn't tell the full story.
 
-![Version](https://img.shields.io/badge/version-5.5.0-blue)
+![Version](https://img.shields.io/badge/version-5.5.1-blue)
 ![Python](https://img.shields.io/badge/python-3.8%2B-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Linux%20aarch64-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -368,7 +368,12 @@ one line) rather than clipping anything away:
 
 If a tier's content still doesn't fit the available height, things degrade
 further in this order: sparklines drop first, then the memory legend row,
-then NIC rows collapse into a single summary line.
+then NIC rows collapse into a single summary line. Page 2 measures what is
+left for THERMALS and fits it: more sensors per row first, then without the
+duplicate Zone-A… group (once the spbm driver names its own sensors), then
+without bars, then PCIE LINKS lists only links below full speed, then
+POWER RAILS shows only its main rails. If that is still too tall, a last
+line says how many sensors are hidden.
 
 Bar rendering itself has a separate three-tier auto-detection (sub-cell
 `eighths` resolution on UTF-8 terminals, whole-cell `blocks` on framebuffer

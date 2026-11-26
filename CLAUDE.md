@@ -31,7 +31,7 @@ pure pieces (cluster token reader, node names, the network counter rules,
 the ethtool netlink codec, themes, graphs, SVG shots, page 3's topology map,
 page 5's session grouping and confirm gate, page 5's tracker/sort/filter/
 layouts, the big-screen page 1, page 3's big layout and cluster history,
-page 2's big layout, and page 4's big layout and run history): `python3 -m unittest discover -s deploy` and
+page 2's big layout and normal-page height fit, and page 4's big layout and run history): `python3 -m unittest discover -s deploy` and
 `python3 -m unittest discover -s tests` (the second needs psutil installed). Packaging is setuptools via
 `pyproject.toml`; the pip entry point is `spark-smi = spark_smi.__main__:main`.
 
@@ -306,9 +306,13 @@ it down to 120 columns); see `bigpage.py`. Pages 2 to 5 use the same gate at lar
 `HIST_LONG` (3600) samples per series but exposes only `HIST_LEN` (60) in
 the sample's own `*history` keys -- the long buffers ride in
 `sample["long"]`, built only when `state.want_long` (a screen is drawn),
-and `cluster.to_wire()` drops them. Height degradation, applied in `build_page1`/`build_page2`
+and `cluster.to_wire()` drops them. Height degradation, applied in `build_page1`
 when a `height` hint is given, drops content in this order: sparklines →
-memory legend row → NIC rows collapse to one summary line. The other way,
+memory legend row → NIC rows collapse to one summary line. `build_page2`
+measures instead (#17): `_page2_thermal_fit` gives THERMALS the rows the
+other panels leave and picks more entries per row → no Zone-A.. duplicates
+(spbm only) → no bars → PCIE LINKS problem rows only → POWER RAILS
+essentials → a "+N more sensors" row. The other way,
 spare height opens mirrored history rows (`term.mirror_chart`, 4 rows each,
 `pages.MIRROR_ROWS`): NICs first, then disks (needs rx/tx_history and
 read/write_history, which `State.sample` keeps; snapshot only with --warmup).
